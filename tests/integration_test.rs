@@ -1,0 +1,452 @@
+mod common;
+
+use anyhow::Result;
+use async_trait::async_trait;
+use atoma::infra::persistence::session as file_session;
+use std::collections::HashMap;
+use std::path::Path;
+use std::sync::{Arc, Mutex};
+use tempfile::tempdir;
+
+use atoma::application::runner::run;
+use atoma::domain::agent::{AgentDef, ParsedAgentDef};
+use atoma::domain::ports::{
+    AgentDefPort, LlmChoice, LlmResponse, McpFactory, McpPort, SessionPort, ToolDefPort,
+};
+use atoma::domain::session::{Message, Session};
+use atoma::domain::tool::ToolDef;
+
+use common::mock_llm::MockLlmClient;
+use common::mock_mcp::MockMcpRegistry;
+
+// ── Minimal stub adapters ─────────────────────────────────────────────────────
+
+/// Returns a fixed `ParsedAgentDef` regardless of path.
+struct StubAgentDefPort {
+    agent_def: AgentDef,
+}
+
+impl AgentDefPort for StubAgentDefPort {
+    fn parse(&self, _path: &Path) -> Result<ParsedAgentDef> {
+        Ok(ParsedAgentDef {
+            frontmatter: self.agent_def.clone(),
+            body: None,
+        })
+    }
+}
+
+/// Always returns an empty / default session.
+struct StubSessionPort;
+
+impl SessionPort for StubSessionPort {
+    fn load(&self, _path: &Path) -> Result<Session> {
+        Ok(Session::default())
+    }
+    fn save(&self, _session: &Session, _path: &Path) -> Result<()> {
+        Ok(())
+    }
+}
+
+/// Returns an empty tool map.
+struct StubToolDefPort;
+
+impl ToolDefPort for StubToolDefPort {
+    fn load(&self, _path: &Path) -> Result<HashMap<String, ToolDef>> {
+        Ok(HashMap::new())
+    }
+}
+
+/// Returns a tool map with a single entry for the given key.
+struct SingleEntryToolDefPort {
+    key: String,
+    tool_def: ToolDef,
+}
+
+impl SingleEntryToolDefPort {
+    fn new(key: &str) -> Self {
+        Self {
+            key: key.to_string(),
+            tool_def: ToolDef {
+                name: key.to_string(),
+                command: "echo".to_string(),
+                args: vec![],
+                env: HashMap::new(),
+                hooks: atoma::domain::tool::Hooks::default(),
+            },
+        }
+    }
+}
+
+impl ToolDefPort for SingleEntryToolDefPort {
+    fn load(&self, _path: &Path) -> Result<HashMap<String, ToolDef>> {
+        let mut map = HashMap::new();
+        map.insert(self.key.clone(), self.tool_def.clone());
+        Ok(map)
+    }
+}
+
+/// An MCP factory that always returns the provided mock registry.
+struct StubMcpFactory {
+    registry: std::sync::Mutex<Option<MockMcpRegistry>>,
+}
+
+impl StubMcpFactory {
+    fn new(registry: MockMcpRegistry) -> Self {
+        Self {
+            registry: std::sync::Mutex::new(Some(registry)),
+        }
+    }
+}
+
+#[async_trait]
+impl McpFactory for StubMcpFactory {
+    async fn build(&self, _tool_defs: &[ToolDef]) -> Result<Box<dyn McpPort + Send>> {
+        let registry = self
+            .registry
+            .lock()
+            .unwrap()
+            .take()
+            .expect("StubMcpFactory: registry already consumed");
+        Ok(Box::new(registry))
+    }
+}
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+
+fn minimal_agent(name: &str) -> AgentDef {
+    AgentDef {
+        name: name.to_string(),
+        description: "Test agent".to_string(),
+        model: "gpt-4o-mini".to_string(),
+        provider: None,
+        knows_about: vec![],
+        mcp_servers: vec![],
+        extra_body: HashMap::new(),
+        metadata: None,
+    }
+}
+
+fn agent_def_path() -> std::path::PathBuf {
+    tempdir().unwrap().into_path().join("agent.md")
+}
+
+// ── Integration tests ─────────────────────────────────────────────────────────
+
+/// Single text response with finish_reason "stop".
+#[tokio::test]
+async fn test_single_text_response() {
+    let llm = MockLlmClient::new().enqueue_text("Hello from the agent!");
+
+    let agent_port = StubAgentDefPort {
+        agent_def: minimal_agent("TestAgent"),
+    };
+    let session_port = StubSessionPort;
+    let tool_def_port = StubToolDefPort;
+    let mcp_factory = StubMcpFactory::new(MockMcpRegistry::new());
+
+    let dir = tempdir().unwrap();
+    let agent_path = dir.path().join("agent.md");
+
+    // Write a dummy file so the path exists (the stub ignores it, but runner
+    // reads the parent directory for knows_about expansion).
+    std::fs::write(&agent_path, "").unwrap();
+
+    let result = run(
+        agent_path,
+        None,
+        vec![],
+        None,
+        None,
+        None,
+        None,
+        10,
+        None,
+        &llm,
+        &agent_port,
+        &session_port,
+        &tool_def_port,
+        &mcp_factory,
+    )
+    .await;
+
+    assert!(result.is_ok(), "Expected Ok, got: {:?}", result);
+}
+
+/// Tool call followed by final text response.
+#[tokio::test]
+async fn test_tool_call_then_text_response() {
+    use common::mock_llm::make_tool_call;
+
+    let tool_call = make_tool_call("c1", "test_tool", r#"{"input":"hello"}"#);
+    let llm = MockLlmClient::new()
+        .enqueue_tool_calls(vec![tool_call])
+        .enqueue_text("Done!");
+
+    let mut registry = MockMcpRegistry::new()
+        .with_tool("test_tool", "A test tool")
+        .with_response("test_tool", "tool result");
+
+    let agent_def = AgentDef {
+        mcp_servers: vec!["test_server".to_string()],
+        ..minimal_agent("ToolAgent")
+    };
+
+    let agent_port = StubAgentDefPort { agent_def };
+    let session_port = StubSessionPort;
+    let tool_def_port = SingleEntryToolDefPort::new("test_server");
+    let mcp_factory = StubMcpFactory::new(registry);
+
+    let dir = tempdir().unwrap();
+    let agent_path = dir.path().join("agent.md");
+    std::fs::write(&agent_path, "").unwrap();
+    let tools_path = dir.path().join("tools.yaml");
+    std::fs::write(&tools_path, "").unwrap();
+
+    let result = run(
+        agent_path,
+        None,
+        vec![],
+        None,
+        None,
+        None,
+        Some(tools_path),
+        10,
+        None,
+        &llm,
+        &agent_port,
+        &session_port,
+        &tool_def_port,
+        &mcp_factory,
+    )
+    .await;
+
+    assert!(result.is_ok(), "Expected Ok, got: {:?}", result);
+}
+
+/// Max iterations exceeded returns an error.
+#[tokio::test]
+async fn test_max_iterations_exceeded() {
+    use common::mock_llm::make_tool_call;
+
+    // LLM always requests tool calls — never stops.
+    let tool_call = || make_tool_call("c1", "test_tool", "{}");
+    let llm = MockLlmClient::new()
+        .enqueue_tool_calls(vec![tool_call()])
+        .enqueue_tool_calls(vec![tool_call()])
+        .enqueue_tool_calls(vec![tool_call()]);
+
+    let registry = MockMcpRegistry::new()
+        .with_tool("test_tool", "looping tool")
+        .with_response("test_tool", "ok");
+
+    let agent_def = AgentDef {
+        mcp_servers: vec!["srv".to_string()],
+        ..minimal_agent("LoopAgent")
+    };
+
+    let agent_port = StubAgentDefPort { agent_def };
+    let session_port = StubSessionPort;
+    let tool_def_port = SingleEntryToolDefPort::new("srv");
+    let mcp_factory = StubMcpFactory::new(registry);
+
+    let dir = tempdir().unwrap();
+    let agent_path = dir.path().join("agent.md");
+    std::fs::write(&agent_path, "").unwrap();
+    let tools_path = dir.path().join("tools.yaml");
+    std::fs::write(&tools_path, "").unwrap();
+
+    let result = run(
+        agent_path,
+        None,
+        vec![],
+        None,
+        None,
+        None,
+        Some(tools_path),
+        2, // max 2 iterations
+        None,
+        &llm,
+        &agent_port,
+        &session_port,
+        &tool_def_port,
+        &mcp_factory,
+    )
+    .await;
+
+    assert!(result.is_err());
+    let msg = format!("{}", result.unwrap_err());
+    assert!(
+        msg.contains("maximum iterations"),
+        "Expected max iterations error, got: {}",
+        msg
+    );
+}
+
+/// content_filter finish_reason returns an error.
+#[tokio::test]
+async fn test_content_filter_returns_error() {
+    use atoma::domain::ports::{LlmChoice, LlmResponse};
+    use atoma::domain::session::Message;
+
+    struct ContentFilterLlm;
+    #[async_trait]
+    impl atoma::domain::ports::LlmPort for ContentFilterLlm {
+        async fn chat_completion(
+            &self,
+            _model: &str,
+            _messages: &[Message],
+            _tools: Option<&[serde_json::Value]>,
+            _extra_body: &HashMap<String, serde_json::Value>,
+        ) -> Result<LlmResponse> {
+            Ok(LlmResponse {
+                choices: vec![LlmChoice {
+                    message: Message::assistant(Some("filtered"), None),
+                    finish_reason: Some("content_filter".to_string()),
+                }],
+                usage: None,
+            })
+        }
+    }
+
+    let agent_port = StubAgentDefPort {
+        agent_def: minimal_agent("FilterAgent"),
+    };
+    let session_port = StubSessionPort;
+    let tool_def_port = StubToolDefPort;
+    let mcp_factory = StubMcpFactory::new(MockMcpRegistry::new());
+
+    let dir = tempdir().unwrap();
+    let agent_path = dir.path().join("agent.md");
+    std::fs::write(&agent_path, "").unwrap();
+
+    let result = run(
+        agent_path,
+        None,
+        vec![],
+        None,
+        None,
+        None,
+        None,
+        10,
+        None,
+        &ContentFilterLlm,
+        &agent_port,
+        &session_port,
+        &tool_def_port,
+        &mcp_factory,
+    )
+    .await;
+
+    assert!(result.is_err());
+    let msg = format!("{}", result.unwrap_err());
+    assert!(
+        msg.contains("content filter"),
+        "Expected content filter error, got: {}",
+        msg
+    );
+}
+
+#[tokio::test]
+async fn test_context_session_is_injected_but_not_persisted() {
+    struct RecordingLlm {
+        seen_messages: Arc<Mutex<Vec<Message>>>,
+    }
+
+    #[async_trait]
+    impl atoma::domain::ports::LlmPort for RecordingLlm {
+        async fn chat_completion(
+            &self,
+            _model: &str,
+            messages: &[Message],
+            _tools: Option<&[serde_json::Value]>,
+            _extra_body: &HashMap<String, serde_json::Value>,
+        ) -> Result<LlmResponse> {
+            *self.seen_messages.lock().unwrap() = messages.to_vec();
+
+            Ok(LlmResponse {
+                choices: vec![LlmChoice {
+                    message: Message::assistant(Some("Done!"), None),
+                    finish_reason: Some("stop".to_string()),
+                }],
+                usage: None,
+            })
+        }
+    }
+
+    let seen_messages = Arc::new(Mutex::new(Vec::new()));
+    let llm = RecordingLlm {
+        seen_messages: seen_messages.clone(),
+    };
+
+    let agent_port = StubAgentDefPort {
+        agent_def: minimal_agent("ContextAgent"),
+    };
+    let session_port = atoma::infra::persistence::session::FileSessionAdapter;
+    let tool_def_port = StubToolDefPort;
+    let mcp_factory = StubMcpFactory::new(MockMcpRegistry::new());
+
+    let dir = tempdir().unwrap();
+    let agent_path = dir.path().join("agent.md");
+    let in_session_path = dir.path().join("input-session.json");
+    let context_session_path = dir.path().join("context-session.json");
+    let out_session_path = dir.path().join("out-session.json");
+    std::fs::write(&agent_path, "").unwrap();
+
+    let mut persisted_session = Session::default();
+    persisted_session
+        .messages
+        .push(Message::user("persistent history"));
+    file_session::save(&persisted_session, &in_session_path).unwrap();
+
+    let mut context_session = Session::default();
+    context_session
+        .messages
+        .push(Message::system("ignored system context"));
+    context_session
+        .messages
+        .push(Message::user("ephemeral context"));
+    file_session::save(&context_session, &context_session_path).unwrap();
+
+    let result = run(
+        agent_path,
+        Some(in_session_path),
+        vec![context_session_path],
+        None,
+        Some(out_session_path.clone()),
+        None,
+        None,
+        10,
+        None,
+        &llm,
+        &agent_port,
+        &session_port,
+        &tool_def_port,
+        &mcp_factory,
+    )
+    .await;
+
+    assert!(result.is_ok(), "Expected Ok, got: {:?}", result);
+
+    let seen = seen_messages.lock().unwrap().clone();
+    assert_eq!(seen.len(), 3);
+    assert_eq!(seen[0].role, "system");
+    assert_eq!(
+        seen[1].content.as_ref().and_then(|value| value.as_str()),
+        Some("ephemeral context")
+    );
+    assert_eq!(
+        seen[2].content.as_ref().and_then(|value| value.as_str()),
+        Some("persistent history")
+    );
+
+    let saved = file_session::load(&out_session_path).unwrap();
+    let saved_texts: Vec<&str> = saved
+        .messages
+        .iter()
+        .filter_map(|message| message.content.as_ref().and_then(|value| value.as_str()))
+        .collect();
+
+    assert!(saved_texts.contains(&"persistent history"));
+    assert!(saved_texts.contains(&"Done!"));
+    assert!(!saved_texts.contains(&"ephemeral context"));
+}

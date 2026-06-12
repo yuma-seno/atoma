@@ -1,0 +1,69 @@
+name: Atoma Entry
+
+on:
+  issues:
+    types: [opened, labeled]
+
+permissions:
+  actions: write
+  issues: write
+  pull-requests: write
+  contents: write
+
+jobs:
+  route:
+    runs-on: ubuntu-latest
+    outputs:
+      agent: ${{ steps.resolve.outputs.agent }}
+      number: ${{ steps.resolve.outputs.number }}
+      type: ${{ steps.resolve.outputs.type }}
+      notify: ${{ steps.resolve.outputs.notify }}
+    steps:
+      - name: Resolve agent and context
+        id: resolve
+        shell: bash
+        env:
+          NUMBER: ${{ github.event.issue.number }}
+          LABEL_NAME: ${{ github.event.label.name }}
+          EVENT_ACTION: ${{ github.event.action }}
+          SENDER: ${{ github.event.sender.login }}
+        run: |
+          AGENT=""
+          if [ "$EVENT_ACTION" = "labeled" ]; then
+            case "$LABEL_NAME" in
+              atoma/*) AGENT="${LABEL_NAME#atoma/}" ;;
+            esac
+          fi
+          if [ "$EVENT_ACTION" = "opened" ]; then
+            FIRST_LINE=$(python3 -c "import json,sys; b=json.load(sys.stdin).get('issue',{}).get('body',''); print(b.strip().split(chr(10))[0] if b else '')" < "$GITHUB_EVENT_PATH")
+            case "$FIRST_LINE" in
+              /*) AGENT="${FIRST_LINE#/}" ;;
+            esac
+          fi
+          if [ -z "$AGENT" ]; then
+            exit 0
+          fi
+          echo "agent=${AGENT}" >> "$GITHUB_OUTPUT"
+          echo "number=${NUMBER}" >> "$GITHUB_OUTPUT"
+          echo "type=issue" >> "$GITHUB_OUTPUT"
+          echo "notify=${SENDER}" >> "$GITHUB_OUTPUT"
+
+      - name: Add reaction to issue
+        if: steps.resolve.outputs.agent != ''
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          NUMBER: ${{ github.event.issue.number }}
+        run: |
+          gh api --method POST "repos/${GITHUB_REPOSITORY}/issues/${NUMBER}/reactions" -f content="eyes" 2>/dev/null || true
+
+  run:
+    needs: route
+    if: needs.route.outputs.agent != ''
+    uses: ./.github/workflows/atoma-runner.yml
+    with:
+      agent: ${{ needs.route.outputs.agent }}
+      number: ${{ needs.route.outputs.number }}
+      type: ${{ needs.route.outputs.type }}
+      notify: ${{ needs.route.outputs.notify }}
+    secrets: inherit

@@ -1,0 +1,64 @@
+{
+  "$schema": "./orchestration.schema.json",
+  "version": 1,
+  "dispatch": {
+    "workflow": "atoma-runner.yml"
+  },
+  "agents": {
+    "orchestrator": {
+      "shared_context": {
+        "include_event_types": [
+          "issue_opened",
+          "issue_comment",
+          "linked_issue_opened",
+          "linked_issue_comment",
+          "pr_opened",
+          "pr_comment",
+          "pr_review",
+          "pr_review_comment",
+          "pr_diff"
+        ]
+      }
+    },
+    "engineer": {
+      "shared_context": {
+        "include_event_types": [
+          "issue_opened",
+          "issue_comment",
+          "linked_issue_opened",
+          "linked_issue_comment",
+          "pr_opened",
+          "pr_comment",
+          "pr_review",
+          "pr_review_comment",
+          "pr_diff"
+        ]
+      }
+    },
+    "reviewer": {
+      "shared_context": {
+        "include_event_types": [
+          "pr_opened",
+          "pr_comment",
+          "pr_review",
+          "pr_review_comment",
+          "pr_diff",
+          "linked_issue_opened",
+          "linked_issue_comment"
+        ]
+      }
+    }
+  },
+  "scripts": {
+    "create_pr": {
+      "dispatch_agent": "reviewer"
+    },
+    "push_commits": {
+      "dispatch_agent": "reviewer"
+    },
+    "create_sub_issue": {
+      "notify_agent": "orchestrator",
+      "trigger_agent": "engineer"
+    }
+  }
+}

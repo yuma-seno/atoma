@@ -1,0 +1,409 @@
+name: 'Atoma – Finalize'
+description: >
+  Finalize an Atoma GitHub run: post result comments, tag session metadata,
+  save the session cache, dispatch the next agent, and report failures.
+
+inputs:
+  agent_name:
+    description: 'Current agent name'
+    required: true
+
+  number:
+    description: 'Issue or PR number'
+    required: true
+
+  type:
+    description: 'Context type: issue or pr'
+    required: true
+
+  notify:
+    description: 'GitHub login to mention when the run completes without a directive'
+    required: false
+    default: ''
+
+  job_status:
+    description: 'Current job status'
+    required: true
+
+  atoma_outcome:
+    description: 'Outcome of the Atoma step'
+    required: false
+    default: ''
+
+  new_event_count:
+    description: 'Number of new shared-context events for this run'
+    required: false
+    default: '0'
+
+  context_snapshot_hash:
+    description: 'Hash of the filtered shared GitHub context snapshot'
+    required: false
+    default: ''
+
+  context_event_count:
+    description: 'Number of messages written to context-session.json'
+    required: false
+    default: '0'
+
+  resolved_number:
+    description: 'Canonical number stored with the session metadata'
+    required: false
+    default: ''
+
+  session_cache_key:
+    description: 'Session cache key prefix returned by the prepare action'
+    required: false
+    default: ''
+
+  directive:
+    description: 'Next agent directive extracted from the first line of the result'
+    required: false
+    default: ''
+
+  max_iterations_reached:
+    description: 'true when the agent hit the iteration limit'
+    required: false
+    default: 'false'
+
+  orchestration_file:
+    description: 'Path to orchestration JSON config'
+    required: false
+    default: '.github/atoma/orchestration.json'
+
+outputs:
+  comment_id:
+    description: 'GitHub comment ID created for the result comment'
+    value: ${{ steps.post.outputs.comment_id }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Post result
+      if: >-
+        inputs.atoma_outcome == 'success' &&
+        inputs.new_event_count != '0'
+      id: post
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+        NUMBER: ${{ inputs.number }}
+        AGENT: ${{ inputs.agent_name }}
+        NOTIFY: ${{ inputs.notify }}
+        DIRECTIVE: ${{ inputs.directive }}
+        RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        MAX_ITER: ${{ inputs.max_iterations_reached }}
+      run: |
+        {
+          echo "<!-- atoma:agent=${AGENT} -->"
+          cat atoma_output.txt
+          echo ""
+
+          # Append token usage if available
+          if [ -f atoma_logs.txt ]; then
+            USAGE=$(grep -m1 "ATOMA_TOKEN_USAGE:" atoma_logs.txt 2>/dev/null || true)
+            if [ -n "$USAGE" ]; then
+              PROMPT=$(echo "$USAGE"     | grep -oP 'prompt=\K[0-9]+')
+              COMPLETION=$(echo "$USAGE" | grep -oP 'completion=\K[0-9]+')
+              TOTAL=$(echo "$USAGE"      | grep -oP 'total=\K[0-9]+')
+              echo ""
+              echo "---"
+              echo "_Tokens: ${TOTAL:-?} total (${PROMPT:-?} prompt + ${COMPLETION:-?} completion)_"
+              # Rough cost estimate (DeepSeek V4 Flash pricing)
+              if [ -n "$PROMPT" ] && [ -n "$COMPLETION" ]; then
+                COST=$(awk "BEGIN { printf \"%.4f\", ${PROMPT} * 0.15 / 1000000 + ${COMPLETION} * 0.60 / 1000000 }" 2>/dev/null || true)
+                if [ -n "$COST" ]; then
+                  echo "_Estimated cost: \$${COST}_"
+                fi
+              fi
+            fi
+          fi
+
+          if [ -z "$DIRECTIVE" ] && [ -n "$NOTIFY" ]; then
+            echo "@${NOTIFY} — **${AGENT}** task completed. No agent will be automatically executed next. Please review the results or provide instructions for the next step."
+            echo ""
+          fi
+          echo "---"
+          echo "_run by [${AGENT}](${RUN_URL})_"
+          [ "$MAX_ITER" = "true" ] && \
+            echo "⚠️ _Max iterations reached. Comment \`/${AGENT}\` to continue._"
+        } > _comment.txt
+
+        python3 - <<'PY'
+        import json
+        from pathlib import Path
+
+        body = Path("_comment.txt").read_text(encoding="utf-8")
+        Path("_comment.json").write_text(
+            json.dumps({"body": body}, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        PY
+
+        COMMENT_ID=$(gh api "repos/${GITHUB_REPOSITORY}/issues/${NUMBER}/comments" \
+          --method POST \
+          --input _comment.json \
+          --jq '.id')
+        rm -f _comment.json
+        echo "comment_id=${COMMENT_ID}" >> "$GITHUB_OUTPUT"
+        echo "Posted comment ID: ${COMMENT_ID}"
+
+    - name: Add eyes reaction on agent handoff
+      if: >-
+        inputs.atoma_outcome == 'success' &&
+        steps.post.outputs.comment_id != '' &&
+        inputs.directive != ''
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+        COMMENT_ID: ${{ steps.post.outputs.comment_id }}
+      run: |
+        gh api --method POST \
+          "repos/${GITHUB_REPOSITORY}/issues/comments/${COMMENT_ID}/reactions" \
+          -f content="eyes" 2>/dev/null || true
+
+    - name: Tag session with comment ID
+      if: >-
+        inputs.atoma_outcome == 'success' &&
+        steps.post.outputs.comment_id != ''
+      shell: python3 {0}
+      env:
+        COMMENT_ID: ${{ steps.post.outputs.comment_id }}
+        AGENT: ${{ inputs.agent_name }}
+      run: |
+        import json
+        import os
+
+        comment_id = int(os.environ["COMMENT_ID"])
+        agent = os.environ["AGENT"]
+
+        with open("session.json", encoding="utf-8") as f:
+            session = json.load(f)
+
+        for msg in reversed(session["messages"]):
+            if msg["role"] == "assistant" and msg.get("content"):
+                meta = msg.setdefault("atoma_metadata", {})
+                meta["github_comment_id"] = comment_id
+                meta["agent"] = agent
+                break
+
+        with open("session.json", "w", encoding="utf-8") as f:
+            json.dump(session, f, indent=2, ensure_ascii=False)
+            f.write("\n")
+
+        print(f"Tagged last assistant message with github_comment_id={comment_id}")
+
+    - name: Record shared context snapshot
+      if: >-
+        inputs.atoma_outcome == 'success' &&
+        inputs.new_event_count != '0'
+      shell: python3 {0}
+      env:
+        SNAPSHOT_HASH: ${{ inputs.context_snapshot_hash }}
+        EVENT_COUNT: ${{ inputs.context_event_count }}
+        AGENT: ${{ inputs.agent_name }}
+        CONTEXT_TYPE: ${{ inputs.type }}
+        RESOLVED_NUMBER: ${{ inputs.resolved_number }}
+      run: |
+        import json
+        import os
+
+        with open("session.json", encoding="utf-8") as f:
+            session = json.load(f)
+
+        metadata = session.get("metadata")
+        if not isinstance(metadata, dict):
+            metadata = {}
+
+        metadata["github_context"] = {
+            "snapshot_hash": os.environ["SNAPSHOT_HASH"],
+            "event_count": int(os.environ.get("EVENT_COUNT") or "0"),
+            "agent": os.environ["AGENT"],
+            "type": os.environ["CONTEXT_TYPE"],
+            "resolved_number": os.environ["RESOLVED_NUMBER"],
+        }
+        session["metadata"] = metadata
+
+        with open("session.json", "w", encoding="utf-8") as f:
+            json.dump(session, f, indent=2, ensure_ascii=False)
+            f.write("\n")
+
+        print(
+            "Recorded shared context snapshot hash="
+            f"{os.environ['SNAPSHOT_HASH']} for agent={os.environ['AGENT']}"
+        )
+
+    - name: Manage auto-dispatch loop control
+      if: inputs.atoma_outcome == 'success'
+      id: loop-control
+      shell: python3 {0}
+      env:
+        NEW_EVENT_COUNT: ${{ inputs.new_event_count }}
+        DIRECTIVE: ${{ inputs.directive }}
+      run: |
+        import json
+        import os
+
+        with open("session.json", encoding="utf-8") as f:
+            session = json.load(f)
+
+        metadata = session.setdefault("metadata", {})
+        gh_context = metadata.setdefault("github_context", {})
+
+        new_event_count = int(os.environ.get("NEW_EVENT_COUNT") or "0")
+        directive = os.environ.get("DIRECTIVE") or ""
+
+        if new_event_count != 0:
+            auto_dispatch_count = 0
+        else:
+            auto_dispatch_count = int(gh_context.get("auto_dispatch_count") or 0)
+            if directive:
+                auto_dispatch_count += 1
+
+        # Maximum consecutive auto-dispatch limit
+        LIMIT = 5
+        limit_reached = "false"
+        if auto_dispatch_count >= LIMIT:
+            limit_reached = "true"
+
+        gh_context["auto_dispatch_count"] = auto_dispatch_count
+
+        with open("session.json", "w", encoding="utf-8") as f:
+            json.dump(session, f, indent=2, ensure_ascii=False)
+            f.write("\n")
+
+        with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as f:
+            f.write(f"auto_dispatch_count={auto_dispatch_count}\n")
+            f.write(f"loop_limit_reached={limit_reached}\n")
+
+        print(f"Auto-dispatch loop count: {auto_dispatch_count}/{LIMIT} (limit_reached={limit_reached})")
+
+    - name: Save session
+      if: >-
+        inputs.atoma_outcome == 'success' &&
+        inputs.session_cache_key != ''
+      uses: actions/cache/save@v4
+      with:
+        path: session.json
+        key: ${{ inputs.session_cache_key }}-${{ github.run_number }}
+
+    - name: Load dispatch workflow
+      if: >-
+        inputs.atoma_outcome == 'success' &&
+        inputs.directive != '' &&
+        inputs.max_iterations_reached != 'true' &&
+        steps.loop-control.outputs.loop_limit_reached != 'true'
+      id: dispatch-workflow
+      shell: python3 {0}
+      env:
+        ORCHESTRATION_FILE: ${{ inputs.orchestration_file }}
+      run: |
+        import json
+        import os
+        from pathlib import Path
+
+        workflow = "atoma-runner.yml"
+        path = Path(os.environ["ORCHESTRATION_FILE"])
+        if path.exists():
+            with path.open(encoding="utf-8") as f:
+                config = json.load(f)
+            dispatch = config.get("dispatch")
+            if isinstance(dispatch, dict):
+                configured = dispatch.get("workflow")
+                if isinstance(configured, str) and configured:
+                    workflow = configured
+
+        with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as f:
+            f.write(f"workflow={workflow}\n")
+
+    - name: Dispatch next agent
+      if: >-
+        inputs.atoma_outcome == 'success' &&
+        inputs.directive != '' &&
+        inputs.max_iterations_reached != 'true' &&
+        steps.loop-control.outputs.loop_limit_reached != 'true'
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+        DIRECTIVE: ${{ inputs.directive }}
+        NUMBER: ${{ inputs.number }}
+        TYPE: ${{ inputs.type }}
+        NOTIFY: ${{ inputs.notify }}
+        WORKFLOW_NAME: ${{ steps.dispatch-workflow.outputs.workflow }}
+      run: |
+        if ! [[ "$DIRECTIVE" =~ ^[a-z][a-z0-9-]*$ ]]; then
+          echo "::error::Invalid directive value: ${DIRECTIVE}"
+          exit 1
+        fi
+
+        echo "Dispatching '${DIRECTIVE}' on ${TYPE} #${NUMBER} via ${WORKFLOW_NAME} ..."
+        gh workflow run "$WORKFLOW_NAME" \
+          --field agent="$DIRECTIVE" \
+          --field number="$NUMBER" \
+          --field type="$TYPE" \
+          --field notify="$NOTIFY"
+
+    - name: Comment on loop limit reached
+      if: >-
+        inputs.atoma_outcome == 'success' &&
+        inputs.directive != '' &&
+        inputs.max_iterations_reached != 'true' &&
+        steps.loop-control.outputs.loop_limit_reached == 'true'
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+        NUMBER: ${{ inputs.number }}
+        AGENT: ${{ inputs.agent_name }}
+        DIRECTIVE: ${{ inputs.directive }}
+        NOTIFY: ${{ inputs.notify }}
+        RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+      run: |
+        if [ -n "$NUMBER" ]; then
+          MENTION=""
+          if [ -n "$NOTIFY" ]; then
+            MENTION="@${NOTIFY} - "
+          fi
+          BD=$(mktemp)
+          echo "${MENTION}Auto-dispatch loop limit (5 consecutive runs) reached." > "$BD"
+          echo "To prevent unintended infinite agent loops and excessive API costs, further automatic handoff (next agent: ${DIRECTIVE}) has been safely suppressed." >> "$BD"
+          echo "Please review the progress so far. To resume, post a manual comment on the Issue/PR (e.g. /${DIRECTIVE}) to trigger the next agent at any time." >> "$BD"
+          echo "See the workflow run for details: ${RUN_URL}." >> "$BD"
+          gh issue comment "$NUMBER" --body-file "$BD"
+          rm -f "$BD"
+        fi
+
+    - name: Report failure
+      if: inputs.job_status != 'success'
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+        NUMBER: ${{ inputs.number }}
+        AGENT: ${{ inputs.agent_name }}
+        NOTIFY: ${{ inputs.notify }}
+        RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+      run: |
+        if [ -z "$NUMBER" ]; then
+          echo "::error::Cannot post failure comment: issue/PR number unknown."
+          exit 0
+        fi
+        AGENT_LABEL="${AGENT:+${AGENT} }Atoma"
+        ERR_MSG=""
+        if [ -f atoma_logs.txt ]; then
+          ERR_MSG=$(grep -iP 'error|fail|panic|exception|unauthorized' atoma_logs.txt | head -n 5 || true)
+        fi
+        MENTION=""
+        if [ -n "$NOTIFY" ]; then
+          MENTION="@${NOTIFY} - "
+        fi
+        BD=$(mktemp)
+        echo "${MENTION}Warning: ${AGENT_LABEL} encountered an error." > "$BD"
+        echo "Please check the reason and retry if necessary." >> "$BD"
+        echo "Workflow logs: ${RUN_URL}" >> "$BD"
+        if [ -n "$ERR_MSG" ]; then
+          echo "" >> "$BD"
+          echo "Error messages detected from logs (excerpt):" >> "$BD"
+          printf '```\n' >> "$BD"
+          echo "${ERR_MSG}" >> "$BD"
+          printf '```\n' >> "$BD"
+        fi
+        gh issue comment "$NUMBER" --body-file "$BD"
+        rm -f "$BD"

@@ -1,0 +1,117 @@
+name: 'Atoma v4 – Prepare'
+description: >
+  Fetch all GitHub events for an Issue/PR and build a shared context-session.
+  The cached session remains agent-local state (assistant replies, tool calls,
+  and working memory), while GitHub conversation is rebuilt per run.
+author: 'yuma-seno'
+
+branding:
+  icon: 'layers'
+  color: 'blue'
+
+# ── Inputs ────────────────────────────────────────────────────────────────
+inputs:
+  type:
+    description: '"issue" or "pr"'
+    required: true
+
+  number:
+    description: 'Issue or PR number'
+    required: true
+
+  agent_name:
+    description: >
+      Agent name used to build the session cache key.
+      Example: "orchestrator", "engineer", "reviewer"
+    required: true
+
+  max_diff_chars:
+    description: 'Maximum characters to include for PR diffs'
+    required: false
+    default: '30000'
+
+  orchestration_file:
+    description: 'Path to orchestration JSON config'
+    required: false
+    default: '.github/atoma/orchestration.json'
+
+# ── Outputs ───────────────────────────────────────────────────────────────
+outputs:
+  new_event_count:
+    description: 'Number of shared-context changes detected for this agent'
+    value: ${{ steps.context.outputs.new_event_count }}
+
+  context_snapshot_hash:
+    description: 'Hash of the filtered shared GitHub context snapshot'
+    value: ${{ steps.context.outputs.context_snapshot_hash }}
+
+  context_event_count:
+    description: 'Number of messages written to context-session.json'
+    value: ${{ steps.context.outputs.context_event_count }}
+
+  resolved_number:
+    description: >
+      The "canonical" number for session keying.
+      For PRs with a linked Issue, this is the linked Issue number.
+      Otherwise, same as the input number.
+    value: ${{ steps.fetch.outputs.resolved_number }}
+
+  session_cache_key:
+    description: >
+      The cache key prefix used to restore (and to save on the workflow side).
+      Format: "atoma-v4-{type}-{number}-{agent_name}"
+      Use this key when calling actions/cache/save in the workflow.
+    value: ${{ steps.build-cache-key.outputs.cache_key }}
+
+# ── Steps ─────────────────────────────────────────────────────────────────
+runs:
+  using: 'composite'
+  steps:
+    - name: Fetch GitHub events
+      id: fetch
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+        TYPE: ${{ inputs.type }}
+        NUMBER: ${{ inputs.number }}
+        MAX_DIFF_CHARS: ${{ inputs.max_diff_chars }}
+        OUT_FILE: events.json
+      run: bash "${{ github.action_path }}/fetch_events.sh"
+
+    # Build the canonical cache key AFTER fetch (resolved_number is now known).
+    # This avoids the circular dependency of referencing the step's own output.
+    - name: Build session cache key
+      id: build-cache-key
+      shell: bash
+      run: |
+        TYPE="${{ inputs.type }}"
+        NUMBER="${{ inputs.number }}"
+        AGENT="${{ inputs.agent_name }}"
+        KEY="atoma-v4-${TYPE}-${NUMBER}-${AGENT}"
+        echo "cache_key=${KEY}" >> "$GITHUB_OUTPUT"
+        echo "Session cache key: ${KEY}"
+
+    - name: Restore agent session cache
+      id: restore-cache
+      uses: actions/cache/restore@v4
+      with:
+        path: session.json
+        # Use a unique key per run so saves never overwrite; restore-keys picks the latest.
+        key: ${{ steps.build-cache-key.outputs.cache_key }}-${{ github.run_number }}
+        restore-keys: |
+          ${{ steps.build-cache-key.outputs.cache_key }}-
+
+    - name: Build context session
+      id: context
+      shell: bash
+      run: |
+        SESSION_ARG=""
+        if [ -f "session.json" ]; then
+          SESSION_ARG="--session session.json"
+        fi
+        python3 "${{ github.action_path }}/build_context_session.py" \
+          --events events.json \
+          --agent-name "${{ inputs.agent_name }}" \
+          --config "${{ inputs.orchestration_file }}" \
+          $SESSION_ARG \
+          --out context-session.json

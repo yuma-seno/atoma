@@ -1,0 +1,78 @@
+name: Atoma Sub-Issue Closed
+
+on:
+  issues:
+    types: [closed]
+
+permissions:
+  issues: write
+  pull-requests: write
+  contents: write
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    if: github.event.sender.type != 'Bot'
+    outputs:
+      is_sub_issue: ${{ steps.parse.outputs.is_sub_issue }}
+      parent_number: ${{ steps.parse.outputs.parent_number }}
+    steps:
+      - name: Parse parent reference from issue body
+        id: parse
+        shell: bash
+        env:
+          CLOSED_NUM: ${{ github.event.issue.number }}
+        run: |
+          BODY=$(jq -r '.issue.body // ""' "$GITHUB_EVENT_PATH")
+          PARENT=$(echo "$BODY" | grep -oP '(?<=<!-- atoma:parent=#)\d+(?= -->)' || true)
+          if [ -n "$PARENT" ]; then
+            echo "is_sub_issue=true" >> "$GITHUB_OUTPUT"
+            echo "parent_number=${PARENT}" >> "$GITHUB_OUTPUT"
+            echo "Sub-issue #${CLOSED_NUM} belongs to parent #${PARENT}"
+          else
+            echo "is_sub_issue=false" >> "$GITHUB_OUTPUT"
+            echo "parent_number=" >> "$GITHUB_OUTPUT"
+          fi
+
+  aggregate:
+    needs: check
+    if: needs.check.outputs.is_sub_issue == 'true'
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      OWNER: ${{ github.repository_owner }}
+      REPO: ${{ github.event.repository.name }}
+      PARENT: ${{ needs.check.outputs.parent_number }}
+      CLOSED_NUM: ${{ github.event.issue.number }}
+    steps:
+      - name: Check sibling sub-issues and re-trigger orchestrator
+        shell: bash
+        run: |
+          echo "Sub-issue #${CLOSED_NUM} (parent #${PARENT}) closed. Checking siblings..."
+
+          # Find all open issues referencing the same parent
+          OPEN_SIBLINGS=$(gh issue list \
+            --repo "${OWNER}/${REPO}" \
+            --state open \
+            --json number,title,body \
+            --jq "[.[] | select(.body | contains(\"atoma:parent=#${PARENT}\")) | .number]" 2>/dev/null)
+
+          SIBLING_COUNT=$(echo "$OPEN_SIBLINGS" | jq 'length' 2>/dev/null || echo "0")
+
+          if [ "$SIBLING_COUNT" -gt 0 ]; then
+            echo "Still ${SIBLING_COUNT} open sibling(s): $(echo "$OPEN_SIBLINGS" | jq -r '.[]' | tr '\n' ' ')"
+            echo "Notifying parent #${PARENT} of progress..."
+            BD=$(mktemp)
+            echo "<!-- atoma:sub-result:#${CLOSED_NUM} -->" > "$BD"
+            echo "Atoma: Sub-task #${CLOSED_NUM} completed. ${SIBLING_COUNT} sub-task(s) still in progress." >> "$BD"
+            gh issue comment "${PARENT}" --body-file "$BD"
+            rm -f "$BD"
+          else
+            echo "All sub-tasks completed! Re-triggering orchestrator on parent #${PARENT}..."
+            BD=$(mktemp)
+            echo "<!-- atoma:sub-result:#${CLOSED_NUM} -->" > "$BD"
+            echo "Atoma: All sub-tasks (#${CLOSED_NUM} was the last) completed. Re-starting orchestrator for aggregation." >> "$BD"
+            gh issue comment "${PARENT}" --body-file "$BD"
+            rm -f "$BD"
+            gh issue edit "${PARENT}" --add-label "atoma/orchestrator" 2>/dev/null || true
+          fi

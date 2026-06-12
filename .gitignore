@@ -1,0 +1,29 @@
+# Rust build artifacts
+target/
+
+# Cargo lock for non-library crates: keep it committed for reproducibility
+# (Cargo.lock is intentionally tracked in this repo)
+
+# Secrets / environment
+.env
+.env.*
+
+# Session files (runtime artifacts)
+*.session.json
+sessions/
+
+# Test / development artifacts
+output.txt
+prompt.txt
+*.tmp
+__pycache__/
+*.pyc
+
+# Editor / OS
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+.bash_history

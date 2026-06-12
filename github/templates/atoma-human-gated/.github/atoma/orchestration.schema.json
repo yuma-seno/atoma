@@ -1,0 +1,99 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/yuma-seno/atoma/orchestration.schema.json",
+  "title": "Atoma GitHub Runtime Config",
+  "type": "object",
+  "required": ["version", "dispatch", "agents", "scripts"],
+  "properties": {
+    "$schema": {
+      "type": "string"
+    },
+    "version": {
+      "const": 1
+    },
+    "dispatch": {
+      "type": "object",
+      "required": ["workflow"],
+      "properties": {
+        "workflow": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "additionalProperties": false
+    },
+    "agents": {
+      "type": "object",
+      "patternProperties": {
+        "^[a-z][a-z0-9-]*$": {
+          "type": "object",
+          "properties": {
+            "shared_context": {
+              "type": "object",
+              "properties": {
+                "include_event_types": {
+                  "type": "array",
+                  "items": { "type": "string" },
+                  "uniqueItems": true
+                },
+                "exclude_event_types": {
+                  "type": "array",
+                  "items": { "type": "string" },
+                  "uniqueItems": true
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "scripts": {
+      "type": "object",
+      "required": ["create_pr", "push_commits", "create_sub_issue"],
+      "properties": {
+        "create_pr": {
+          "type": "object",
+          "required": ["dispatch_agent"],
+          "properties": {
+            "dispatch_agent": {
+              "type": "string",
+              "pattern": "^$|^[a-z][a-z0-9-]*$"
+            }
+          },
+          "additionalProperties": false
+        },
+        "push_commits": {
+          "type": "object",
+          "required": ["dispatch_agent"],
+          "properties": {
+            "dispatch_agent": {
+              "type": "string",
+              "pattern": "^$|^[a-z][a-z0-9-]*$"
+            }
+          },
+          "additionalProperties": false
+        },
+        "create_sub_issue": {
+          "type": "object",
+          "required": ["notify_agent", "trigger_agent"],
+          "properties": {
+            "notify_agent": {
+              "type": "string",
+              "pattern": "^$|^[a-z][a-z0-9-]*$"
+            },
+            "trigger_agent": {
+              "type": "string",
+              "pattern": "^$|^[a-z][a-z0-9-]*$"
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

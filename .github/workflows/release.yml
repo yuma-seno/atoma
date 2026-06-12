@@ -1,0 +1,164 @@
+name: Release
+
+# Trigger: after the CI workflow succeeds on main.
+# If the version in Cargo.toml has not been released yet (no matching vX.Y.Z tag),
+# this workflow creates the tag, builds cross-platform binaries, and publishes a
+# GitHub Release automatically.
+on:
+  workflow_run:
+    workflows: ["CI"]
+    branches: [main]
+    types: [completed]
+
+env:
+  CARGO_TERM_COLOR: always
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  # ── Job 1: read Cargo.toml version, decide whether to release ─────────────
+  check-version:
+    name: Check version
+    runs-on: ubuntu-latest
+    if: github.event.workflow_run.conclusion == 'success'
+    outputs:
+      version: ${{ steps.get-version.outputs.version }}
+      tag: ${{ steps.get-version.outputs.tag }}
+      should-release: ${{ steps.check-tag.outputs.should-release }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # need all tags
+          ref: ${{ github.event.workflow_run.head_sha }}
+
+      - name: Get version from Cargo.toml
+        id: get-version
+        run: |
+          VERSION=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version')
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "tag=v${VERSION}" >> "$GITHUB_OUTPUT"
+
+      - name: Check if tag already exists
+        id: check-tag
+        run: |
+          TAG="${{ steps.get-version.outputs.tag }}"
+          if git tag -l "${TAG}" | grep -q "${TAG}"; then
+            echo "should-release=false" >> "$GITHUB_OUTPUT"
+            echo "Tag ${TAG} already exists — skipping release"
+          else
+            echo "should-release=true" >> "$GITHUB_OUTPUT"
+            echo "Tag ${TAG} does not exist — will create release"
+          fi
+
+  # ── Job 2: build binaries for each platform ────────────────────────────────
+  build:
+    name: Build ${{ matrix.artifact-name }}
+    needs: check-version
+    if: needs.check-version.outputs.should-release == 'true'
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            bin: atoma
+            artifact-name: atoma-linux-x86_64
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            bin: atoma
+            artifact-name: atoma-macos-x86_64
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            bin: atoma
+            artifact-name: atoma-macos-arm64
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            bin: atoma.exe
+            artifact-name: atoma-windows-x86_64
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+
+      - name: Install musl tools (Linux musl target only)
+        if: matrix.target == 'x86_64-unknown-linux-musl'
+        run: sudo apt-get install -y musl-tools
+
+      - name: Add Rust target
+        run: rustup target add ${{ matrix.target }}
+
+      - name: Build
+        run: cargo build --release --locked --target ${{ matrix.target }}
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact-name }}
+          path: target/${{ matrix.target }}/release/${{ matrix.bin }}
+          if-no-files-found: error
+
+  # ── Job 3: create GitHub Release and upload binaries ──────────────────────
+  release:
+    name: Create Release
+    needs: [check-version, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.workflow_run.head_sha }}
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts/
+
+      - name: Pin atoma_version in action.yml and template refs
+        env:
+          TAG: ${{ needs.check-version.outputs.tag }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          # 1. Pin atoma_version default in run/action.yml
+          sed -i "s|    default: '.*'  # auto-updated by release workflow|    default: '${TAG}'  # auto-updated by release workflow|" github/actions/run/action.yml
+
+          # 2. Replace @main with the release tag in all template workflow files
+          #    so users copying a template get a stable release instead of HEAD.
+          find github/templates -name '*.yml' -exec sed -i "s|yuma-seno/atoma@main|yuma-seno/atoma@${TAG}|g" {} +
+
+          git add github/actions/run/action.yml
+          git add -u github/templates/
+          git commit -m "chore: pin atoma_version and template refs to ${TAG}"
+          git push origin HEAD:main
+
+      - name: Create tag and GitHub Release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ needs.check-version.outputs.version }}
+          TAG: ${{ needs.check-version.outputs.tag }}
+        run: |
+          # Tag the commit (the one that pinned atoma_version)
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag "${TAG}"
+          git push origin "${TAG}"
+
+          # Rename binaries with platform suffix so each asset has a unique name
+          # in the release. The `path#label` syntax only sets a display label,
+          # not the actual asset filename, so without renaming all Unix binaries
+          # would collide under the same name "atoma".
+          mv artifacts/atoma-linux-x86_64/atoma       artifacts/atoma-linux-x86_64/atoma-linux-x86_64
+          mv artifacts/atoma-macos-x86_64/atoma        artifacts/atoma-macos-x86_64/atoma-macos-x86_64
+          mv artifacts/atoma-macos-arm64/atoma          artifacts/atoma-macos-arm64/atoma-macos-arm64
+          mv artifacts/atoma-windows-x86_64/atoma.exe  artifacts/atoma-windows-x86_64/atoma-windows-x86_64.exe
+
+          # Publish release with binaries
+          gh release create "${TAG}" \
+            --title "atoma ${TAG}" \
+            --generate-notes \
+            "artifacts/atoma-linux-x86_64/atoma-linux-x86_64" \
+            "artifacts/atoma-macos-x86_64/atoma-macos-x86_64" \
+            "artifacts/atoma-macos-arm64/atoma-macos-arm64" \
+            "artifacts/atoma-windows-x86_64/atoma-windows-x86_64.exe"

@@ -1,0 +1,28 @@
+name: 'Atoma – Parse Comment Command'
+description: >
+  Parse the first line of a GitHub comment and extract a slash-command agent name.
+
+inputs:
+  body:
+    description: 'Comment body to parse'
+    required: true
+
+outputs:
+  matched:
+    description: 'true when the comment starts with a valid slash command'
+    value: ${{ steps.parse.outputs.matched }}
+
+  agent:
+    description: 'Parsed agent name, or empty string when no command was found'
+    value: ${{ steps.parse.outputs.agent }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Parse command
+      id: parse
+      shell: bash
+      env:
+        ATOMA_COMMENT_BODY: ${{ inputs.body }}
+      run: |
+        python3 "${{ github.action_path }}/parse_comment_command.py"
