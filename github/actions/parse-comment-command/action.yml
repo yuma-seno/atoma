@@ -1,6 +1,6 @@
 name: 'Atoma – Parse Comment Command'
 description: >
-  Parse the first line of a GitHub comment and extract a slash-command agent name.
+  Parse a GitHub comment and extract a slash-command agent name from any line, not just the first.
 
 inputs:
   body:

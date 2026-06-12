@@ -9,9 +9,14 @@ COMMAND_RE = re.compile(r"^/([a-z][a-z0-9-]*)")
 
 
 def parse_agent(body: str) -> str:
-    first_line = body.splitlines()[0].strip() if body else ""
-    match = COMMAND_RE.match(first_line)
-    return match.group(1) if match else ""
+    if not body:
+        return ""
+    for line in body.splitlines():
+        stripped = line.strip()
+        match = COMMAND_RE.match(stripped)
+        if match:
+            return match.group(1)
+    return ""
 
 
 def main() -> int:

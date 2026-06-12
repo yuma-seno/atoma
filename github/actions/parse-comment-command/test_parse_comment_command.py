@@ -15,6 +15,12 @@ class ParseCommentCommandTests(unittest.TestCase):
     def test_parses_agent_from_first_line(self):
         self.assertEqual(MODULE.parse_agent("/engineer fix it\nextra"), "engineer")
 
+    def test_parses_agent_from_second_line(self):
+        self.assertEqual(MODULE.parse_agent("some text\n/engineer fix it"), "engineer")
+
+    def test_parses_first_command_when_multiple(self):
+        self.assertEqual(MODULE.parse_agent("/engineer do this\n/orchestrator ignore"), "engineer")
+
     def test_ignores_non_command_comment(self):
         self.assertEqual(MODULE.parse_agent("please help"), "")
 
