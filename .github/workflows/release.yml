@@ -129,9 +129,12 @@ jobs:
           find github/templates -name '*.yml' -exec sed -i "s|yuma-seno/atoma@main|yuma-seno/atoma@${TAG}|g" {} +
 
           git add github/actions/run/action.yml
-          git add -u github/templates/
-          git commit -m "chore: pin atoma_version and template refs to ${TAG}"
-          git push origin HEAD:main
+          git add -u github/templates/ 2>/dev/null || true
+          # Commit only if there are changes (e.g. when atoma_version differs)
+          git diff --cached --quiet && echo "No pin changes needed" || {
+            git commit -m "chore: pin atoma_version and template refs to ${TAG}"
+            git push origin HEAD:main
+          }
 
       - name: Create tag and GitHub Release
         env:
