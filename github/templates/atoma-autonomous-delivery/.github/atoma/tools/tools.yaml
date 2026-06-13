@@ -4,6 +4,10 @@ filesystem:
   command: npx
   args: ["-y", "@modelcontextprotocol/server-filesystem", "."]
   env: {}
+  hooks:
+    tool_denylist:
+      - "filesystem__directory_tree"
+      - "filesystem__search_files"
 
 filesystem_readonly:
   command: npx
@@ -14,10 +18,7 @@ filesystem_readonly:
       - "filesystem_readonly__read_file"
       - "filesystem_readonly__read_multiple_files"
       - "filesystem_readonly__list_directory"
-      - "filesystem_readonly__directory_tree"
-      - "filesystem_readonly__search_files"
       - "filesystem_readonly__get_file_info"
-      - "filesystem_readonly__list_allowed_directories"
 
 shell:
   command: npx
