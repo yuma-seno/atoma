@@ -21,7 +21,7 @@ filesystem_readonly:
 
 shell:
   command: npx
-  args: ["-y", "mcp-shell", "."]
+  args: ["-y", "mcp-shell-server", "."]
   env: {}
   hooks:
     before_tool: ./scripts/shell_guard.py

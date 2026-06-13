@@ -43,4 +43,4 @@ runs:
 
         npm install --no-save \
           @modelcontextprotocol/server-filesystem@latest \
-          mcp-shell@latest
+          @mako10k/mcp-shell-server@latest
