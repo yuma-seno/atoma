@@ -69,6 +69,13 @@ inputs:
     required: false
     default: ''
 
+  github_token:
+    description: >
+      GitHub Personal Access Token used by MCP tools and Copilot provider.
+      Falls back to the auto-generated GITHUB_TOKEN when empty.
+    required: false
+    default: ''
+
   issue_number:
     description: >
       Issue number associated with this run.
@@ -126,6 +133,7 @@ runs:
         GITHUB_PERSONAL_ACCESS_TOKEN: ${{ github.token }}
         GITHUB_RUN_ID: ${{ github.run_id }}
         ISSUE_NUMBER: ${{ inputs.issue_number }}
+        ATOMA_GITHUB_TOKEN: ${{ inputs.github_token }}
       run: |
         AGENT="${{ inputs.agent_name }}"
         DEF_DIR="${{ inputs.agent_def_dir }}"
@@ -154,6 +162,14 @@ runs:
         # Optional: force a specific provider (only export when non-empty)
         if [ -n "${{ inputs.atoma_provider }}" ]; then
           export ATOMA_PROVIDER="${{ inputs.atoma_provider }}"
+        fi
+
+        # Override GH_TOKEN with user-provided PAT if supplied.
+        # The auto-generated GITHUB_TOKEN lacks the copilot scope needed for
+        # Copilot provider and certain GitHub MCP operations.
+        if [ -n "$ATOMA_GITHUB_TOKEN" ]; then
+          export GH_TOKEN="$ATOMA_GITHUB_TOKEN"
+          export GITHUB_PERSONAL_ACCESS_TOKEN="$ATOMA_GITHUB_TOKEN"
         fi
 
         if [ -f "$ORCHESTRATION_FILE" ]; then

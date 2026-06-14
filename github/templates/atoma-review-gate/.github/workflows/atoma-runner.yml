@@ -93,6 +93,7 @@ jobs:
           openai_base_url: ${{ vars.OPENAI_BASE_URL }}
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           atoma_provider: ${{ vars.ATOMA_PROVIDER }}
+          github_token: ${{ secrets.GITHUB_PAT_TOKEN }}
 
       - name: Finalize run
         if: always()
