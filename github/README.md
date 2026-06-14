@@ -1,101 +1,48 @@
-# Atoma GitHub Distribution
+# Atoma GitHub Actions
 
-Atoma's GitHub distribution consists of shared runtime actions and self-contained templates.
-This README is the overall entry point. For operational details and workflow specifics, refer to each template's README.
+Shared runtime actions for orchestrating LLM agents with MCP tools on GitHub.
+These actions are building blocks — use them individually or together to build AI-powered workflows.
+
+The canonical template that demonstrates how to compose these actions into a complete
+multi-agent pipeline is at:
+
+👉 **[yuma-seno/atoma-autonomous-delivery](https://github.com/yuma-seno/atoma-autonomous-delivery)**
+
+That repository contains a ready-to-use `.github/` directory (workflows, agent definitions,
+orchestration config, tool scripts) that you can copy into your own repository.
 
 ## Where to Start
 
-- To choose a template, read this README first, then each template's README
-- To understand workflow semantics, see the Workflow section in each template README
-- To understand runtime action responsibilities, see the Common Runtime Actions section below
+- To **get started quickly**, go to [atoma-autonomous-delivery](https://github.com/yuma-seno/atoma-autonomous-delivery)
+- To **understand each action's contract**, see the Common Runtime Actions section below
+- To **use actions individually** in your own workflows, reference them as `yuma-seno/atoma/github/actions/<name>@v0.1.0`
 
 ## Directory Structure
 
 ```text
 github/
-├── actions/
-│   ├── setup-runtime/
-│   ├── prepare/
-│   ├── run/
-│   ├── post-result/
-│   ├── dispatch-next/
-│   └── parse-comment-command/
-└── templates/
-    └── atoma-autonomous-delivery/
+└── actions/
+    ├── setup-runtime/
+    ├── prepare/
+    ├── run/
+    ├── post-result/
+    ├── dispatch-next/
+    └── parse-comment-command/
 ```
 
-## Template Selection Guide
+## How Each Action Can Be Used
 
-| Template | Entry trigger | Auto-review | Auto fix loop | Best for |
-| --- | --- | --- | --- | --- |
-| [atoma-autonomous-delivery](templates/atoma-autonomous-delivery/README.md) | Issue body slash cmd or label | Per PR | reviewer -> engineer | Teams that want end-to-end automation from issue intake |
+All actions are pure composite actions with no hidden dependencies between them.
+You can use any subset in your workflow.
 
-## Template Roles
-
-### [atoma-autonomous-delivery](templates/atoma-autonomous-delivery/README.md)
-
-The orchestrator receives new issues and drives them forward through implementation and review among agents.
-Humans act as supervisors while routine progress is automated.
-
-## How to Use a Template
-
-Copy the chosen template contents to your repository root:
-
-```bash
-cp -r github/templates/atoma-autonomous-delivery/. /path/to/your-repo/
-```
-
-Each template includes:
-
-- `.github/workflows/atoma-*.yml`
-- `.github/atoma/agent-definitions/*.md`
-- `.github/atoma/tools/tools.yaml`
-- `.github/atoma/tools/scripts/*`
-- `.github/atoma/orchestration.json`
-- `.github/atoma/orchestration.schema.json`
-
-## Understanding the Common Workflow Pattern
-
-Templates combine thin trigger workflows with a shared reusable workflow:
-
-1. An entry workflow is triggered by issue comments (`atoma-manual-comment.yml`), issue open/label (`atoma-entry.yml`), or PR events
-2. The entry workflow calls `atoma-runner.yml`
-3. `atoma-runner.yml` executes `setup-runtime -> prepare -> run -> post-result -> dispatch-next` in sequence
-4. Handoff to the next agent is determined by `.github/atoma/orchestration.json` and the agent output directive
-
-Even if multiple triggers fire on the same PR update, the `prepare` action checks for shared context differences to suppress no-op runs.
-
-### Entry via Issue Body or Label
-
-`atoma-entry.yml` supports two ways to trigger agents from issues:
-
-1. **Slash command in issue body**: If the first line of a new issue body is `/orchestrator` (or any agent name), that agent starts immediately.
-2. **Label trigger**: Adding an `atoma/<agent>` label (e.g. `atoma/engineer`) to any issue starts the corresponding agent. This works on both new and existing issues.
-
-This gives humans full control: write the slash command upfront for automation, or create the issue first and add the label later when ready.
-
-### Sub-issues
-
-`create_sub_issue` creates sub-issues with an `atoma/pending` label. The sub-issue is **not** automatically triggered — the orchestrator (or a human) must explicitly add the trigger label to start the worker agent.
-
-**Sequential execution**: For tasks with dependencies, the orchestrator adds labels one at a time:
-
-```bash
-add_label.sh --label atoma/engineer --issue <SUB_ISSUE_NUM_1>
-# wait for completion...
-add_label.sh --label atoma/engineer --issue <SUB_ISSUE_NUM_2>
-```
-
-**Auto-aggregation**: `atoma-sub-issue-closed.yml` detects when the last sibling sub-issue closes and re-invokes the orchestrator by adding an `atoma/orchestrator` label to the parent issue.
-
-## Combining Templates
-
-When mixing templates, consider not just workflows but also `.github/atoma`:
-
-- Workflow: when to invoke which agent
-- `orchestration.json`: how `create_pr`, `push_commits`, and `create_sub_issue` handoffs work
-- Agent definition: each agent's autonomy level and output contract
-- Shared context: who sees PR diffs and who retains issue context
+| Action | Responsibility | Can omit when... |
+|---|---|---|
+| `setup-runtime` | Install MCP server dependencies (npm) | You don't use MCP or pre-install separately |
+| `prepare` | Fetch GitHub events + restore session from `atoma-data` branch | You provide context-session.json yourself |
+| `run` | Install Atoma CLI + execute agent | You call the LLM directly (no orchestration) |
+| `post-result` | Post comment + persist session to `atoma-data` branch | You post results manually |
+| `dispatch-next` | Read orchestration config + dispatch next agent | You want a single-agent workflow |
+| `parse-comment-command` | Extract `/agent` from comment body | You parse commands yourself |
 
 ## Common Runtime Actions
 

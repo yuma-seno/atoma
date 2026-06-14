@@ -124,12 +124,9 @@ jobs:
           # 1. Pin atoma_version default in run/action.yml
           sed -i "s|    default: '.*'  # auto-updated by release workflow|    default: '${TAG}'  # auto-updated by release workflow|" github/actions/run/action.yml
 
-          # 2. Replace @main with the release tag in all template workflow files
-          #    so users copying a template get a stable release instead of HEAD.
-          find github/templates -name '*.yml' -exec sed -i "s|yuma-seno/atoma@main|yuma-seno/atoma@${TAG}|g" {} +
+          # 2. Update action.yml version default (done above)
 
           git add github/actions/run/action.yml
-          git add -u github/templates/ 2>/dev/null || true
           # Commit only if there are changes (e.g. when atoma_version differs)
           git diff --cached --quiet && echo "No pin changes needed" || {
             git commit -m "chore: pin atoma_version and template refs to ${TAG}"
