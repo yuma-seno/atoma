@@ -389,6 +389,12 @@ impl McpRegistry {
             .map(|c| (c.name.clone(), c.hooks.clone()))
             .collect();
 
+        // Validate hook configurations at registration time.
+        for (name, h) in &hooks {
+            hooks::validate_hooks(h)
+                .with_context(|| format!("Invalid hooks for MCP server '{}'", name))?;
+        }
+
         Ok(McpRegistry {
             connections,
             tools: all_tools,

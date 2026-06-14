@@ -56,6 +56,19 @@ pub fn check_access(hooks: &Hooks, tool_name: &str) -> Result<()> {
     Ok(())
 }
 
+/// Validate hook configuration. Returns an error if both allowlist and denylist
+/// are non-empty, as the interaction between the two is ambiguous.
+/// Should be called during tool registration, not at call time.
+pub fn validate_hooks(hooks: &Hooks) -> Result<()> {
+    if !hooks.tool_allowlist.is_empty() && !hooks.tool_denylist.is_empty() {
+        anyhow::bail!(
+            "Ambiguous hook configuration: both tool_allowlist and tool_denylist are set. \
+             Use one or the other, not both."
+        );
+    }
+    Ok(())
+}
+
 /// Invoke the `before_tool` hook script.
 ///
 /// The script receives JSON on stdin and must respond with
