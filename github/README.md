@@ -17,52 +17,32 @@ github/
 │   ├── setup-runtime/
 │   ├── prepare/
 │   ├── run/
-│   ├── finalize/
+│   ├── post-result/
+│   ├── dispatch-next/
 │   └── parse-comment-command/
 └── templates/
-    ├── atoma-human-gated/
-    ├── atoma-review-gate/
-    ├── atoma-autonomous-delivery/
-    └── atoma-spec-first/
+    └── atoma-autonomous-delivery/
 ```
 
 ## Template Selection Guide
 
 | Template | Entry trigger | Auto-review | Auto fix loop | Best for |
 | --- | --- | --- | --- | --- |
-| [atoma-human-gated](templates/atoma-human-gated/README.md) | Manual (comment or label) | None | None | Teams that want humans to control phases |
-| [atoma-review-gate](templates/atoma-review-gate/README.md) | Manual (comment or label) | Per PR | None | Teams that want to automate only reviews |
 | [atoma-autonomous-delivery](templates/atoma-autonomous-delivery/README.md) | Issue body slash cmd or label | Per PR | reviewer -> engineer | Teams that want end-to-end automation from issue intake |
-| [atoma-spec-first](templates/atoma-spec-first/README.md) | Issue body slash cmd or label | Per PR | reviewer -> implementer | Teams that want spec-first / TDD division of labor |
 
 ## Template Roles
-
-### [atoma-human-gated](templates/atoma-human-gated/README.md)
-
-A minimal configuration where humans choose between `/triager`, `/engineer`, and `/reviewer`.
-Automatic handoff is mostly disabled, making it suitable for teams introducing AI as an assistant.
-
-### [atoma-review-gate](templates/atoma-review-gate/README.md)
-
-Keeps issue-side triggering manual, but automatically runs the reviewer as soon as a PR is opened.
-The shortest path to adding an AI reviewer to an existing workflow.
 
 ### [atoma-autonomous-delivery](templates/atoma-autonomous-delivery/README.md)
 
 The orchestrator receives new issues and drives them forward through implementation and review among agents.
 Humans act as supervisors while routine progress is automated.
 
-### [atoma-spec-first](templates/atoma-spec-first/README.md)
-
-Separates planner, test-writer, implementer, and reviewer roles, placing specification definition before implementation.
-The most information-rich template, also serving as a multi-agent reference.
-
 ## How to Use a Template
 
 Copy the chosen template contents to your repository root:
 
 ```bash
-cp -r github/templates/atoma-review-gate/. /path/to/your-repo/
+cp -r github/templates/atoma-autonomous-delivery/. /path/to/your-repo/
 ```
 
 Each template includes:
@@ -80,7 +60,7 @@ Templates combine thin trigger workflows with a shared reusable workflow:
 
 1. An entry workflow is triggered by issue comments (`atoma-manual-comment.yml`), issue open/label (`atoma-entry.yml`), or PR events
 2. The entry workflow calls `atoma-runner.yml`
-3. `atoma-runner.yml` executes `setup-runtime -> prepare -> run -> finalize` in sequence
+3. `atoma-runner.yml` executes `setup-runtime -> prepare -> run -> post-result -> dispatch-next` in sequence
 4. Handoff to the next agent is determined by `.github/atoma/orchestration.json` and the agent output directive
 
 Even if multiple triggers fire on the same PR update, the `prepare` action checks for shared context differences to suppress no-op runs.
@@ -133,7 +113,7 @@ Collects GitHub events and assembles the shared `context-session.json`.
 
 - Fetches issue/PR event history
 - Applies per-agent shared context policies
-- Restores `session.json` from cache
+- Restores `session.json` from the `atoma-data` Git branch (an orphan branch used as persistent session storage)
 - Determines whether to proceed to agent execution based on context differences
 
 ### `run`
@@ -145,15 +125,28 @@ Installs or builds the Atoma CLI and executes the agent.
 - Passes `session.json` and `context-session.json` for inference
 - Extracts the next agent directive from agent output
 
-### `finalize`
+### `post-result`
 
-Reflects execution results on GitHub and connects to the next run.
+Reflects execution results on GitHub and persists the session.
 
-- Posts result comments to issues/PRs
+- Posts result comments to issues/PRs (with token usage and cost display)
+- Adds 👀 reaction on agent handoff
 - Records comment metadata in `session.json`
-- Saves session cache
-- Dispatches the next agent if a directive exists
+- Saves `session.json` to the `atoma-data` Git branch for persistent agent memory
 - Posts failure comments on job failure
+
+### `dispatch-next`
+
+Reads the orchestration config and dispatches the next agent if one is requested.
+
+- Tracks the auto-dispatch loop counter in `session.json` to prevent infinite handoff loops
+- Loads the configured dispatch workflow from `orchestration.json`
+- Dispatches the next agent via `gh workflow run`
+- Posts a warning comment when the loop limit (5 consecutive no-new-event runs) is reached
+
+Omitting this step from a workflow makes the run single-agent; useful for simple AI workflows that don't need multi-agent handoff.
+
+### `setup-runtime`
 
 ### `parse-comment-command`
 

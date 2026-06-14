@@ -72,8 +72,8 @@ inputs:
   github_token:
     description: >
       GitHub Personal Access Token with the `copilot` scope.
-      Only needed when using the GitHub Copilot LLM provider.
-      Falls back to the auto-generated GITHUB_TOKEN when empty.
+      Required when atoma_provider is set to "github-copilot".
+      When using OpenAI/OpenRouter, the auto-generated GITHUB_TOKEN is sufficient.
     required: false
     default: ''
 

@@ -1,8 +1,15 @@
-name: 'Atoma – Finalize'
+name: 'Atoma – Post Result'
 description: >
-  Finalize an Atoma GitHub run: post result comments, tag session metadata,
-  save the session cache, dispatch the next agent, and report failures.
+  Post the agent result as a GitHub comment, tag the session with the comment ID,
+  record the shared context snapshot, save the session to the atoma-data branch,
+  and report failures.
+author: 'yuma-seno'
 
+branding:
+  icon: 'message-square'
+  color: 'purple'
+
+# ── Inputs ────────────────────────────────────────────────────────────────
 inputs:
   agent_name:
     description: 'Current agent name'
@@ -22,11 +29,16 @@ inputs:
     default: ''
 
   job_status:
-    description: 'Current job status'
+    description: 'Current job status (success / failure / cancelled)'
     required: true
 
   atoma_outcome:
-    description: 'Outcome of the Atoma step'
+    description: 'Outcome of the Atoma run step (success / failure / skipped)'
+    required: false
+    default: ''
+
+  directive:
+    description: 'Next agent directive extracted from the agent output'
     required: false
     default: ''
 
@@ -34,6 +46,11 @@ inputs:
     description: 'Number of new shared-context events for this run'
     required: false
     default: '0'
+
+  max_iterations_reached:
+    description: 'true when the agent hit the iteration limit'
+    required: false
+    default: 'false'
 
   context_snapshot_hash:
     description: 'Hash of the filtered shared GitHub context snapshot'
@@ -50,35 +67,17 @@ inputs:
     required: false
     default: ''
 
-  session_cache_key:
-    description: 'Session cache key prefix returned by the prepare action'
-    required: false
-    default: ''
-
-  directive:
-    description: 'Next agent directive extracted from the first line of the result'
-    required: false
-    default: ''
-
-  max_iterations_reached:
-    description: 'true when the agent hit the iteration limit'
-    required: false
-    default: 'false'
-
-  orchestration_file:
-    description: 'Path to orchestration JSON config'
-    required: false
-    default: '.github/atoma/orchestration.json'
-
+# ── Outputs ───────────────────────────────────────────────────────────────
 outputs:
   comment_id:
     description: 'GitHub comment ID created for the result comment'
     value: ${{ steps.post.outputs.comment_id }}
 
+# ── Steps ─────────────────────────────────────────────────────────────────
 runs:
   using: 'composite'
   steps:
-    - name: Post result
+    - name: Post result comment
       if: >-
         inputs.atoma_outcome == 'success' &&
         inputs.new_event_count != '0'
@@ -108,7 +107,6 @@ runs:
               echo ""
               echo "---"
               echo "_Tokens: ${TOTAL:-?} total (${PROMPT:-?} prompt + ${COMPLETION:-?} completion)_"
-              # Rough cost estimate (DeepSeek V4 Flash pricing)
               if [ -n "$PROMPT" ] && [ -n "$COMPLETION" ]; then
                 COST=$(awk "BEGIN { printf \"%.4f\", ${PROMPT} * 0.15 / 1000000 + ${COMPLETION} * 0.60 / 1000000 }" 2>/dev/null || true)
                 if [ -n "$COST" ]; then
@@ -232,144 +230,64 @@ runs:
             f"{os.environ['SNAPSHOT_HASH']} for agent={os.environ['AGENT']}"
         )
 
-    - name: Manage auto-dispatch loop control
+    - name: Save session to atoma-data branch
       if: inputs.atoma_outcome == 'success'
-      id: loop-control
-      shell: python3 {0}
-      env:
-        NEW_EVENT_COUNT: ${{ inputs.new_event_count }}
-        DIRECTIVE: ${{ inputs.directive }}
-      run: |
-        import json
-        import os
-
-        with open("session.json", encoding="utf-8") as f:
-            session = json.load(f)
-
-        metadata = session.setdefault("metadata", {})
-        gh_context = metadata.setdefault("github_context", {})
-
-        new_event_count = int(os.environ.get("NEW_EVENT_COUNT") or "0")
-        directive = os.environ.get("DIRECTIVE") or ""
-
-        if new_event_count != 0:
-            auto_dispatch_count = 0
-        else:
-            auto_dispatch_count = int(gh_context.get("auto_dispatch_count") or 0)
-            if directive:
-                auto_dispatch_count += 1
-
-        # Maximum consecutive auto-dispatch limit
-        LIMIT = 5
-        limit_reached = "false"
-        if auto_dispatch_count >= LIMIT:
-            limit_reached = "true"
-
-        gh_context["auto_dispatch_count"] = auto_dispatch_count
-
-        with open("session.json", "w", encoding="utf-8") as f:
-            json.dump(session, f, indent=2, ensure_ascii=False)
-            f.write("\n")
-
-        with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as f:
-            f.write(f"auto_dispatch_count={auto_dispatch_count}\n")
-            f.write(f"loop_limit_reached={limit_reached}\n")
-
-        print(f"Auto-dispatch loop count: {auto_dispatch_count}/{LIMIT} (limit_reached={limit_reached})")
-
-    - name: Save session
-      if: >-
-        inputs.atoma_outcome == 'success' &&
-        inputs.session_cache_key != ''
-      uses: actions/cache/save@v4
-      with:
-        path: session.json
-        key: ${{ inputs.session_cache_key }}-${{ github.run_number }}
-
-    - name: Load dispatch workflow
-      if: >-
-        inputs.atoma_outcome == 'success' &&
-        inputs.directive != '' &&
-        inputs.max_iterations_reached != 'true' &&
-        steps.loop-control.outputs.loop_limit_reached != 'true'
-      id: dispatch-workflow
-      shell: python3 {0}
-      env:
-        ORCHESTRATION_FILE: ${{ inputs.orchestration_file }}
-      run: |
-        import json
-        import os
-        from pathlib import Path
-
-        workflow = "atoma-runner.yml"
-        path = Path(os.environ["ORCHESTRATION_FILE"])
-        if path.exists():
-            with path.open(encoding="utf-8") as f:
-                config = json.load(f)
-            dispatch = config.get("dispatch")
-            if isinstance(dispatch, dict):
-                configured = dispatch.get("workflow")
-                if isinstance(configured, str) and configured:
-                    workflow = configured
-
-        with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as f:
-            f.write(f"workflow={workflow}\n")
-
-    - name: Dispatch next agent
-      if: >-
-        inputs.atoma_outcome == 'success' &&
-        inputs.directive != '' &&
-        inputs.max_iterations_reached != 'true' &&
-        steps.loop-control.outputs.loop_limit_reached != 'true'
       shell: bash
       env:
-        GH_TOKEN: ${{ github.token }}
-        DIRECTIVE: ${{ inputs.directive }}
-        NUMBER: ${{ inputs.number }}
         TYPE: ${{ inputs.type }}
-        NOTIFY: ${{ inputs.notify }}
-        WORKFLOW_NAME: ${{ steps.dispatch-workflow.outputs.workflow }}
-      run: |
-        if ! [[ "$DIRECTIVE" =~ ^[a-z][a-z0-9-]*$ ]]; then
-          echo "::error::Invalid directive value: ${DIRECTIVE}"
-          exit 1
-        fi
-
-        echo "Dispatching '${DIRECTIVE}' on ${TYPE} #${NUMBER} via ${WORKFLOW_NAME} ..."
-        gh workflow run "$WORKFLOW_NAME" \
-          --field agent="$DIRECTIVE" \
-          --field number="$NUMBER" \
-          --field type="$TYPE" \
-          --field notify="$NOTIFY"
-
-    - name: Comment on loop limit reached
-      if: >-
-        inputs.atoma_outcome == 'success' &&
-        inputs.directive != '' &&
-        inputs.max_iterations_reached != 'true' &&
-        steps.loop-control.outputs.loop_limit_reached == 'true'
-      shell: bash
-      env:
-        GH_TOKEN: ${{ github.token }}
         NUMBER: ${{ inputs.number }}
         AGENT: ${{ inputs.agent_name }}
-        DIRECTIVE: ${{ inputs.directive }}
-        NOTIFY: ${{ inputs.notify }}
-        RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        RUN_ID: ${{ github.run_id }}
       run: |
-        if [ -n "$NUMBER" ]; then
-          MENTION=""
-          if [ -n "$NOTIFY" ]; then
-            MENTION="@${NOTIFY} - "
-          fi
-          BD=$(mktemp)
-          echo "${MENTION}Auto-dispatch loop limit (5 consecutive runs) reached." > "$BD"
-          echo "To prevent unintended infinite agent loops and excessive API costs, further automatic handoff (next agent: ${DIRECTIVE}) has been safely suppressed." >> "$BD"
-          echo "Please review the progress so far. To resume, post a manual comment on the Issue/PR (e.g. /${DIRECTIVE}) to trigger the next agent at any time." >> "$BD"
-          echo "See the workflow run for details: ${RUN_URL}." >> "$BD"
-          gh issue comment "$NUMBER" --body-file "$BD"
-          rm -f "$BD"
+        if [ ! -f session.json ]; then
+          echo "No session.json found, skipping save."
+          exit 0
         fi
+
+        TARGET="sessions/${TYPE}-${NUMBER}-${AGENT}.json"
+
+        # Ensure atoma-data branch exists; create orphan from empty tree if not.
+        if ! git ls-remote --exit-code origin atoma-data > /dev/null 2>&1; then
+          echo "Creating atoma-data orphan branch..."
+          git config user.email "action@github.com"
+          git config user.name "GitHub Actions"
+          # 4b825dc6... is Git's canonical empty-tree SHA (never changes)
+          COMMIT=$(git commit-tree "4b825dc642cb6eb9a060e54bf8d69288fbee4904" \
+            -m "init: atoma-data session store")
+          git push origin "${COMMIT}:refs/heads/atoma-data"
+          echo "Created atoma-data at ${COMMIT}"
+        fi
+
+        # Use a worktree so we don't disturb the current checkout.
+        git fetch origin atoma-data
+        git worktree add /tmp/atoma-data-wt origin/atoma-data
+
+        mkdir -p "/tmp/atoma-data-wt/sessions"
+        cp session.json "/tmp/atoma-data-wt/${TARGET}"
+
+        pushd /tmp/atoma-data-wt
+        git config user.email "action@github.com"
+        git config user.name "GitHub Actions"
+        git add "${TARGET}"
+        if git diff --cached --quiet; then
+          echo "Session unchanged, skipping commit."
+        else
+          git commit -m "session: ${AGENT} on ${TYPE} #${NUMBER} (run ${RUN_ID})"
+          # Retry up to 3 times on push conflict (different issue/agent pushing simultaneously).
+          for attempt in 1 2 3; do
+            if git push origin HEAD:atoma-data; then
+              echo "Session saved to atoma-data:${TARGET}"
+              break
+            fi
+            echo "Push attempt ${attempt} failed, rebasing and retrying..."
+            git fetch origin atoma-data
+            git rebase origin/atoma-data
+            sleep 2
+          done
+        fi
+        popd
+
+        git worktree remove --force /tmp/atoma-data-wt
 
     - name: Report failure
       if: inputs.job_status != 'success'

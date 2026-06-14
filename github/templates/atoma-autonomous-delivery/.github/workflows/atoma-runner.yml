@@ -93,11 +93,11 @@ jobs:
           openai_base_url: ${{ vars.OPENAI_BASE_URL }}
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           atoma_provider: ${{ vars.ATOMA_PROVIDER }}
-          github_token: ${{ secrets.GITHUB_PAT_TOKEN }}  # optional: PAT with copilot scope (only for GitHub Copilot LLM provider)
+          github_token: ${{ secrets.GITHUB_PAT_TOKEN }}  # required when ATOMA_PROVIDER=github-copilot; otherwise auto-generated token is sufficient
 
-      - name: Finalize run
+      - name: Post result
         if: always()
-        uses: yuma-seno/atoma/github/actions/finalize@main
+        uses: yuma-seno/atoma/github/actions/post-result@main
         with:
           agent_name: ${{ inputs.agent }}
           number: ${{ inputs.number }}
@@ -109,7 +109,18 @@ jobs:
           context_snapshot_hash: ${{ steps.prep.outputs.context_snapshot_hash }}
           context_event_count: ${{ steps.prep.outputs.context_event_count }}
           resolved_number: ${{ steps.prep.outputs.resolved_number }}
-          session_cache_key: ${{ steps.prep.outputs.session_cache_key }}
           directive: ${{ steps.atoma.outputs.directive }}
           max_iterations_reached: ${{ steps.atoma.outputs.max_iterations_reached }}
+
+      - name: Dispatch next agent
+        if: steps.atoma.outcome == 'success'
+        uses: yuma-seno/atoma/github/actions/dispatch-next@main
+        with:
+          agent_name: ${{ inputs.agent }}
+          number: ${{ inputs.number }}
+          type: ${{ inputs.type }}
+          notify: ${{ inputs.notify }}
+          directive: ${{ steps.atoma.outputs.directive }}
+          max_iterations_reached: ${{ steps.atoma.outputs.max_iterations_reached }}
+          new_event_count: ${{ steps.prep.outputs.new_event_count }}
           orchestration_file: .github/atoma/orchestration.json

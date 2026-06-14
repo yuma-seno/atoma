@@ -21,7 +21,7 @@ inputs:
 
   agent_name:
     description: >
-      Agent name used to build the session cache key.
+      Agent name used to build the context session.
       Example: "orchestrator", "engineer", "reviewer"
     required: true
 
@@ -56,13 +56,6 @@ outputs:
       Otherwise, same as the input number.
     value: ${{ steps.fetch.outputs.resolved_number }}
 
-  session_cache_key:
-    description: >
-      The cache key prefix used to restore (and to save on the workflow side).
-      Format: "atoma-v4-{type}-{number}-{agent_name}"
-      Use this key when calling actions/cache/save in the workflow.
-    value: ${{ steps.build-cache-key.outputs.cache_key }}
-
 # ── Steps ─────────────────────────────────────────────────────────────────
 runs:
   using: 'composite'
@@ -78,28 +71,25 @@ runs:
         OUT_FILE: events.json
       run: bash "${{ github.action_path }}/fetch_events.sh"
 
-    # Build the canonical cache key AFTER fetch (resolved_number is now known).
-    # This avoids the circular dependency of referencing the step's own output.
-    - name: Build session cache key
-      id: build-cache-key
+    - name: Restore agent session from atoma-data
+      id: restore-session
       shell: bash
+      env:
+        TYPE: ${{ inputs.type }}
+        NUMBER: ${{ inputs.number }}
+        AGENT: ${{ inputs.agent_name }}
       run: |
-        TYPE="${{ inputs.type }}"
-        NUMBER="${{ inputs.number }}"
-        AGENT="${{ inputs.agent_name }}"
-        KEY="atoma-v4-${TYPE}-${NUMBER}-${AGENT}"
-        echo "cache_key=${KEY}" >> "$GITHUB_OUTPUT"
-        echo "Session cache key: ${KEY}"
-
-    - name: Restore agent session cache
-      id: restore-cache
-      uses: actions/cache/restore@v4
-      with:
-        path: session.json
-        # Use a unique key per run so saves never overwrite; restore-keys picks the latest.
-        key: ${{ steps.build-cache-key.outputs.cache_key }}-${{ github.run_number }}
-        restore-keys: |
-          ${{ steps.build-cache-key.outputs.cache_key }}-
+        TARGET="sessions/${TYPE}-${NUMBER}-${AGENT}.json"
+        if git fetch origin atoma-data --depth=1 2>/dev/null; then
+          if git cat-file -e "origin/atoma-data:${TARGET}" 2>/dev/null; then
+            git show "origin/atoma-data:${TARGET}" > session.json
+            echo "Restored session: ${TARGET}"
+          else
+            echo "No existing session at ${TARGET}, starting fresh."
+          fi
+        else
+          echo "atoma-data branch does not yet exist, starting fresh."
+        fi
 
     - name: Build context session
       id: context
