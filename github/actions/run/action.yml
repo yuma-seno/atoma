@@ -71,7 +71,8 @@ inputs:
 
   github_token:
     description: >
-      GitHub Personal Access Token used by MCP tools and Copilot provider.
+      GitHub Personal Access Token with the `copilot` scope.
+      Only needed when using the GitHub Copilot LLM provider.
       Falls back to the auto-generated GITHUB_TOKEN when empty.
     required: false
     default: ''
@@ -165,8 +166,8 @@ runs:
         fi
 
         # Override GH_TOKEN with user-provided PAT if supplied.
-        # The auto-generated GITHUB_TOKEN lacks the copilot scope needed for
-        # Copilot provider and certain GitHub MCP operations.
+        # Only needed for the GitHub Copilot provider (requires `copilot` scope).
+        # When using OpenAI/OpenRouter, the auto-generated GITHUB_TOKEN is sufficient.
         if [ -n "$ATOMA_GITHUB_TOKEN" ]; then
           export GH_TOKEN="$ATOMA_GITHUB_TOKEN"
           export GITHUB_PERSONAL_ACCESS_TOKEN="$ATOMA_GITHUB_TOKEN"
