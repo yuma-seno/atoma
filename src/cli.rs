@@ -15,7 +15,8 @@ orchestrator: parse agent definition → call LLM → execute tools → repeat u
     after_long_help = "ENVIRONMENT VARIABLES:
   OPENAI_API_KEY         (required*)  API key for the OpenAI-compatible endpoint
   OPENAI_BASE_URL        (optional)   API base URL (default: https://openrouter.ai/api/v1)
-  GITHUB_TOKEN / GH_TOKEN (required*) GitHub token for GitHub Copilot mode
+  ATOMA_COPILOT_TOKEN     (required*) GitHub PAT with `copilot` scope for GitHub Copilot mode
+                                       (fallback: GITHUB_TOKEN or GH_TOKEN)
   ANTHROPIC_API_KEY      (required*)  API key for Anthropic (Claude) models
   ANTHROPIC_BASE_URL     (optional)   Anthropic API base URL (default: https://api.anthropic.com)
   ATOMA_PROVIDER         (optional)   Force provider: 'openai', 'github-copilot', or 'anthropic'

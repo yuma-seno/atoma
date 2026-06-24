@@ -48,7 +48,7 @@ pub async fn build_llm_client(
 }
 
 fn auto_detect_provider() -> String {
-    let has_github = std::env::var("GITHUB_TOKEN").is_ok() || std::env::var("GH_TOKEN").is_ok();
+    let has_github = std::env::var("ATOMA_COPILOT_TOKEN").is_ok();
     let has_openai = std::env::var("OPENAI_API_KEY").is_ok();
     let has_anthropic = std::env::var("ANTHROPIC_API_KEY").is_ok();
 

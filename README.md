@@ -189,7 +189,8 @@ see **[docs/tool-servers.md](docs/tool-servers.md)**.
 
 | Variable | Required | Description |
 |---|---|---|
-| `GITHUB_TOKEN` or `GH_TOKEN` | Yes | Personal access token or Actions token |
+| `ATOMA_COPILOT_TOKEN` | Yes | Personal access token with `copilot` scope |
+| `GITHUB_TOKEN` or `GH_TOKEN` | No | Fallback (not recommended; use `ATOMA_COPILOT_TOKEN` instead) |
 
 ### Provider selection
 

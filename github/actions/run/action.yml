@@ -74,6 +74,7 @@ inputs:
       GitHub Personal Access Token with the `copilot` scope.
       Required when atoma_provider is set to "github-copilot".
       When using OpenAI/OpenRouter, the auto-generated GITHUB_TOKEN is sufficient.
+      Exposed to Atoma as ATOMA_COPILOT_TOKEN.
     required: false
     default: ''
 
@@ -134,7 +135,7 @@ runs:
         GITHUB_PERSONAL_ACCESS_TOKEN: ${{ github.token }}
         GITHUB_RUN_ID: ${{ github.run_id }}
         ISSUE_NUMBER: ${{ inputs.issue_number }}
-        ATOMA_GITHUB_TOKEN: ${{ inputs.github_token }}
+        ATOMA_COPILOT_TOKEN: ${{ inputs.github_token }}
       run: |
         AGENT="${{ inputs.agent_name }}"
         DEF_DIR="${{ inputs.agent_def_dir }}"
@@ -168,9 +169,9 @@ runs:
         # Override GH_TOKEN with user-provided PAT if supplied.
         # Only needed for the GitHub Copilot provider (requires `copilot` scope).
         # When using OpenAI/OpenRouter, the auto-generated GITHUB_TOKEN is sufficient.
-        if [ -n "$ATOMA_GITHUB_TOKEN" ]; then
-          export GH_TOKEN="$ATOMA_GITHUB_TOKEN"
-          export GITHUB_PERSONAL_ACCESS_TOKEN="$ATOMA_GITHUB_TOKEN"
+        if [ -n "$ATOMA_COPILOT_TOKEN" ]; then
+          export GH_TOKEN="$ATOMA_COPILOT_TOKEN"
+          export GITHUB_PERSONAL_ACCESS_TOKEN="$ATOMA_COPILOT_TOKEN"
         fi
 
         if [ -f "$ORCHESTRATION_FILE" ]; then

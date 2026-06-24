@@ -20,7 +20,8 @@ impl OpenAIClient {
     pub fn from_env(client: reqwest::Client) -> Result<Self> {
         let api_key = std::env::var("OPENAI_API_KEY").context(
             "OPENAI_API_KEY is not set. Set OPENAI_API_KEY for OpenAI-compatible providers,\n\
-             GITHUB_TOKEN / GH_TOKEN for GitHub Copilot, or ANTHROPIC_API_KEY for Anthropic.\n\
+             ATOMA_COPILOT_TOKEN (or GITHUB_TOKEN / GH_TOKEN) for GitHub Copilot,\n\
+             or ANTHROPIC_API_KEY for Anthropic.\n\
              Use ATOMA_PROVIDER to select explicitly.",
         )?;
         let base_url = std::env::var("OPENAI_BASE_URL")

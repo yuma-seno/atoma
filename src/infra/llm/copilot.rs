@@ -16,9 +16,10 @@ pub struct CopilotClient {
 
 impl CopilotClient {
     pub async fn from_env(client: reqwest::Client) -> Result<Self> {
-        let github_token = std::env::var("GITHUB_TOKEN")
+        let github_token = std::env::var("ATOMA_COPILOT_TOKEN")
+            .or_else(|_| std::env::var("GITHUB_TOKEN"))
             .or_else(|_| std::env::var("GH_TOKEN"))
-            .context("GITHUB_TOKEN or GH_TOKEN is required for the github-copilot provider")?;
+            .context("ATOMA_COPILOT_TOKEN, GITHUB_TOKEN, or GH_TOKEN is required for the github-copilot provider")?;
         let copilot_token = exchange_copilot_token(&client, &github_token).await?;
         Ok(CopilotClient {
             client,

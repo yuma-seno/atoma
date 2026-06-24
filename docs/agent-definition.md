@@ -173,7 +173,7 @@ Atoma selects the LLM provider in this priority order:
 2. `ATOMA_PROVIDER` environment variable
 3. Auto-detection based on available environment variables:
    - `ANTHROPIC_API_KEY` → `anthropic`
-   - `GITHUB_TOKEN` / `GH_TOKEN` → `github-copilot`
+   - `ATOMA_COPILOT_TOKEN` → `github-copilot`
    - `OPENAI_API_KEY` → `openai` (default, includes OpenRouter)
 
 ### Environment variables per provider
@@ -197,7 +197,8 @@ Atoma selects the LLM provider in this priority order:
 
 | Variable | Description |
 |---|---|
-| `GITHUB_TOKEN` or `GH_TOKEN` | Personal access token or Actions token |
+| `ATOMA_COPILOT_TOKEN` | Personal access token with `copilot` scope |
+| `GITHUB_TOKEN` / `GH_TOKEN` | Fallback (not recommended for auto-detection) |
 
 ---
 
