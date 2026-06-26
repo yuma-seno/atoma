@@ -17,7 +17,6 @@ use crate::domain::config::{AtomaConfig, OutputFormat};
 pub struct ResolvedConfig {
     pub agent_def: PathBuf,
     pub tools_file: Option<PathBuf>,
-    pub template: Option<PathBuf>,
     pub max_iterations: u32,
     pub output: OutputFormat,
 }
@@ -43,7 +42,6 @@ pub fn discover_and_load() -> Result<(Option<PathBuf>, Option<AtomaConfig>)> {
 pub struct CliOverrides {
     pub agent_def: Option<PathBuf>,
     pub tools_file: Option<PathBuf>,
-    pub template: Option<PathBuf>,
     pub max_iterations: Option<u32>,
     pub output: Option<OutputFormat>,
 }
@@ -76,12 +74,6 @@ pub fn resolve_run_config(
         .or_else(|| profile.as_ref().and_then(|p| p.tools_file.clone()).map(PathBuf::from))
         .or_else(|| defaults.as_ref().and_then(|d| d.tools_file.clone()).map(PathBuf::from));
 
-    let template = overrides
-        .template
-        .clone()
-        .or_else(|| profile.as_ref().and_then(|p| p.template.clone()).map(PathBuf::from))
-        .or_else(|| defaults.as_ref().and_then(|d| d.template.clone()).map(PathBuf::from));
-
     let max_iterations = overrides
         .max_iterations
         .or_else(|| profile.as_ref().and_then(|p| p.max_iterations))
@@ -96,7 +88,6 @@ pub fn resolve_run_config(
     Ok(ResolvedConfig {
         agent_def,
         tools_file,
-        template,
         max_iterations,
         output,
     })

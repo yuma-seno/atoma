@@ -24,11 +24,8 @@ fn init_timeout() -> Duration {
         .unwrap_or(Duration::from_secs(120))
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct RegisteredTool {
-    pub server_name: String,
-    pub tool_name: String,
     pub prefixed_name: String,
     pub schema: Value,
 }
@@ -196,8 +193,6 @@ impl McpConnection {
                     .to_string();
                 let prefixed = format!("{}__{}", self.name, tool_name);
                 RegisteredTool {
-                    server_name: self.name.clone(),
-                    tool_name: tool_name.clone(),
                     prefixed_name: prefixed,
                     schema: tool.clone(),
                 }

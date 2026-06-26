@@ -11,6 +11,7 @@ use crate::cli::{Cli, Command};
 use crate::domain::config::OutputFormat;
 use crate::domain::ports::AgentDefPort;
 use crate::infra::config::{self as config_module, CliOverrides};
+use crate::application::runner::{RunSettings, RunDeps};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -51,9 +52,8 @@ async fn main() -> Result<()> {
                 CliOverrides {
                     agent_def,
                     tools_file,
-                    template: template.clone(),
                     max_iterations,
-                    output: Some(output_format.clone()),
+                    output: Some(output_format),
                 },
                 profile.as_deref(),
                 config.as_ref(),
@@ -76,21 +76,25 @@ async fn main() -> Result<()> {
             let mcp_factory = infra::mcp::McpRegistryFactory;
 
             let result = application::runner::run(
-                resolved.agent_def,
-                in_session,
-                context_session,
-                prompt_file,
-                out_session,
-                template,
-                resolved.tools_file,
-                resolved.max_iterations,
-                after_iteration_hook,
-                resolved.output,
-                llm.as_ref(),
-                &agent_def_port,
-                &session_port,
-                &tool_def_port,
-                &mcp_factory,
+                RunSettings {
+                    agent_def_path: resolved.agent_def,
+                    in_session,
+                    context_sessions: context_session,
+                    prompt_file,
+                    out_session,
+                    template_path: template,
+                    tools_file: resolved.tools_file,
+                    max_iterations: resolved.max_iterations,
+                    after_iteration_hook,
+                    output_format: resolved.output,
+                },
+                RunDeps {
+                    llm: llm.as_ref(),
+                    agent_def: &agent_def_port,
+                    session: &session_port,
+                    tool_def: &tool_def_port,
+                    mcp_factory: &mcp_factory,
+                },
             )
             .await;
 

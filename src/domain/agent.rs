@@ -25,10 +25,9 @@ pub struct AgentDef {
     /// The reserved fields `model` and `messages` cannot be overridden.
     #[serde(default)]
     pub extra_body: HashMap<String, Value>,
-    /// Arbitrary metadata for external tooling (e.g. Atoma-Actions).
-    /// Ignored by Atoma itself.
+    /// Arbitrary metadata for external tooling (e.g. orchestration configs).
+    /// Parsed from agent definition YAML for forward-compatibility.
     #[serde(default)]
-    #[allow(dead_code)]
     pub metadata: Option<Value>,
 }
 

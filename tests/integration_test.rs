@@ -8,7 +8,7 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 use tempfile::tempdir;
 
-use atoma::application::runner::run;
+use atoma::application::runner::{run, RunSettings, RunDeps};
 use atoma::domain::agent::{AgentDef, ParsedAgentDef};
 use atoma::domain::config::OutputFormat;
 use atoma::domain::ports::{
@@ -153,21 +153,25 @@ async fn test_single_text_response() {
     std::fs::write(&agent_path, "").unwrap();
 
     let result = run(
-        agent_path,
-        None,
-        vec![],
-        None,
-        None,
-        None,
-        None,
-        10,
-        None,
-        OutputFormat::Text,
-        &llm,
-        &agent_port,
-        &session_port,
-        &tool_def_port,
-        &mcp_factory,
+        RunSettings {
+            agent_def_path: agent_path,
+            in_session: None,
+            context_sessions: vec![],
+            prompt_file: None,
+            out_session: None,
+            template_path: None,
+            tools_file: None,
+            max_iterations: 10,
+            after_iteration_hook: None,
+            output_format: OutputFormat::Text,
+        },
+        RunDeps {
+            llm: &llm,
+            agent_def: &agent_port,
+            session: &session_port,
+            tool_def: &tool_def_port,
+            mcp_factory: &mcp_factory,
+        },
     )
     .await;
 
@@ -205,21 +209,25 @@ async fn test_tool_call_then_text_response() {
     std::fs::write(&tools_path, "").unwrap();
 
     let result = run(
-        agent_path,
-        None,
-        vec![],
-        None,
-        None,
-        None,
-        Some(tools_path),
-        10,
-        None,
-        OutputFormat::Text,
-        &llm,
-        &agent_port,
-        &session_port,
-        &tool_def_port,
-        &mcp_factory,
+        RunSettings {
+            agent_def_path: agent_path,
+            in_session: None,
+            context_sessions: vec![],
+            prompt_file: None,
+            out_session: None,
+            template_path: None,
+            tools_file: Some(tools_path),
+            max_iterations: 10,
+            after_iteration_hook: None,
+            output_format: OutputFormat::Text,
+        },
+        RunDeps {
+            llm: &llm,
+            agent_def: &agent_port,
+            session: &session_port,
+            tool_def: &tool_def_port,
+            mcp_factory: &mcp_factory,
+        },
     )
     .await;
 
@@ -259,21 +267,25 @@ async fn test_max_iterations_exceeded() {
     std::fs::write(&tools_path, "").unwrap();
 
     let result = run(
-        agent_path,
-        None,
-        vec![],
-        None,
-        None,
-        None,
-        Some(tools_path),
-        2, // max 2 iterations
-        None,
-        OutputFormat::Text,
-        &llm,
-        &agent_port,
-        &session_port,
-        &tool_def_port,
-        &mcp_factory,
+        RunSettings {
+            agent_def_path: agent_path,
+            in_session: None,
+            context_sessions: vec![],
+            prompt_file: None,
+            out_session: None,
+            template_path: None,
+            tools_file: Some(tools_path),
+            max_iterations: 2,
+            after_iteration_hook: None,
+            output_format: OutputFormat::Text,
+        },
+        RunDeps {
+            llm: &llm,
+            agent_def: &agent_port,
+            session: &session_port,
+            tool_def: &tool_def_port,
+            mcp_factory: &mcp_factory,
+        },
     )
     .await;
 
@@ -324,21 +336,25 @@ async fn test_content_filter_returns_error() {
     std::fs::write(&agent_path, "").unwrap();
 
     let result = run(
-        agent_path,
-        None,
-        vec![],
-        None,
-        None,
-        None,
-        None,
-        10,
-        None,
-        OutputFormat::Text,
-        &ContentFilterLlm,
-        &agent_port,
-        &session_port,
-        &tool_def_port,
-        &mcp_factory,
+        RunSettings {
+            agent_def_path: agent_path,
+            in_session: None,
+            context_sessions: vec![],
+            prompt_file: None,
+            out_session: None,
+            template_path: None,
+            tools_file: None,
+            max_iterations: 10,
+            after_iteration_hook: None,
+            output_format: OutputFormat::Text,
+        },
+        RunDeps {
+            llm: &ContentFilterLlm,
+            agent_def: &agent_port,
+            session: &session_port,
+            tool_def: &tool_def_port,
+            mcp_factory: &mcp_factory,
+        },
     )
     .await;
 
@@ -413,21 +429,25 @@ async fn test_context_session_is_injected_but_not_persisted() {
     file_session::save(&context_session, &context_session_path).unwrap();
 
     let result = run(
-        agent_path,
-        Some(in_session_path),
-        vec![context_session_path],
-        None,
-        Some(out_session_path.clone()),
-        None,
-        None,
-        10,
-        None,
-        OutputFormat::Text,
-        &llm,
-        &agent_port,
-        &session_port,
-        &tool_def_port,
-        &mcp_factory,
+        RunSettings {
+            agent_def_path: agent_path,
+            in_session: Some(in_session_path),
+            context_sessions: vec![context_session_path],
+            prompt_file: None,
+            out_session: Some(out_session_path.clone()),
+            template_path: None,
+            tools_file: None,
+            max_iterations: 10,
+            after_iteration_hook: None,
+            output_format: OutputFormat::Text,
+        },
+        RunDeps {
+            llm: &llm,
+            agent_def: &agent_port,
+            session: &session_port,
+            tool_def: &tool_def_port,
+            mcp_factory: &mcp_factory,
+        },
     )
     .await;
 
