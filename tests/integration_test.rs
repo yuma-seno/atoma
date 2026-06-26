@@ -10,6 +10,7 @@ use tempfile::tempdir;
 
 use atoma::application::runner::run;
 use atoma::domain::agent::{AgentDef, ParsedAgentDef};
+use atoma::domain::config::OutputFormat;
 use atoma::domain::ports::{
     AgentDefPort, LlmChoice, LlmResponse, McpFactory, McpPort, SessionPort, ToolDefPort,
 };
@@ -161,6 +162,7 @@ async fn test_single_text_response() {
         None,
         10,
         None,
+        OutputFormat::Text,
         &llm,
         &agent_port,
         &session_port,
@@ -212,6 +214,7 @@ async fn test_tool_call_then_text_response() {
         Some(tools_path),
         10,
         None,
+        OutputFormat::Text,
         &llm,
         &agent_port,
         &session_port,
@@ -265,6 +268,7 @@ async fn test_max_iterations_exceeded() {
         Some(tools_path),
         2, // max 2 iterations
         None,
+        OutputFormat::Text,
         &llm,
         &agent_port,
         &session_port,
@@ -329,6 +333,7 @@ async fn test_content_filter_returns_error() {
         None,
         10,
         None,
+        OutputFormat::Text,
         &ContentFilterLlm,
         &agent_port,
         &session_port,
@@ -417,6 +422,7 @@ async fn test_context_session_is_injected_but_not_persisted() {
         None,
         10,
         None,
+        OutputFormat::Text,
         &llm,
         &agent_port,
         &session_port,

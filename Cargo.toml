@@ -9,6 +9,10 @@ repository = "https://github.com/yuma-seno/atoma"
 name = "atoma"
 path = "src/main.rs"
 
+[[bin]]
+name = "atoma-github"
+path = "src/bin/atoma_github/main.rs"
+
 [dependencies]
 clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
@@ -20,6 +24,10 @@ anyhow = "1"
 async-trait = "0.1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+toml = "0.8"
+chrono = { version = "0.4", features = ["serde"] }
+futures = "0.3.32"
+regex-lite = "0.1.9"
 
 [dev-dependencies]
 tempfile = "3"

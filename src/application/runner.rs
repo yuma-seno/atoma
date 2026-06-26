@@ -2,6 +2,7 @@ use anyhow::{bail, Context, Result};
 use std::io::IsTerminal;
 use std::path::PathBuf;
 
+use crate::domain::config::OutputFormat;
 use crate::domain::ports::{
     AgentDefPort, LlmPort, LlmUsage, McpFactory, McpPort, SessionPort, ToolDefPort,
 };
@@ -36,6 +37,7 @@ pub async fn run(
     tools_file: Option<PathBuf>,
     max_iterations: u32,
     after_iteration_hook: Option<PathBuf>,
+    output_format: OutputFormat,
     llm: &dyn LlmPort,
     agent_def_port: &dyn AgentDefPort,
     session_port: &dyn SessionPort,
@@ -259,7 +261,30 @@ pub async fn run(
     }
 
     // 10. Print final response to stdout
-    println!("{}", response_text);
+    match output_format {
+        OutputFormat::Text => {
+            println!("{}", response_text);
+        }
+        OutputFormat::Json | OutputFormat::JsonPretty => {
+            let directive = extract_directive_from_text(&response_text);
+            let output = serde_json::json!({
+                "response": response_text,
+                "usage": {
+                    "prompt_tokens": total_usage.prompt_tokens,
+                    "completion_tokens": total_usage.completion_tokens,
+                    "total_tokens": total_usage.total_tokens,
+                },
+                "directive": directive,
+                "session_path": out_path.map(|p| p.to_string_lossy().to_string()),
+                "max_iterations_reached": false,
+            });
+            if matches!(output_format, OutputFormat::JsonPretty) {
+                println!("{}", serde_json::to_string_pretty(&output)?);
+            } else {
+                println!("{}", serde_json::to_string(&output)?);
+            }
+        }
+    }
 
     Ok(())
 }
@@ -330,6 +355,9 @@ fn session_for_persistence(session: &Session) -> Session {
 }
 
 /// Execute all tool calls from an LLM response, appending results to the session.
+///
+/// Tool calls are executed sequentially. Future improvement: parallel execution
+/// once McpPort supports `&self` (internal sync) for its call method.
 async fn execute_tool_calls(
     agent_name: &str,
     tool_calls: &[ToolCall],
@@ -500,6 +528,43 @@ pub(crate) fn extract_comment_id(text: &str) -> Option<u64> {
         .strip_prefix("<!-- atoma:comment_id=")?
         .strip_suffix(" -->")?;
     inner.parse::<u64>().ok()
+}
+
+/// Extract a directive (agent name) from the first command-like line of text.
+///
+/// Accepts `/agent-name` and common markdown variants like `/`agent-name``.
+pub(crate) fn extract_directive_from_text(text: &str) -> Option<String> {
+    let command_pattern =
+        regex_lite::Regex::new(r"^/(?P<agent>[a-z][a-z0-9-]+)(?:\b|\s|$)").ok()?;
+    for raw_line in text.lines() {
+        let line = raw_line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        // Strip markdown list markers
+        let cleaned = regex_lite::Regex::new(r"^(?:[-*+]\s+|>\s*)+")
+            .ok()
+            .map(|re| re.replace(line, ""))
+            .unwrap_or_else(|| line.into());
+        let cleaned = cleaned.trim();
+
+        // Try plain, backtick variants
+        let variants = [cleaned.to_string(), format!("/{}", cleaned.trim_start_matches('/'))];
+        for variant in &variants {
+            if let Some(cap) = command_pattern.captures(variant) {
+                let agent = cap.name("agent")?.as_str().to_string();
+                // Validate agent name format
+                if regex_lite::Regex::new(r"^[a-z][a-z0-9-]*$")
+                    .ok()
+                    .map(|re| re.is_match(&agent))
+                    .unwrap_or(false)
+                {
+                    return Some(agent);
+                }
+            }
+        }
+    }
+    None
 }
 
 #[cfg(test)]

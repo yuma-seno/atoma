@@ -3,13 +3,12 @@ mod cli;
 mod domain;
 mod infra;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::Parser;
 use tracing_subscriber::EnvFilter;
 
 use crate::cli::{Cli, Command};
 use crate::domain::config::OutputFormat;
-use crate::domain::ports::AgentDefPort;
 use crate::infra::config::{self as config_module, CliOverrides};
 
 #[tokio::main]
@@ -37,10 +36,8 @@ async fn main() -> Result<()> {
             max_iterations,
             after_iteration_hook,
         } => {
-            let config = match config_module::discover_and_load() {
-                Ok((_path, Some(cfg))) => Some(cfg),
-                _ => None,
-            };
+            let (_config_path, config) = config_module::discover_and_load().ok();
+            let config = config.flatten();
 
             let output_format = match output.as_deref() {
                 Some("json") => OutputFormat::Json,
@@ -51,7 +48,7 @@ async fn main() -> Result<()> {
                 CliOverrides {
                     agent_def,
                     tools_file,
-                    template: template.clone(),
+                    template,
                     max_iterations,
                     output: Some(output_format.clone()),
                 },
@@ -68,7 +65,7 @@ async fn main() -> Result<()> {
             }
 
             let agent_def_port = infra::persistence::agent_def::FileAgentDefAdapter;
-            let parsed_agent = AgentDefPort::parse(&agent_def_port, &resolved.agent_def)?;
+            let parsed_agent = agent_def_port.parse(&resolved.agent_def)?;
             let provider_hint = parsed_agent.frontmatter.provider.as_deref();
             let llm = infra::llm::build_llm_client(provider_hint).await?;
             let session_port = infra::persistence::session::FileSessionAdapter;
