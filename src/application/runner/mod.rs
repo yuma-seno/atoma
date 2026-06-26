@@ -17,7 +17,7 @@ use crate::infra::template;
 
 pub(crate) use execution::{extract_comment_id, extract_directive_from_text};
 pub use execution::{inference_loop, MaxIterationsReached};
-pub use context::{load_transient_context_messages, session_for_persistence};
+pub use context::session_for_persistence;
 
 // ── Bundled parameter structs ────────────────────────────────────────────────
 
@@ -278,7 +278,7 @@ pub async fn run(settings: RunSettings, deps: RunDeps<'_>) -> Result<()> {
         OutputFormat::Text => {
             println!("{}", response_text);
         }
-        OutputFormat::Json | OutputFormat::JsonPretty => {
+        OutputFormat::Json => {
             let directive = extract_directive_from_text(&response_text);
             let output = serde_json::json!({
                 "response": response_text,
@@ -291,11 +291,7 @@ pub async fn run(settings: RunSettings, deps: RunDeps<'_>) -> Result<()> {
                 "session_path": out_path.map(|p| p.to_string_lossy().to_string()),
                 "max_iterations_reached": false,
             });
-            if matches!(output_format, OutputFormat::JsonPretty) {
-                println!("{}", serde_json::to_string_pretty(&output)?);
-            } else {
-                println!("{}", serde_json::to_string(&output)?);
-            }
+            println!("{}", serde_json::to_string(&output)?);
         }
     }
 

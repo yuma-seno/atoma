@@ -43,7 +43,6 @@ pub enum OutputFormat {
     #[default]
     Text,
     Json,
-    JsonPretty,
 }
 
 /// Named profile — overrides defaults.

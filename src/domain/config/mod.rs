@@ -1,14 +1,8 @@
 //! Configuration types for Atoma.
 //!
-//! Organized into three sub-modules by concern:
-//! - `atoma_toml`: atoma.toml profile and defaults
-//! - `orchestration`: orchestration.json workflow config
-//! - `shell_guard`: dangerous command blocking patterns
+//! Currently only `atoma_toml` is active. Other config concerns
+//! are added here when they become needed at runtime.
 
 mod atoma_toml;
-mod orchestration;
-mod shell_guard;
 
 pub use atoma_toml::*;
-pub use orchestration::*;
-pub use shell_guard::*;

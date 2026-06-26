@@ -26,8 +26,9 @@ pub struct AgentDef {
     #[serde(default)]
     pub extra_body: HashMap<String, Value>,
     /// Arbitrary metadata for external tooling (e.g. orchestration configs).
-    /// Parsed from agent definition YAML for forward-compatibility.
+    /// Kept for YAML deserialization compatibility; not read at runtime.
     #[serde(default)]
+    #[allow(dead_code)]
     pub metadata: Option<Value>,
 }
 
