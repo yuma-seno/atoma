@@ -38,28 +38,21 @@ cargo build --release
 # binary: target/release/atoma
 ```
 
-## Quick Start (Docker / Podman)
+## Quick Start
 
 ```bash
-# 1. Build the image
-docker build -t atoma -f Dockerfile .
+# Build from source (recommended)
+cd atoma
+cargo build --release
 
-# 2. Set your API key
+# Set your API key
 export OPENAI_API_KEY="sk-your-key-here"
 
-# 3. Run with a prompt via stdin
-echo "Hello, what can you do?" | docker run --rm -i \
-  -e OPENAI_API_KEY \
-  -v "$PWD/.atoma_sample/agent-definitions:/defs" \
-  atoma run --agent-def /defs/OrchestratorAgent.md
-
-# Or via a prompt file
-docker run --rm \
-  -e OPENAI_API_KEY \
-  -v "$PWD/.atoma_sample/agent-definitions:/defs" \
-  -v "$PWD/prompt.txt:/prompt.txt" \
-  atoma run --agent-def /defs/OrchestratorAgent.md --prompt-file /prompt.txt
+# Run with a prompt via stdin
+echo "Hello, what can you do?" | ./target/release/atoma run --agent-def ./agent.md
 ```
+
+See **[atoma-autonomous-delivery](https://github.com/yuma-seno/atoma-autonomous-delivery)** for a complete multi-agent workflow template with Docker and GitHub Actions.
 
 ## CLI Reference
 
@@ -259,7 +252,7 @@ filesystem:
 
 shell:
   command: npx
-  args: ["-y", "mcp-shell", "."]
+  args: ["-y", "mcp-shell-server", "."]
   hooks:
     tool_denylist: ["shell__rm*", "shell__sudo*"]
     before_tool: ./scripts/shell_guard.py
@@ -313,9 +306,9 @@ see **[docs/tool-servers.md](docs/tool-servers.md)**.
 ## Development
 
 ```bash
-cargo build --release   # build binary
+cargo build --release   # build binaries (atoma + atoma-github)
 cargo test              # run all tests
-```
+``````
 
 For container builds (Docker / Podman), Podman rootless notes, and the overall
 project structure, see **[docs/development.md](docs/development.md)**.

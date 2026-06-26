@@ -55,7 +55,7 @@ filesystem:
 ```yaml
 shell:
   command: npx
-  args: ["-y", "mcp-shell", "."]
+  args: ["-y", "mcp-shell-server", "."]
   env: {}
   hooks:
     # Block destructive patterns
@@ -64,7 +64,6 @@ shell:
       - "shell__sudo*"
     # Require human-in-the-loop approval for everything else
     before_tool: ./scripts/shell_guard.py
-    after_tool:  ./scripts/audit_log.py
 ```
 
 ### Multiple servers in one file
@@ -76,7 +75,7 @@ filesystem:
 
 shell:
   command: npx
-  args: ["-y", "mcp-shell", "."]
+  args: ["-y", "mcp-shell-server", "."]
 
 github:
   command: npx
@@ -176,8 +175,7 @@ Use the **prefixed** names in `tool_allowlist` and `tool_denylist` patterns.
 
 ## Hook script examples
 
-Sample Python hook scripts are provided in the repository under
-[.atoma_sample/tools/scripts/](.atoma_sample/tools/scripts/).
+Sample hook scripts are provided in the `atoma-autonomous-delivery` template repository.
 
 **Minimal shell guard (`before_tool`):**
 

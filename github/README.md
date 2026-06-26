@@ -93,8 +93,6 @@ Reads the orchestration config and dispatches the next agent if one is requested
 
 Omitting this step from a workflow makes the run single-agent; useful for simple AI workflows that don't need multi-agent handoff.
 
-### `setup-runtime`
-
 ### `parse-comment-command`
 
 Extracts `/agent-name` style slash commands from the first line of a comment.
