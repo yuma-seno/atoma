@@ -202,7 +202,7 @@ impl McpConnection {
         Ok(registered)
     }
 
-    pub async fn call_tool(&mut self, tool_name: &str, arguments: &Value) -> Result<String> {
+    pub async fn call_tool(&mut self, tool_name: &str, arguments: &Value) -> Result<(String, bool)> {
         let response = tokio::time::timeout(
             request_timeout(),
             self.send_request(
@@ -231,6 +231,12 @@ impl McpConnection {
             .get("result")
             .context("MCP server did not return a result")?;
 
+        let session_ends = result
+            .get("_meta")
+            .and_then(|m| m.get("session_ends"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+
         let content_parts = result
             .get("content")
             .and_then(|c| c.as_array())
@@ -248,7 +254,7 @@ impl McpConnection {
             })
             .unwrap_or_else(|| serde_json::to_string(result).unwrap_or_default());
 
-        Ok(content_parts)
+        Ok((content_parts, session_ends))
     }
 
     async fn send_request(&mut self, method: &str, params: Value) -> Result<Value> {
@@ -427,7 +433,7 @@ impl McpRegistry {
         agent_name: &str,
         prefixed_name: &str,
         arguments: &Value,
-    ) -> Result<String> {
+    ) -> Result<crate::domain::ports::ToolCallResult> {
         let server_name = prefixed_name.split("__").next().unwrap_or("");
         let hooks = self.hooks.get(server_name).cloned();
 
@@ -444,7 +450,7 @@ impl McpRegistry {
             }
         }
 
-        let result = self.call_tool(prefixed_name, arguments).await?;
+        let (content, session_ends) = self.call_tool(prefixed_name, arguments).await?;
 
         if let Some(ref h) = hooks {
             if let Some(ref script) = h.after_tool {
@@ -452,20 +458,23 @@ impl McpRegistry {
                     "agent": agent_name,
                     "tool": prefixed_name,
                     "arguments": arguments,
-                    "result": result,
+                    "result": content,
                 });
                 hooks::run_after_hook(script, payload).await;
             }
         }
 
-        Ok(result)
+        Ok(crate::domain::ports::ToolCallResult {
+            content,
+            session_ends,
+        })
     }
 
     pub(crate) async fn call_tool(
         &mut self,
         prefixed_name: &str,
         arguments: &Value,
-    ) -> Result<String> {
+    ) -> Result<(String, bool)> {
         let (server_name, tool_name) = prefixed_name
             .split_once("__")
             .context("Invalid tool name format (expected server__tool)")?;
@@ -492,7 +501,7 @@ impl crate::domain::ports::McpPort for McpRegistry {
         agent_name: &str,
         prefixed_name: &str,
         arguments: &serde_json::Value,
-    ) -> anyhow::Result<String> {
+    ) -> anyhow::Result<crate::domain::ports::ToolCallResult> {
         self.call_tool_with_hooks(agent_name, prefixed_name, arguments)
             .await
     }

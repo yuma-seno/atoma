@@ -20,7 +20,19 @@ impl std::fmt::Display for MaxIterationsReached {
 
 impl std::error::Error for MaxIterationsReached {}
 
+/// Result of the inference loop.
+pub enum InferenceResult {
+    /// Normal completion with final text response.
+    Completed { text: String, usage: LlmUsage },
+    /// A tool requested session suspension (session_ends: true).
+    /// The session has been saved; caller should exit cleanly.
+    #[allow(dead_code)]
+    SessionEnded { usage: LlmUsage },
+}
+
 /// Execute all tool calls from an LLM response, appending results to the session.
+///
+/// Returns `true` if any tool requested session suspension.
 ///
 /// Tool calls are executed sequentially. Parallel execution requires McpPort
 /// to adopt `&self` with internal synchronization.
@@ -29,7 +41,7 @@ async fn execute_tool_calls(
     tool_calls: &[ToolCall],
     session: &mut Session,
     mcp_registry: &mut Option<Box<dyn McpPort + Send>>,
-) -> Result<()> {
+) -> Result<bool> {
     session
         .messages
         .push(Message::assistant(None, Some(tool_calls.to_vec())));
@@ -37,6 +49,8 @@ async fn execute_tool_calls(
     let registry = mcp_registry
         .as_mut()
         .context("LLM requested tool calls but no MCP servers are configured")?;
+
+    let mut session_ends = false;
 
     for tool_call in tool_calls {
         let tool_name = &tool_call.function.name;
@@ -61,8 +75,15 @@ async fn execute_tool_calls(
             .await
         {
             Ok(result) => {
-                tracing::debug!("Tool '{}' result ({} chars)", tool_name, result.len());
-                session.messages.push(Message::tool(&tool_call.id, &result));
+                tracing::debug!("Tool '{}' result ({} chars)", tool_name, result.content.len());
+                session.messages.push(Message::tool(&tool_call.id, &result.content));
+                if result.session_ends {
+                    tracing::info!(
+                        "Tool '{}' requested session suspension — will end after this iteration",
+                        tool_name
+                    );
+                    session_ends = true;
+                }
             }
             Err(e) => {
                 let msg = format!("Error: {}", e);
@@ -72,7 +93,7 @@ async fn execute_tool_calls(
         }
     }
 
-    Ok(())
+    Ok(session_ends)
 }
 
 /// Run the inference loop: call LLM, handle tool calls or final response.
@@ -87,7 +108,7 @@ pub async fn inference_loop(
     mcp_registry: &mut Option<Box<dyn McpPort + Send>>,
     max_iterations: u32,
     after_iteration_hook: Option<&str>,
-) -> Result<(String, LlmUsage)> {
+) -> Result<InferenceResult> {
     let mut total_usage = LlmUsage::default();
 
     for iteration in 1..=max_iterations {
@@ -131,7 +152,14 @@ pub async fn inference_loop(
             }
 
             tracing::info!("LLM requested {} tool call(s)", calls.len());
-            execute_tool_calls(agent_name, &calls, session, mcp_registry).await?;
+            let session_ends = execute_tool_calls(agent_name, &calls, session, mcp_registry).await?;
+
+            if session_ends {
+                tracing::info!("Tool requested session suspension; ending inference loop");
+                return Ok(InferenceResult::SessionEnded {
+                    usage: total_usage,
+                });
+            }
 
             if let Some(hook) = after_iteration_hook {
                 if let Some(new_content) =
@@ -157,7 +185,10 @@ pub async fn inference_loop(
                     }
                     session.messages.push(Message::assistant(Some(&text), None));
                     tracing::info!("LLM returned final response ({} chars)", text.len());
-                    return Ok((text, total_usage));
+                    return Ok(InferenceResult::Completed {
+                        text,
+                        usage: total_usage,
+                    });
                 }
                 "length" => {
                     let text = content
@@ -170,7 +201,10 @@ pub async fn inference_loop(
                         "LLM response truncated (finish_reason: length, {} chars)",
                         text.len()
                     );
-                    return Ok((text, total_usage));
+                    return Ok(InferenceResult::Completed {
+                        text,
+                        usage: total_usage,
+                    });
                 }
                 "content_filter" => bail!("LLM response was blocked by content filter"),
                 "tool_calls" => {

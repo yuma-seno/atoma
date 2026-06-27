@@ -47,6 +47,12 @@ pub trait LlmPort: Send + Sync {
 
 // ── MCP port ──────────────────────────────────────────────────────────────────
 
+/// Result from a single MCP tool call.
+pub struct ToolCallResult {
+    pub content: String,
+    pub session_ends: bool,
+}
+
 /// Port for MCP tool execution.
 ///
 /// `McpRegistry` in the `infra` layer implements this trait.
@@ -59,7 +65,7 @@ pub trait McpPort: Send {
         agent_name: &str,
         prefixed_name: &str,
         arguments: &Value,
-    ) -> Result<String>;
+    ) -> Result<ToolCallResult>;
 }
 
 // ── Persistence ports ─────────────────────────────────────────────────────────

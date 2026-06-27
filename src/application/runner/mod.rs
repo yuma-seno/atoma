@@ -16,7 +16,7 @@ use crate::domain::session::{Message, Session};
 use crate::infra::template;
 
 pub(crate) use execution::{extract_comment_id, extract_directive_from_text};
-pub use execution::{inference_loop, MaxIterationsReached};
+pub use execution::{inference_loop, MaxIterationsReached, InferenceResult};
 pub use context::session_for_persistence;
 
 // ── Bundled parameter structs ────────────────────────────────────────────────
@@ -241,7 +241,17 @@ pub async fn run(settings: RunSettings, deps: RunDeps<'_>) -> Result<()> {
     .await;
 
     let (response_text, total_usage) = match inference_result {
-        Ok(val) => val,
+        Ok(InferenceResult::Completed { text, usage }) => (text, usage),
+        Ok(InferenceResult::SessionEnded { usage: _ }) => {
+            tracing::info!("Session suspended by tool request");
+            // Save session and exit cleanly — no output needed
+            if let Some(ref path) = out_path {
+                let persisted = session_for_persistence(&session);
+                deps.session.save(&persisted, path)?;
+                tracing::info!("Session saved to: {:?} (suspended)", path);
+            }
+            return Ok(());
+        }
         Err(e) => {
             if e.downcast_ref::<MaxIterationsReached>().is_some() {
                 tracing::warn!("{}", e);

@@ -3,12 +3,13 @@ use async_trait::async_trait;
 use serde_json::Value;
 use std::collections::HashMap;
 
-use atoma::domain::ports::McpPort;
+use atoma::domain::ports::{McpPort, ToolCallResult};
 
 /// A mock MCP registry that returns predefined tool results.
 pub struct MockMcpRegistry {
     tools: Vec<Value>,
     responses: HashMap<String, String>,
+    session_ends_tools: std::collections::HashSet<String>,
 }
 
 impl MockMcpRegistry {
@@ -16,6 +17,7 @@ impl MockMcpRegistry {
         Self {
             tools: Vec::new(),
             responses: HashMap::new(),
+            session_ends_tools: std::collections::HashSet::new(),
         }
     }
 
@@ -42,6 +44,12 @@ impl MockMcpRegistry {
             .insert(tool_name.to_string(), result.to_string());
         self
     }
+
+    /// Mark a tool as session-ending (simulates _meta.session_ends: true).
+    pub fn with_session_ends(mut self, tool_name: &str) -> Self {
+        self.session_ends_tools.insert(tool_name.to_string());
+        self
+    }
 }
 
 #[async_trait]
@@ -55,9 +63,18 @@ impl McpPort for MockMcpRegistry {
         _agent_name: &str,
         prefixed_name: &str,
         _arguments: &Value,
-    ) -> Result<String> {
-        self.responses.get(prefixed_name).cloned().ok_or_else(|| {
-            anyhow::anyhow!("MockMcpRegistry: no response for tool '{}'", prefixed_name)
+    ) -> Result<ToolCallResult> {
+        let content = self
+            .responses
+            .get(prefixed_name)
+            .cloned()
+            .ok_or_else(|| {
+                anyhow::anyhow!("MockMcpRegistry: no response for tool '{}'", prefixed_name)
+            })?;
+        let session_ends = self.session_ends_tools.contains(prefixed_name);
+        Ok(ToolCallResult {
+            content,
+            session_ends,
         })
     }
 }
