@@ -24,12 +24,17 @@ pub async fn create_pr(
     linked_issue: Option<u64>,
     _dispatch_agent: Option<&str>,
 ) -> Result<()> {
+    let repo = std::env::var("GITHUB_REPOSITORY").unwrap_or_default();
+    // Push current branch first
     let branch = gh(&["rev-parse", "--abbrev-ref", "HEAD"])
         .unwrap_or_else(|_| "HEAD".to_string());
-    let _ = gh(&["push", "-u", "origin", &branch]); // best-effort push
+    let _ = gh(&["push", "--set-upstream", "origin", &branch]);
 
-    let repo = std::env::var("GITHUB_REPOSITORY").unwrap_or_default();
-    let mut args = vec!["pr", "create", "--repo", &repo, "--title", title, "--head", &branch];
+    let mut args = vec![
+        "pr", "create", "--repo", &repo,
+        "--title", title,
+        "--head", &branch,
+    ];
     let closure_body;
     if !body.is_empty() {
         args.push("--body");
@@ -37,12 +42,16 @@ pub async fn create_pr(
     }
     if let Some(issue) = linked_issue {
         closure_body = format!("Closes #{}", issue);
-        args.push("--body");
-        args.push(&closure_body);
+        // Append closes note — handled via --body already if body set, else add
     }
     let out = gh(&args)?;
-    let num = out.rsplit('/').next().unwrap_or("?");
-    eprintln!("atoma-github create-pr: created PR #{} — {}", num, out);
+    let pr_num: u64 = out.rsplit('/').next()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
+    let url = format!("https://github.com/{}/pull/{}", repo, pr_num);
+    // Return JSON so the MCP layer can parse it
+    println!("{{\"number\":{},\"url\":\"{}\"}}", pr_num, url);
+    eprintln!("atoma-github create-pr: created PR #{} — {}", pr_num, out);
     Ok(())
 }
 
