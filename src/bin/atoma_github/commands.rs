@@ -21,35 +21,39 @@ fn gh(args: &[&str]) -> Result<String> {
 pub async fn create_pr(
     title: &str,
     body: &str,
-    linked_issue: Option<u64>,
+    _linked_issue: Option<u64>,
     _dispatch_agent: Option<&str>,
 ) -> Result<()> {
-    let repo = std::env::var("GITHUB_REPOSITORY").unwrap_or_default();
-    // Push current branch first
-    let branch = gh(&["rev-parse", "--abbrev-ref", "HEAD"])
-        .unwrap_or_else(|_| "HEAD".to_string());
-    let _ = gh(&["push", "--set-upstream", "origin", &branch]);
+    let repo = std::env::var("GITHUB_REPOSITORY")
+        .or_else(|_| {
+            let remote = gh(&["remote", "get-url", "origin"]).unwrap_or_default();
+            let r = remote.trim_start_matches("https://github.com/").trim_end_matches(".git");
+            if r.is_empty() { Err(std::env::VarError::NotPresent) } else { Ok(r.to_string()) }
+        })
+        .context("GITHUB_REPOSITORY not set and could not derive from git remote")?;
 
-    let mut args = vec![
-        "pr", "create", "--repo", &repo,
-        "--title", title,
-        "--head", &branch,
-    ];
-    let closure_body;
-    if !body.is_empty() {
-        args.push("--body");
-        args.push(body);
+    let branch = std::env::var("BRANCH")
+        .or_else(|_| std::env::var("GITHUB_HEAD_REF"))
+        .unwrap_or_default();
+
+    let branch = if branch.is_empty() {
+        let b = gh(&["rev-parse", "--abbrev-ref", "HEAD"]).unwrap_or_default();
+        if b == "HEAD" {
+            let branches = gh(&["branch", "--format=%(refname:short)", "--points-at=HEAD"]).unwrap_or_default();
+            branches.lines().next().unwrap_or(&b).to_string()
+        } else { b }
+    } else { branch };
+
+    if branch.is_empty() || branch == "HEAD" {
+        anyhow::bail!("Cannot determine current branch name. Run from a named branch or set BRANCH env var.");
     }
-    if let Some(issue) = linked_issue {
-        closure_body = format!("Closes #{}", issue);
-        // Append closes note — handled via --body already if body set, else add
-    }
+
+    let _ = gh(&["push", "--set-upstream", "origin", &branch]);
+    let mut args = vec!["pr", "create", "--repo", &repo, "--title", title, "--head", &branch];
+    if !body.is_empty() { args.push("--body"); args.push(body); }
     let out = gh(&args)?;
-    let pr_num: u64 = out.rsplit('/').next()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(0);
+    let pr_num: u64 = out.rsplit('/').next().and_then(|s| s.parse().ok()).unwrap_or(0);
     let url = format!("https://github.com/{}/pull/{}", repo, pr_num);
-    // Return JSON so the MCP layer can parse it
     println!("{{\"number\":{},\"url\":\"{}\"}}", pr_num, url);
     eprintln!("atoma-github create-pr: created PR #{} — {}", pr_num, out);
     Ok(())
