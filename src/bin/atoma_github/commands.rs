@@ -1,60 +1,135 @@
 //! Command implementations for atoma-github subcommands.
+//!
+//! These delegate to the `gh` CLI, which reads GH_TOKEN / GITHUB_TOKEN
+//! from the environment for authentication.
 
-use anyhow::Result;
+use anyhow::{Context, Result};
+use std::process::Command;
+
+fn gh(args: &[&str]) -> Result<String> {
+    let output = Command::new("gh")
+        .args(args)
+        .output()
+        .context("Failed to execute gh")?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        anyhow::bail!("gh {} failed: {}", args.join(" "), stderr.trim());
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
 
 pub async fn create_pr(
-    _title: &str,
-    _description: &str,
-    _linked_issue: Option<u64>,
+    title: &str,
+    body: &str,
+    linked_issue: Option<u64>,
     _dispatch_agent: Option<&str>,
 ) -> Result<()> {
-    eprintln!("atoma-github create-pr: not yet implemented");
+    let branch = gh(&["rev-parse", "--abbrev-ref", "HEAD"])
+        .unwrap_or_else(|_| "HEAD".to_string());
+    let _ = gh(&["push", "-u", "origin", &branch]); // best-effort push
+
+    let repo = std::env::var("GITHUB_REPOSITORY").unwrap_or_default();
+    let mut args = vec!["pr", "create", "--repo", &repo, "--title", title, "--head", &branch];
+    let closure_body;
+    if !body.is_empty() {
+        args.push("--body");
+        args.push(body);
+    }
+    if let Some(issue) = linked_issue {
+        closure_body = format!("Closes #{}", issue);
+        args.push("--body");
+        args.push(&closure_body);
+    }
+    let out = gh(&args)?;
+    let num = out.rsplit('/').next().unwrap_or("?");
+    eprintln!("atoma-github create-pr: created PR #{} — {}", num, out);
     Ok(())
 }
 
-pub async fn push_commits(_pr: u64, _dispatch_agent: Option<&str>) -> Result<()> {
-    eprintln!("atoma-github push-commits: not yet implemented");
+pub async fn push_commits(pr: u64, dispatch_agent: Option<&str>) -> Result<()> {
+    let branch = gh(&["rev-parse", "--abbrev-ref", "HEAD"])
+        .unwrap_or_else(|_| "HEAD".to_string());
+    gh(&["push", "-u", "origin", &branch])?;
+    if let Some(agent) = dispatch_agent {
+        let repo = std::env::var("GITHUB_REPOSITORY").unwrap_or_default();
+        let comment = format!("<!-- atoma:dispatch={} -->", agent);
+        let _ = gh(&["pr", "comment", &pr.to_string(), "--repo", &repo, "--body", &comment]);
+    }
+    eprintln!("atoma-github push-commits: pushed to {}", branch);
     Ok(())
 }
 
 pub async fn create_sub_issue(
-    _title: &str,
-    _body: &str,
-    _parent_issue: u64,
+    title: &str,
+    body: &str,
+    parent_issue: u64,
     _notify_agent: Option<&str>,
     _trigger_agent: Option<&str>,
 ) -> Result<()> {
-    eprintln!("atoma-github create-sub-issue: not yet implemented");
+    let repo = std::env::var("GITHUB_REPOSITORY").unwrap_or_default();
+    let full_body = format!("<!-- atoma:parent=#{} -->\n{}", parent_issue, body);
+    let out = gh(&["issue", "create", "--repo", &repo, "--title", title, "--body", &full_body])?;
+    let num = out.rsplit('/').next().unwrap_or("?");
+    eprintln!("atoma-github create-sub-issue: created issue #{} — {}", num, out);
     Ok(())
 }
 
-pub async fn add_label(_issue: u64, _label: &str) -> Result<()> {
-    eprintln!("atoma-github add-label: not yet implemented");
+pub async fn add_label(issue: u64, label: &str) -> Result<()> {
+    let repo = std::env::var("GITHUB_REPOSITORY").unwrap_or_default();
+    gh(&["label", "create", label, "--repo", &repo, "--force"])?;
+    gh(&["issue", "edit", &issue.to_string(), "--repo", &repo, "--add-label", label])?;
+    eprintln!("atoma-github add-label: added '{}' to #{}", label, issue);
     Ok(())
 }
 
-pub async fn close_issue(_issue: u64, _comment: Option<&str>) -> Result<()> {
-    eprintln!("atoma-github close-issue: not yet implemented");
+pub async fn close_issue(issue: u64, _comment: Option<&str>) -> Result<()> {
+    let repo = std::env::var("GITHUB_REPOSITORY").unwrap_or_default();
+    gh(&["issue", "close", &issue.to_string(), "--repo", &repo])?;
+    eprintln!("atoma-github close-issue: closed #{}", issue);
     Ok(())
 }
 
 pub async fn fetch_events(
-    _type_: &str,
-    _number: u64,
+    type_: &str,
+    number: u64,
     _max_diff_chars: u32,
-    _out: Option<&str>,
+    out_path: Option<&str>,
 ) -> Result<()> {
-    eprintln!("atoma-github fetch-events: not yet implemented");
+    let repo = std::env::var("GITHUB_REPOSITORY").unwrap_or_default();
+    let resource = match type_ {
+        "pr" => "pulls",
+        _ => "issues",
+    };
+    let out = gh(&["api", &format!("repos/{}/{}/{}/timeline", repo, resource, number), "--jq", "."])?;
+    if let Some(path) = out_path {
+        std::fs::write(path, &out).context("Failed to write events file")?;
+    } else {
+        println!("{}", out);
+    }
+    eprintln!("atoma-github fetch-events: fetched timeline for {} #{}", type_, number);
     Ok(())
 }
 
 pub async fn build_context(
-    _events: &str,
-    _agent_name: &str,
+    events_path: &str,
+    agent_name: &str,
     _session: Option<&str>,
     _orchestration_file: Option<&str>,
-    _out: Option<&str>,
+    out_path: Option<&str>,
 ) -> Result<()> {
-    eprintln!("atoma-github build-context: not yet implemented");
+    // Simple pass-through — the real context building is in the prepare action
+    let events = std::fs::read_to_string(events_path)
+        .context("Failed to read events file")?;
+    let context = serde_json::json!({
+        "agent": agent_name,
+        "events": serde_json::from_str::<serde_json::Value>(&events).unwrap_or_default(),
+    });
+    let out = serde_json::to_string_pretty(&context)?;
+    if let Some(path) = out_path {
+        std::fs::write(path, &out).context("Failed to write context file")?;
+    } else {
+        println!("{}", out);
+    }
+    eprintln!("atoma-github build-context: built context for {}", agent_name);
     Ok(())
 }
