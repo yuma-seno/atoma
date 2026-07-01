@@ -7,10 +7,15 @@ use anyhow::{Context, Result};
 use std::process::Command;
 
 fn gh(args: &[&str]) -> Result<String> {
-    let output = Command::new("gh")
-        .args(args)
-        .output()
-        .context("Failed to execute gh")?;
+    let mut cmd = Command::new("gh");
+    cmd.args(args);
+    // Ensure PAT (ATOMA_COPILOT_TOKEN) overrides GH_TOKEN if set
+    if let Ok(pat) = std::env::var("ATOMA_COPILOT_TOKEN") {
+        if !pat.is_empty() {
+            cmd.env("GH_TOKEN", &pat);
+        }
+    }
+    let output = cmd.output().context("Failed to execute gh")?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         anyhow::bail!("gh {} failed: {}", args.join(" "), stderr.trim());
