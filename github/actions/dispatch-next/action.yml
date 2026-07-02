@@ -150,18 +150,14 @@ runs:
           exit 1
         fi
 
-        echo "Dispatching '${DIRECTIVE}' on ${TYPE} #${NUMBER} via comment directive ..."
-        # Post a dispatch comment — atoma-manual-comment.yml picks it up
-        # Using issue_comment event ensures GITHUB_TOKEN has PR creation permissions
-        BD=$(mktemp)
-        echo "<!-- atoma:dispatch=${DIRECTIVE} -->" > "$BD"
-        echo "Automatically dispatching agent \`${DIRECTIVE}\`." >> "$BD"
-        if [ "$TYPE" = "issue" ]; then
-          gh issue comment "$NUMBER" --body-file "$BD"
-        else
-          gh pr comment "$NUMBER" --body-file "$BD"
-        fi
-        rm -f "$BD"
+        echo "Dispatching '${DIRECTIVE}' on ${TYPE} #${NUMBER} via ${WORKFLOW_NAME} ..."
+        # Use gh workflow run with the current GH_TOKEN (caller's token, e.g. from issue_comment event).
+        # This preserves the caller's token permissions (PR creation OK for issue_comment events).
+        gh workflow run "$WORKFLOW_NAME" \
+          --field agent="$DIRECTIVE" \
+          --field number="$NUMBER" \
+          --field type="$TYPE" \
+          --field notify="$NOTIFY"
 
     - name: Comment on loop limit reached
       if: >-
