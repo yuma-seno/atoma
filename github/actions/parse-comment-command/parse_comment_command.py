@@ -6,6 +6,8 @@ import re
 import sys
 
 COMMAND_RE = re.compile(r"^/([a-z][a-z0-9-]*)")
+# atoma internal dispatch: <!-- atoma:dispatch=AGENT -->
+DISPATCH_RE = re.compile(r"<!--\s*atoma:dispatch\s*=\s*([a-z][a-z0-9-]*)\s*-->")
 
 
 def parse_agent(body: str) -> str:
@@ -13,7 +15,12 @@ def parse_agent(body: str) -> str:
         return ""
     for line in body.splitlines():
         stripped = line.strip()
+        # Try slash command first
         match = COMMAND_RE.match(stripped)
+        if match:
+            return match.group(1)
+        # Try dispatch comment format
+        match = DISPATCH_RE.match(stripped)
         if match:
             return match.group(1)
     return ""
