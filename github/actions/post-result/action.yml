@@ -272,7 +272,7 @@ runs:
         if git diff --cached --quiet; then
           echo "Session unchanged, skipping commit."
         else
-          git commit -m "session: ${AGENT} on ${TYPE} #${NUMBER} (run ${RUN_ID})"
+          git commit -m "session: ${AGENT} on ${TYPE} ${NUMBER} (run ${RUN_ID})"
           # Retry up to 3 times on push conflict (different issue/agent pushing simultaneously).
           for attempt in 1 2 3; do
             if git push origin HEAD:atoma-data; then
