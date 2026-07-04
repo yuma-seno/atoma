@@ -133,7 +133,7 @@ impl McpConnection {
                             line.clear();
                             match reader.read_line(&mut line).await {
                                 Ok(0) | Err(_) => break,
-                                Ok(_) => tracing::debug!(
+                                Ok(_) => tracing::info!(
                                     "[MCP:{}:stderr] {}",
                                     server_label,
                                     line.trim_end()
@@ -231,6 +231,15 @@ impl McpConnection {
             .get("result")
             .context("MCP server did not return a result")?;
 
+        // Check isError flag: when true, the MCP server encountered an error
+        // and the content contains the error description. We propagate this
+        // as an Err so the inference loop treats it as a tool failure rather
+        // than passing error text to the LLM as a successful result.
+        let is_error = result
+            .get("isError")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+
         let session_ends = result
             .get("_meta")
             .and_then(|m| m.get("session_ends"))
@@ -253,6 +262,15 @@ impl McpConnection {
                     .join("\n")
             })
             .unwrap_or_else(|| serde_json::to_string(result).unwrap_or_default());
+
+        if is_error {
+            anyhow::bail!(
+                "Tool '{}' on MCP server '{}' reported an error: {}",
+                tool_name,
+                self.name,
+                content_parts,
+            );
+        }
 
         Ok((content_parts, session_ends))
     }
