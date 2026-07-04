@@ -9,15 +9,13 @@ use std::io::IsTerminal;
 use std::path::PathBuf;
 
 use crate::domain::config::OutputFormat;
-use crate::domain::ports::{
-    AgentDefPort, LlmPort, McpFactory, McpPort, SessionPort, ToolDefPort,
-};
+use crate::domain::ports::{AgentDefPort, LlmPort, McpFactory, McpPort, SessionPort, ToolDefPort};
 use crate::domain::session::{Message, Session};
 use crate::infra::template;
 
-pub(crate) use execution::{extract_comment_id, extract_directive_from_text};
-pub use execution::{inference_loop, MaxIterationsReached, InferenceResult};
 pub use context::session_for_persistence;
+pub(crate) use execution::{extract_comment_id, extract_directive_from_text};
+pub use execution::{inference_loop, InferenceResult, MaxIterationsReached};
 
 // ── Bundled parameter structs ────────────────────────────────────────────────
 

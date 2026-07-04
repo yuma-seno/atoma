@@ -64,13 +64,9 @@ impl McpPort for MockMcpRegistry {
         prefixed_name: &str,
         _arguments: &Value,
     ) -> Result<ToolCallResult> {
-        let content = self
-            .responses
-            .get(prefixed_name)
-            .cloned()
-            .ok_or_else(|| {
-                anyhow::anyhow!("MockMcpRegistry: no response for tool '{}'", prefixed_name)
-            })?;
+        let content = self.responses.get(prefixed_name).cloned().ok_or_else(|| {
+            anyhow::anyhow!("MockMcpRegistry: no response for tool '{}'", prefixed_name)
+        })?;
         let session_ends = self.session_ends_tools.contains(prefixed_name);
         Ok(ToolCallResult {
             content,

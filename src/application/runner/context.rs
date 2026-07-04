@@ -114,11 +114,17 @@ mod tests {
         let cleaned = session_for_persistence(&session);
         assert_eq!(cleaned.messages.len(), 2);
         assert_eq!(
-            cleaned.messages[0].content.as_ref().and_then(|c| c.as_str()),
+            cleaned.messages[0]
+                .content
+                .as_ref()
+                .and_then(|c| c.as_str()),
             Some("sys")
         );
         assert_eq!(
-            cleaned.messages[1].content.as_ref().and_then(|c| c.as_str()),
+            cleaned.messages[1]
+                .content
+                .as_ref()
+                .and_then(|c| c.as_str()),
             Some("persistent")
         );
     }

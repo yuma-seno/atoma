@@ -96,19 +96,64 @@ async fn main() -> Result<()> {
 
     let cli = Cli::parse();
     match cli.command {
-        Command::CreatePr { title, description, linked_issue, dispatch_agent } =>
-            commands::create_pr(&title, &description, linked_issue, dispatch_agent.as_deref()).await,
-        Command::PushCommits { pr, dispatch_agent } =>
-            commands::push_commits(pr, dispatch_agent.as_deref()).await,
-        Command::CreateSubIssue { title, body, parent_issue, notify_agent, trigger_agent } =>
-            commands::create_sub_issue(&title, &body, parent_issue, notify_agent.as_deref(), trigger_agent.as_deref()).await,
-        Command::AddLabel { issue, label } =>
-            commands::add_label(issue, &label).await,
-        Command::CloseIssue { issue, comment } =>
-            commands::close_issue(issue, comment.as_deref()).await,
-        Command::FetchEvents { r#type, number, max_diff_chars, out } =>
-            commands::fetch_events(&r#type, number, max_diff_chars, out.as_deref()).await,
-        Command::BuildContext { events, agent_name, session, orchestration_file, out } =>
-            commands::build_context(&events, &agent_name, session.as_deref(), orchestration_file.as_deref(), out.as_deref()).await,
+        Command::CreatePr {
+            title,
+            description,
+            linked_issue,
+            dispatch_agent,
+        } => {
+            commands::create_pr(
+                &title,
+                &description,
+                linked_issue,
+                dispatch_agent.as_deref(),
+            )
+            .await
+        }
+        Command::PushCommits { pr, dispatch_agent } => {
+            commands::push_commits(pr, dispatch_agent.as_deref()).await
+        }
+        Command::CreateSubIssue {
+            title,
+            body,
+            parent_issue,
+            notify_agent,
+            trigger_agent,
+        } => {
+            commands::create_sub_issue(
+                &title,
+                &body,
+                parent_issue,
+                notify_agent.as_deref(),
+                trigger_agent.as_deref(),
+            )
+            .await
+        }
+        Command::AddLabel { issue, label } => commands::add_label(issue, &label).await,
+        Command::CloseIssue { issue, comment } => {
+            commands::close_issue(issue, comment.as_deref()).await
+        }
+        Command::FetchEvents {
+            r#type,
+            number,
+            max_diff_chars,
+            out,
+        } => commands::fetch_events(&r#type, number, max_diff_chars, out.as_deref()).await,
+        Command::BuildContext {
+            events,
+            agent_name,
+            session,
+            orchestration_file,
+            out,
+        } => {
+            commands::build_context(
+                &events,
+                &agent_name,
+                session.as_deref(),
+                orchestration_file.as_deref(),
+                out.as_deref(),
+            )
+            .await
+        }
     }
 }

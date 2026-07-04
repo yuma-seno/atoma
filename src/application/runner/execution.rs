@@ -1,8 +1,8 @@
 //! Inference loop and tool execution logic.
 
 use anyhow::{bail, Context, Result};
-use std::collections::HashMap;
 use serde_json::Value;
+use std::collections::HashMap;
 
 use crate::domain::ports::{LlmPort, LlmUsage, McpPort};
 use crate::domain::session::{Message, Session, ToolCall};
@@ -75,8 +75,14 @@ async fn execute_tool_calls(
             .await
         {
             Ok(result) => {
-                tracing::debug!("Tool '{}' result ({} chars)", tool_name, result.content.len());
-                session.messages.push(Message::tool(&tool_call.id, &result.content));
+                tracing::debug!(
+                    "Tool '{}' result ({} chars)",
+                    tool_name,
+                    result.content.len()
+                );
+                session
+                    .messages
+                    .push(Message::tool(&tool_call.id, &result.content));
                 if result.session_ends {
                     tracing::info!(
                         "Tool '{}' requested session suspension — will end after this iteration",
@@ -152,13 +158,12 @@ pub async fn inference_loop(
             }
 
             tracing::info!("LLM requested {} tool call(s)", calls.len());
-            let session_ends = execute_tool_calls(agent_name, &calls, session, mcp_registry).await?;
+            let session_ends =
+                execute_tool_calls(agent_name, &calls, session, mcp_registry).await?;
 
             if session_ends {
                 tracing::info!("Tool requested session suspension; ending inference loop");
-                return Ok(InferenceResult::SessionEnded {
-                    usage: total_usage,
-                });
+                return Ok(InferenceResult::SessionEnded { usage: total_usage });
             }
 
             if let Some(hook) = after_iteration_hook {
@@ -230,7 +235,8 @@ pub fn extract_comment_id(text: &str) -> Option<u64> {
 
 /// Extract a directive (agent name) from the first command-like line of text.
 pub fn extract_directive_from_text(text: &str) -> Option<String> {
-    let command_pattern = regex_lite::Regex::new(r"^/(?P<agent>[a-z][a-z0-9-]+)(?:\b|\s|$)").ok()?;
+    let command_pattern =
+        regex_lite::Regex::new(r"^/(?P<agent>[a-z][a-z0-9-]+)(?:\b|\s|$)").ok()?;
     for raw_line in text.lines() {
         let line = raw_line.trim();
         if line.is_empty() {

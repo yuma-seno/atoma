@@ -202,7 +202,11 @@ impl McpConnection {
         Ok(registered)
     }
 
-    pub async fn call_tool(&mut self, tool_name: &str, arguments: &Value) -> Result<(String, bool)> {
+    pub async fn call_tool(
+        &mut self,
+        tool_name: &str,
+        arguments: &Value,
+    ) -> Result<(String, bool)> {
         let response = tokio::time::timeout(
             request_timeout(),
             self.send_request(

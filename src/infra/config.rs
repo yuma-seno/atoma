@@ -6,7 +6,6 @@
 ///   3. atoma.toml profile value
 ///   4. atoma.toml defaults value
 ///   5. Hard-coded default
-
 use anyhow::{Context, Result};
 use std::path::PathBuf;
 
@@ -64,15 +63,35 @@ pub fn resolve_run_config(
     let agent_def = overrides
         .agent_def
         .clone()
-        .or_else(|| profile.as_ref().and_then(|p| p.agent_def.clone()).map(PathBuf::from))
-        .or_else(|| defaults.as_ref().and_then(|d| d.agent_def.clone()).map(PathBuf::from))
+        .or_else(|| {
+            profile
+                .as_ref()
+                .and_then(|p| p.agent_def.clone())
+                .map(PathBuf::from)
+        })
+        .or_else(|| {
+            defaults
+                .as_ref()
+                .and_then(|d| d.agent_def.clone())
+                .map(PathBuf::from)
+        })
         .unwrap_or_else(|| PathBuf::from("agent.md"));
 
     let tools_file = overrides
         .tools_file
         .clone()
-        .or_else(|| profile.as_ref().and_then(|p| p.tools_file.clone()).map(PathBuf::from))
-        .or_else(|| defaults.as_ref().and_then(|d| d.tools_file.clone()).map(PathBuf::from));
+        .or_else(|| {
+            profile
+                .as_ref()
+                .and_then(|p| p.tools_file.clone())
+                .map(PathBuf::from)
+        })
+        .or_else(|| {
+            defaults
+                .as_ref()
+                .and_then(|d| d.tools_file.clone())
+                .map(PathBuf::from)
+        });
 
     let max_iterations = overrides
         .max_iterations

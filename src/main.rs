@@ -7,11 +7,11 @@ use anyhow::Result;
 use clap::Parser;
 use tracing_subscriber::EnvFilter;
 
+use crate::application::runner::{RunDeps, RunSettings};
 use crate::cli::{Cli, Command};
 use crate::domain::config::OutputFormat;
 use crate::domain::ports::AgentDefPort;
 use crate::infra::config::{self as config_module, CliOverrides};
-use crate::application::runner::{RunSettings, RunDeps};
 
 #[tokio::main]
 async fn main() -> Result<()> {

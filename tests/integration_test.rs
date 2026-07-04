@@ -8,7 +8,7 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 use tempfile::tempdir;
 
-use atoma::application::runner::{run, RunSettings, RunDeps};
+use atoma::application::runner::{run, RunDeps, RunSettings};
 use atoma::domain::agent::{AgentDef, ParsedAgentDef};
 use atoma::domain::config::OutputFormat;
 use atoma::domain::ports::{
