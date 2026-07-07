@@ -9,10 +9,6 @@ repository = "https://github.com/yuma-seno/atoma"
 name = "atoma"
 path = "src/main.rs"
 
-[[bin]]
-name = "atoma-github"
-path = "src/bin/atoma_github/main.rs"
-
 [dependencies]
 clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }

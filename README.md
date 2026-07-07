@@ -77,20 +77,6 @@ atoma validate \
   [--tools-file <FILE>]     # Validate together with tools file
 
 atoma init                  # Generate default atoma.toml
-
-atoma-github create-pr \
-  --title <TITLE> --description <DESC>  # Create a pull request
-  [--linked-issue <N>]      # Link to parent issue
-  [--dispatch-agent <NAME>] # Agent to dispatch after creation
-
-atoma-github create-sub-issue \
-  --title <TITLE> --body <BODY> --parent-issue <N>  # Create a sub-issue
-
-atoma-github push-commits --pr <N>     # Push to existing PR branch
-atoma-github add-label --issue <N> --label <NAME>  # Add label
-atoma-github close-issue --issue <N>   # Close an issue
-atoma-github fetch-events --type <issue|pr> --number <N>  # Fetch GitHub events
-atoma-github build-context --events <FILE> --agent-name <NAME>  # Build context
 ```
 
 ## Configuration File (atoma.toml)
@@ -114,21 +100,6 @@ OPENAI_BASE_URL = "https://openrouter.ai/api/v1"
 
 Generate with `atoma init > atoma.toml`. Priority: **CLI arg > atoma.toml profile > atoma.toml defaults**.
 
-## atoma-github CLI
-
-`atoma-github` provides type-safe GitHub operations replacing shell scripts:
-
-```bash
-atoma-github create-pr --title "Fix" --description "Closes #1"
-atoma-github push-commits --pr 42
-atoma-github create-sub-issue --title "Sub" --body "..." --parent-issue 1
-atoma-github add-label --issue 42 --label bug
-atoma-github close-issue --issue 42 --comment "Done"
-atoma-github fetch-events --type issue --number 42
-```
-
-Uses `GH_TOKEN` for authentication. Built alongside `atoma` in the same repository.
-
 ## JSON Output
 
 For CI/CD pipelines:
@@ -141,45 +112,6 @@ Output includes `response`, `usage` (prompt/completion/total tokens),
 `directive` (first `/agent-name` command found), and `session_path`.
 
 ---
-
-## Agent Definition
-
-```
-atoma run \
-  [--agent-def <FILE>]      # Agent definition (Markdown + YAML frontmatter)
-  [--profile <NAME>]        # Named profile from atoma.toml
-  [--output <FORMAT>]       # Output format: text (default) or json
-  [--in-session <FILE>]     # Input session JSON (prior conversation history)
-  [--context-session <FILE>]  # Extra session JSON injected only for this run (repeatable)
-  [--out-session <FILE>]    # Output session JSON (omit to discard after run)
-  [--prompt-file <FILE>]    # User prompt from file
-                            # If omitted and stdin is not a TTY, reads from stdin
-                            # If both omitted, runs with no new user message
-  [--template <FILE>]       # Custom system prompt template (overrides built-in)
-  [--tools-file <FILE>]     # Tools YAML file (required if mcp_servers is non-empty)
-  [--max-iterations <N>]    # Max inference iterations (default: 50)
-  [--after-iteration-hook <FILE>]  # Script invoked after each iteration
-
-atoma validate \
-  --agent-def <FILE>        # Validate an agent definition
-  [--tools-file <FILE>]     # Validate together with tools file
-
-atoma init                  # Generate default atoma.toml
-
-atoma-github create-pr \
-  --title <TITLE> --description <DESC>  # Create a pull request
-  [--linked-issue <N>]      # Link to parent issue
-  [--dispatch-agent <NAME>] # Agent to dispatch after creation
-
-atoma-github create-sub-issue \
-  --title <TITLE> --body <BODY> --parent-issue <N>  # Create a sub-issue
-
-atoma-github push-commits --pr <N>     # Push to existing PR branch
-atoma-github add-label --issue <N> --label <NAME>  # Add label
-atoma-github close-issue --issue <N>   # Close an issue
-atoma-github fetch-events --type <issue|pr> --number <N>  # Fetch GitHub events
-atoma-github build-context --events <FILE> --agent-name <NAME>  # Build context
-```
 
 Session input and output are always **separate arguments**, making data flow explicit.
 Specify the same path for both to update a session in place:
@@ -306,7 +238,7 @@ see **[docs/tool-servers.md](docs/tool-servers.md)**.
 ## Development
 
 ```bash
-cargo build --release   # build binaries (atoma + atoma-github)
+cargo build --release   # build the atoma binary
 cargo test              # run all tests
 ``````
 
