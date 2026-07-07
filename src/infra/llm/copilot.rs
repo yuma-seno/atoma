@@ -1,12 +1,55 @@
 use anyhow::{Context, Result};
 use async_trait::async_trait;
+use serde::Deserialize;
 use serde_json::Value;
 
 use crate::domain::ports::{LlmChoice, LlmPort, LlmResponse, LlmUsage};
 use crate::domain::session::Message;
-use crate::infra::llm::shared::{exchange_copilot_token, openai_compat_call};
+use crate::infra::llm::shared::openai_compat_call;
 
 const COPILOT_BASE_URL: &str = "https://api.githubcopilot.com";
+
+/// Exchange a GitHub PAT for a short-lived GitHub Copilot API token.
+async fn exchange_copilot_token(client: &reqwest::Client, github_token: &str) -> Result<String> {
+    const COPILOT_AUTH_URL: &str = "https://api.github.com/copilot_internal/v2/token";
+
+    tracing::debug!("Exchanging GitHub token for Copilot token");
+
+    #[derive(Deserialize)]
+    struct TokenResponse {
+        token: String,
+    }
+
+    let response = client
+        .get(COPILOT_AUTH_URL)
+        .header("Authorization", format!("token {}", github_token))
+        .header("Accept", "application/json")
+        .send()
+        .await
+        .context("Failed to request GitHub Copilot token")?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let error_text = response
+            .text()
+            .await
+            .unwrap_or_else(|_| "unknown error".to_string());
+        anyhow::bail!(
+            "Failed to obtain GitHub Copilot token ({}): {}\n\
+             Ensure your GitHub token has the 'copilot' scope and a Copilot subscription is active.",
+            status,
+            error_text
+        );
+    }
+
+    let resp: TokenResponse = response
+        .json()
+        .await
+        .context("Failed to parse GitHub Copilot token response")?;
+
+    tracing::debug!("Successfully obtained Copilot token");
+    Ok(resp.token)
+}
 
 /// Client for GitHub Copilot (OpenAI-compatible wire protocol with Copilot auth).
 pub struct CopilotClient {
