@@ -85,6 +85,15 @@ inputs:
     required: false
     default: ''
 
+  notify_login:
+    description: >
+      GitHub login of the human to notify. Exposed to Atoma as ISSUE_NOTIFY so
+      that issues/PRs created during this run can embed it (e.g. as an
+      `atoma:notify=` marker), propagating the original requester's identity
+      forward through sub-issues and PRs.
+    required: false
+    default: ''
+
 # ── Outputs ───────────────────────────────────────────────────────────────
 outputs:
   result:
@@ -135,6 +144,7 @@ runs:
         GITHUB_PERSONAL_ACCESS_TOKEN: ${{ github.token }}
         GITHUB_RUN_ID: ${{ github.run_id }}
         ISSUE_NUMBER: ${{ inputs.issue_number }}
+        ISSUE_NOTIFY: ${{ inputs.notify_login }}
         ATOMA_COPILOT_TOKEN: ${{ inputs.github_token }}
       run: |
         AGENT="${{ inputs.agent_name }}"
