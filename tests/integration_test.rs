@@ -121,6 +121,7 @@ fn minimal_agent(name: &str) -> AgentDef {
         model: "gpt-4o-mini".to_string(),
         provider: None,
         knows_about: vec![],
+        callable_by: vec![],
         mcp_servers: vec![],
         extra_body: HashMap::new(),
         metadata: None,

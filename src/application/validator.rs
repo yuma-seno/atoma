@@ -3,13 +3,18 @@ use std::path::PathBuf;
 
 use crate::domain::ports::{AgentDefPort, ToolDefPort};
 
+const VALID_CALLABLE_BY: &[&str] = &["user", "agent"];
+
 /// Validate an agent definition file and optional tools file.
 ///
 /// Checks:
 ///   1. Agent definition parses without error (YAML, required fields).
 ///   2. Each `knows_about` entry has a corresponding `<name>.md` in the same directory.
-///   3. `extra_body` does not override the reserved keys `model` or `messages`.
-///   4. If a tools file is provided:
+///   3. Each `knows_about` target's own `callable_by` includes `"agent"` — otherwise
+///      it does not accept agent-to-agent delegation and the reference is dead.
+///   4. `callable_by` only contains recognized values (`"user"`, `"agent"`).
+///   5. `extra_body` does not override the reserved keys `model` or `messages`.
+///   6. If a tools file is provided:
 ///      a. The tools file parses without error.
 ///      b. Each `mcp_servers` entry is present in the tools file.
 pub fn validate(
@@ -37,10 +42,41 @@ pub fn validate(
             .parent()
             .unwrap_or_else(|| std::path::Path::new("."));
 
+        for c in &agent.callable_by {
+            if !VALID_CALLABLE_BY.contains(&c.as_str()) {
+                errors.push(format!(
+                    "callable_by contains unknown value '{}' (expected one of: {})",
+                    c,
+                    VALID_CALLABLE_BY.join(", ")
+                ));
+            }
+        }
+
         for name in &agent.knows_about {
             let candidate = agent_def_dir.join(format!("{}.md", name));
             if candidate.exists() {
                 println!("  ✓ knows_about '{}' → {:?}", name, candidate);
+                match agent_def_port.parse(&candidate) {
+                    Ok(target) => {
+                        if !target
+                            .frontmatter
+                            .callable_by
+                            .iter()
+                            .any(|c| c == "agent")
+                        {
+                            errors.push(format!(
+                                "knows_about '{}': target agent's callable_by does not include \"agent\", so delegation from '{}' is not a supported invocation path",
+                                name, agent.name
+                            ));
+                        }
+                    }
+                    Err(e) => {
+                        errors.push(format!(
+                            "knows_about '{}': failed to parse target definition: {}",
+                            name, e
+                        ));
+                    }
+                }
             } else {
                 errors.push(format!(
                     "knows_about '{}': definition file not found at {:?}",
@@ -94,5 +130,70 @@ pub fn validate(
             eprintln!("  ✗ {}", e);
         }
         bail!("Validation failed")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::infra::persistence::agent_def::FileAgentDefAdapter;
+    use crate::infra::persistence::tool_def::FileToolDefAdapter;
+    use std::fs;
+
+    fn write_agent(dir: &std::path::Path, name: &str, extra_frontmatter: &str) -> PathBuf {
+        let path = dir.join(format!("{}.md", name));
+        fs::write(
+            &path,
+            format!(
+                "---\nname: {name}\ndescription: test\nmodel: test-model\n{extra}\n---\n",
+                name = name,
+                extra = extra_frontmatter
+            ),
+        )
+        .unwrap();
+        path
+    }
+
+    #[test]
+    fn callable_by_rejects_unknown_values() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_agent(dir.path(), "solo", "callable_by:\n  - human\n");
+        let result = validate(path, None, &FileAgentDefAdapter, &FileToolDefAdapter);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn callable_by_accepts_known_values() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_agent(dir.path(), "solo", "callable_by:\n  - user\n  - agent\n");
+        let result = validate(path, None, &FileAgentDefAdapter, &FileToolDefAdapter);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn knows_about_target_must_accept_agent_delegation() {
+        let dir = tempfile::tempdir().unwrap();
+        // "helper" does not list "agent" in callable_by, so it cannot be delegated to.
+        write_agent(dir.path(), "helper", "callable_by:\n  - user\n");
+        let caller = write_agent(
+            dir.path(),
+            "caller",
+            "callable_by:\n  - user\nknows_about:\n  - helper\n",
+        );
+        let result = validate(caller, None, &FileAgentDefAdapter, &FileToolDefAdapter);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn knows_about_target_accepting_agent_delegation_passes() {
+        let dir = tempfile::tempdir().unwrap();
+        write_agent(dir.path(), "helper", "callable_by:\n  - agent\n");
+        let caller = write_agent(
+            dir.path(),
+            "caller",
+            "callable_by:\n  - user\nknows_about:\n  - helper\n",
+        );
+        let result = validate(caller, None, &FileAgentDefAdapter, &FileToolDefAdapter);
+        assert!(result.is_ok());
     }
 }

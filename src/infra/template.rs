@@ -102,6 +102,7 @@ mod tests {
                 model: "openrouter/anthropic/claude-3.5-sonnet".to_string(),
                 provider: None,
                 knows_about: vec!["ReviewAgent".to_string()],
+                callable_by: vec![],
                 mcp_servers: vec![],
                 extra_body: HashMap::default(),
                 metadata: None,

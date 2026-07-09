@@ -17,6 +17,13 @@ pub struct AgentDef {
     pub provider: Option<String>,
     #[serde(default)]
     pub knows_about: Vec<String>,
+    /// Who may invoke this agent: `"user"` (human entry point, e.g. a slash-command
+    /// or new-issue trigger) and/or `"agent"` (delegated to by another agent via
+    /// `knows_about` / orchestration tooling). Purely advisory metadata checked by
+    /// `atoma validate`; the atoma binary itself does not enforce it (any real
+    /// invocation-time access control lives in the calling automation).
+    #[serde(default)]
+    pub callable_by: Vec<String>,
     /// Names of MCP tool servers used by this agent.
     /// Each name must correspond to an entry in the tools file (--tools-file).
     #[serde(default)]
