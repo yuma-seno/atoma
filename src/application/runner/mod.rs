@@ -176,7 +176,16 @@ pub async fn run(settings: RunSettings, deps: RunDeps<'_>) -> Result<()> {
             "Injecting {} transient context message(s)",
             transient_context_messages.len()
         );
-        session.messages.splice(1..1, transient_context_messages);
+        // Append transient context (e.g. new GitHub events/comments) at the END
+        // of the message list rather than right after the system message.
+        // For a fresh session (no prior history) this is a no-op positionally.
+        // For a RESUMED session with prior history, appending at the end is
+        // required so the new context is the most recent turn the model sees
+        // — otherwise it is buried before the session's own old history, and
+        // (absent an explicit new --prompt/stdin) the model's last visible
+        // turn stays its own previous reply, causing it to produce a shallow
+        // continuation instead of reacting to the new information.
+        session.messages.extend(transient_context_messages);
     }
 
     // 6. Resolve user prompt

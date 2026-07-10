@@ -457,13 +457,16 @@ async fn test_context_session_is_injected_but_not_persisted() {
     let seen = seen_messages.lock().unwrap().clone();
     assert_eq!(seen.len(), 3);
     assert_eq!(seen[0].role, "system");
+    // Persistent (resumed) history must come before transient context, and
+    // transient context must be last so the model always reacts to the most
+    // recent information rather than its own prior reply.
     assert_eq!(
         seen[1].content.as_ref().and_then(|value| value.as_str()),
-        Some("ephemeral context")
+        Some("persistent history")
     );
     assert_eq!(
         seen[2].content.as_ref().and_then(|value| value.as_str()),
-        Some("persistent history")
+        Some("ephemeral context")
     );
 
     let saved = file_session::load(&out_session_path).unwrap();
