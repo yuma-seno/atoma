@@ -260,11 +260,18 @@ runs:
 
         # Extract directive from the first command-like line.
         # Accept both "/engineer" (with optional args) and the common markdown-mangled form "/`engineer`".
-        DIRECTIVE=$(python3 - <<'PY'
+        # A candidate is only accepted if it names a real agent (a matching .md
+        # file exists in DEF_DIR) -- this guards against false positives like a
+        # model writing "/agent reviewer" (matching "agent", not a real agent
+        # name) instead of the expected "/reviewer", which would otherwise
+        # dispatch a doomed-to-fail run for a non-existent agent definition.
+        DIRECTIVE=$(DEF_DIR="$DEF_DIR" python3 - <<'PY'
+        import os
         import re
         from pathlib import Path
 
         command_pattern = re.compile(r'^/(?P<agent>[a-z][a-z0-9-]+)(?:\b|\s|$)')
+        def_dir = Path(os.environ.get('DEF_DIR', ''))
 
         def candidates(raw: str) -> list[str]:
           line = raw.strip()
@@ -286,8 +293,10 @@ runs:
           for candidate in candidates(raw_line):
             match = command_pattern.match(candidate)
             if match:
-              print(match.group('agent'))
-              raise SystemExit(0)
+              agent = match.group('agent')
+              if (def_dir / f'{agent}.md').is_file():
+                print(agent)
+                raise SystemExit(0)
         PY
         )
         echo "directive=${DIRECTIVE}" >> "$GITHUB_OUTPUT"
