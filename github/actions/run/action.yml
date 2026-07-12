@@ -111,6 +111,17 @@ outputs:
     description: 'true if the agent hit the iteration limit'
     value: ${{ steps.run-atoma.outputs.max_iterations_reached }}
 
+  chain_continues:
+    description: >
+      'true' when a tool call made during this run already triggered an
+      automatic follow-up dispatch (e.g. atoma__launch_sub_agent, or
+      github__create_pr/merge_pr's post-action dispatch), regardless of
+      whether the agent's final text also contained a `directive`. Consumers
+      should treat this the same as a non-empty directive when deciding
+      whether to tell a human "nothing more will run automatically" --
+      the process is already continuing on its own.
+    value: ${{ steps.run-atoma.outputs.chain_continues }}
+
 # ── Steps ─────────────────────────────────────────────────────────────────
 runs:
   using: 'composite'
@@ -148,6 +159,10 @@ runs:
         ATOMA_COPILOT_TOKEN: ${{ inputs.github_token }}
       run: |
         AGENT="${{ inputs.agent_name }}"
+        # Exported (not just a local shell var) so MCP tool-server subprocesses
+        # spawned by `atoma run` below can read the current agent's name, e.g.
+        # to tag artifacts they create (PRs, issues) with their origin agent.
+        export AGENT
         DEF_DIR="${{ inputs.agent_def_dir }}"
         ORCHESTRATION_FILE="${{ inputs.orchestration_file }}"
 
@@ -300,6 +315,20 @@ runs:
         PY
         )
         echo "directive=${DIRECTIVE}" >> "$GITHUB_OUTPUT"
+
+        # Detect whether a tool call already triggered an automatic follow-up
+        # dispatch during this run (atoma__launch_sub_agent, github__create_pr
+        # -> reviewer, github__merge_pr -> orchestrator-or-wait), as opposed to
+        # the agent genuinely finishing with nothing further happening. Both
+        # MCP servers log these dispatch decisions to stderr (captured in
+        # atoma_logs.txt) unconditionally, independent of whatever text (if
+        # any) the agent wrote -- this is a purpose-built signal, unlike the
+        # text-based `directive` above which cannot see tool-triggered chains.
+        CHAIN_CONTINUES=false
+        if grep -qE '(dispatched: agent=|_dispatch_post_pr_agent: dispatched|_dispatch_orchestrator_if_ready:)' atoma_logs.txt; then
+          CHAIN_CONTINUES=true
+        fi
+        echo "chain_continues=${CHAIN_CONTINUES}" >> "$GITHUB_OUTPUT"
 
     - name: Write token usage summary
       if: ${{ always() && hashFiles('atoma_logs.txt') != '' }}

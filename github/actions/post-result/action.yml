@@ -42,6 +42,15 @@ inputs:
     required: false
     default: ''
 
+  chain_continues:
+    description: >
+      'true' when a tool call made during this run already triggered an
+      automatic follow-up dispatch (launch_sub_agent, create_pr, merge_pr),
+      independent of `directive`. When true, the "no agent will run, please
+      review" notice is suppressed since the process is already continuing.
+    required: false
+    default: 'false'
+
   new_event_count:
     description: 'Number of new shared-context events for this run'
     required: false
@@ -89,6 +98,7 @@ runs:
         AGENT: ${{ inputs.agent_name }}
         NOTIFY: ${{ inputs.notify }}
         DIRECTIVE: ${{ inputs.directive }}
+        CHAIN_CONTINUES: ${{ inputs.chain_continues }}
         RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         MAX_ITER: ${{ inputs.max_iterations_reached }}
       run: |
@@ -116,7 +126,7 @@ runs:
             fi
           fi
 
-          if [ -z "$DIRECTIVE" ] && [ -n "$NOTIFY" ]; then
+          if [ -z "$DIRECTIVE" ] && [ "$CHAIN_CONTINUES" != "true" ] && [ -n "$NOTIFY" ]; then
             echo "@${NOTIFY} — **${AGENT}** task completed. No agent will be automatically executed next. Please review the results or provide instructions for the next step."
             echo ""
           fi
