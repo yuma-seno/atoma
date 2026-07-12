@@ -58,12 +58,7 @@ pub fn validate(
                 println!("  ✓ knows_about '{}' → {:?}", name, candidate);
                 match agent_def_port.parse(&candidate) {
                     Ok(target) => {
-                        if !target
-                            .frontmatter
-                            .callable_by
-                            .iter()
-                            .any(|c| c == "agent")
-                        {
+                        if !target.frontmatter.callable_by.iter().any(|c| c == "agent") {
                             errors.push(format!(
                                 "knows_about '{}': target agent's callable_by does not include \"agent\", so delegation from '{}' is not a supported invocation path",
                                 name, agent.name
