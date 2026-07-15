@@ -255,6 +255,7 @@ runs:
         fi
 
         TARGET="sessions/${TYPE}-${NUMBER}-${AGENT}.json"
+        SESSION_SRC="$(pwd)/session.json"
 
         # Ensure atoma-data branch exists; create orphan from empty tree if not.
         if ! git ls-remote --exit-code origin atoma-data > /dev/null 2>&1; then
@@ -272,31 +273,50 @@ runs:
         git fetch origin atoma-data
         git worktree add /tmp/atoma-data-wt origin/atoma-data
 
-        mkdir -p "/tmp/atoma-data-wt/sessions"
-        cp session.json "/tmp/atoma-data-wt/${TARGET}"
-
         pushd /tmp/atoma-data-wt
         git config user.email "action@github.com"
         git config user.name "GitHub Actions"
-        git add "${TARGET}"
-        if git diff --cached --quiet; then
-          echo "Session unchanged, skipping commit."
-        else
-          git commit -m "session: ${AGENT} on ${TYPE} ${NUMBER} (run ${RUN_ID})"
-          # Retry up to 3 times on push conflict (different issue/agent pushing simultaneously).
-          for attempt in 1 2 3; do
-            if git push origin HEAD:atoma-data; then
-              echo "Session saved to atoma-data:${TARGET}"
-              break
-            fi
-            echo "Push attempt ${attempt} failed, rebasing and retrying..."
-            git fetch origin atoma-data
-            git rebase origin/atoma-data
-            sleep 2
-          done
-        fi
-        popd
 
+        # Parallel agents (e.g. sibling sub-issue engineers running at the same
+        # time) each write to their own sessions/<type>-<number>-<agent>.json,
+        # but all push to the SAME atoma-data branch, so a push race is
+        # expected, not exceptional. Re-pull the latest tip immediately before
+        # every commit attempt, and if the push still loses the race, hard-reset
+        # onto the newest tip, re-apply our own file, and recommit from scratch
+        # -- safe because we only ever touch our own uniquely-named file, so a
+        # reset can never discard another agent's concurrently-pushed session.
+        SAVED=false
+        for attempt in 1 2 3 4 5; do
+          git fetch origin atoma-data
+          git reset --hard origin/atoma-data
+
+          mkdir -p "$(dirname "${TARGET}")"
+          cp "${SESSION_SRC}" "${TARGET}"
+          git add "${TARGET}"
+
+          if git diff --cached --quiet; then
+            echo "Session unchanged, skipping commit."
+            SAVED=true
+            break
+          fi
+
+          git commit -m "session: ${AGENT} on ${TYPE} ${NUMBER} (run ${RUN_ID})"
+
+          if git push origin HEAD:atoma-data; then
+            echo "Session saved to atoma-data:${TARGET}"
+            SAVED=true
+            break
+          fi
+
+          echo "Push attempt ${attempt} failed (concurrent push by another agent) -- resetting and retrying with a fresh pull..."
+          sleep $((attempt * 2))
+        done
+
+        if [ "$SAVED" != "true" ]; then
+          echo "::warning::Failed to save session to atoma-data:${TARGET} after all retries."
+        fi
+
+        popd
         git worktree remove --force /tmp/atoma-data-wt
 
     - name: Report failure
