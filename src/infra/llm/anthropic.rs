@@ -39,44 +39,7 @@ impl AnthropicClient {
         extra_body: &std::collections::HashMap<String, Value>,
     ) -> Result<ChatResponse> {
         let url = format!("{}/v1/messages", self.base_url.trim_end_matches('/'));
-        let (system, anthropic_messages) = messages_to_anthropic(messages);
-
-        let max_tokens = extra_body
-            .get("max_tokens")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(ANTHROPIC_DEFAULT_MAX_TOKENS);
-
-        let mut body = serde_json::json!({
-            "model": model,
-            "max_tokens": max_tokens,
-            "messages": anthropic_messages,
-        });
-
-        if let Some(sys) = system {
-            body["system"] = Value::String(sys);
-        }
-
-        if let Some(tools) = tools {
-            body["tools"] = Value::Array(tools_to_anthropic(tools));
-            body["tool_choice"] = serde_json::json!({ "type": "auto" });
-        }
-
-        if let Some(obj) = body.as_object_mut() {
-            for (k, v) in extra_body {
-                if ![
-                    "model",
-                    "messages",
-                    "max_tokens",
-                    "system",
-                    "tools",
-                    "tool_choice",
-                ]
-                .contains(&k.as_str())
-                {
-                    obj.insert(k.clone(), v.clone());
-                }
-            }
-        }
+        let body = build_request_body(model, messages, tools, extra_body);
 
         tracing::debug!("Request URL: {}", url);
         tracing::debug!("Request body: {}", serde_json::to_string_pretty(&body)?);
@@ -169,6 +132,110 @@ struct AnthropicUsage {
 }
 
 // ── Anthropic translation helpers ─────────────────────────────────────────────
+
+/// Builds the full Anthropic Messages API request body, including
+/// prompt-cache breakpoints.
+///
+/// Anthropic only caches a prompt when a content block is explicitly marked
+/// `cache_control: {"type": "ephemeral"}` -- omitting it (the previous
+/// behavior here) means EVERY request is billed as fully fresh, even when
+/// the bulk of it is byte-identical to the previous call. This matters a
+/// lot for this codebase: a single `atoma run` can iterate its tool-calling
+/// loop up to `max_iterations` times (100-200 for some agents), and each
+/// iteration re-sends the ENTIRE growing conversation so far.
+///
+/// Two breakpoints are set, matching Anthropic's own recommended pattern
+/// for multi-turn tool-using agents:
+///   1. the system prompt -- identical across every call for the same
+///      agent/run (agent role + tool descriptions + colleagues), and
+///      typically the largest static chunk of the prompt.
+///   2. the last message in the conversation -- captures the entire
+///      accumulated history up to this point. Each subsequent call within
+///      the same run's iteration loop only appends new messages after this
+///      point, so the cached prefix keeps growing and being reused across
+///      iterations instead of being re-billed as fresh input every time.
+fn build_request_body(
+    model: &str,
+    messages: &[Message],
+    tools: Option<&[Value]>,
+    extra_body: &std::collections::HashMap<String, Value>,
+) -> Value {
+    let (system, mut anthropic_messages) = messages_to_anthropic(messages);
+    mark_last_message_cacheable(&mut anthropic_messages);
+
+    let max_tokens = extra_body
+        .get("max_tokens")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(ANTHROPIC_DEFAULT_MAX_TOKENS);
+
+    let mut body = serde_json::json!({
+        "model": model,
+        "max_tokens": max_tokens,
+        "messages": anthropic_messages,
+    });
+
+    if let Some(sys) = system {
+        body["system"] = serde_json::json!([
+            { "type": "text", "text": sys, "cache_control": { "type": "ephemeral" } }
+        ]);
+    }
+
+    if let Some(tools) = tools {
+        body["tools"] = Value::Array(tools_to_anthropic(tools));
+        body["tool_choice"] = serde_json::json!({ "type": "auto" });
+    }
+
+    if let Some(obj) = body.as_object_mut() {
+        for (k, v) in extra_body {
+            if ![
+                "model",
+                "messages",
+                "max_tokens",
+                "system",
+                "tools",
+                "tool_choice",
+            ]
+            .contains(&k.as_str())
+            {
+                obj.insert(k.clone(), v.clone());
+            }
+        }
+    }
+
+    body
+}
+
+/// Attaches an ephemeral cache-control breakpoint to the LAST content block
+/// of the last message. `cache_control` can only be attached to a content
+/// BLOCK, not directly to a message, so a bare string `content` is first
+/// converted into Anthropic's block-array form (a no-op for the model:
+/// `"content": "text"` and `"content": [{"type":"text","text":"text"}]` are
+/// equivalent other than allowing a `cache_control` field on the latter).
+/// A no-op if `messages` is empty.
+fn mark_last_message_cacheable(messages: &mut [Value]) {
+    let Some(last) = messages.last_mut() else {
+        return;
+    };
+    let Some(content) = last.get_mut("content") else {
+        return;
+    };
+    match content {
+        Value::String(s) => {
+            *content = serde_json::json!([
+                { "type": "text", "text": s, "cache_control": { "type": "ephemeral" } }
+            ]);
+        }
+        Value::Array(blocks) => {
+            if let Some(last_block) = blocks.last_mut().and_then(Value::as_object_mut) {
+                last_block.insert(
+                    "cache_control".to_string(),
+                    serde_json::json!({ "type": "ephemeral" }),
+                );
+            }
+        }
+        _ => {}
+    }
+}
 
 fn messages_to_anthropic(messages: &[Message]) -> (Option<String>, Vec<Value>) {
     let mut system_content: Option<String> = None;
@@ -296,5 +363,148 @@ fn anthropic_to_chat_response(raw: AnthropicResponse) -> ChatResponse {
             completion_tokens: raw.usage.output_tokens,
             total_tokens: raw.usage.input_tokens + raw.usage.output_tokens,
         }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::domain::session::ToolCall;
+
+    fn cache_control_of(block: &Value) -> Option<&Value> {
+        block.get("cache_control")
+    }
+
+    #[test]
+    fn system_prompt_gets_a_cache_control_breakpoint() {
+        let messages = vec![
+            Message::system("you are a helpful agent"),
+            Message::user("hi"),
+        ];
+        let body = build_request_body("claude-x", &messages, None, &Default::default());
+
+        let system = body.get("system").expect("system should be present");
+        let blocks = system.as_array().expect("system should be a block array");
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0]["text"], "you are a helpful agent");
+        assert_eq!(
+            cache_control_of(&blocks[0]),
+            Some(&serde_json::json!({ "type": "ephemeral" }))
+        );
+    }
+
+    #[test]
+    fn no_system_key_when_there_is_no_system_message() {
+        let messages = vec![Message::user("hi")];
+        let body = build_request_body("claude-x", &messages, None, &Default::default());
+        assert!(body.get("system").is_none());
+    }
+
+    #[test]
+    fn last_message_with_plain_string_content_is_converted_and_marked_cacheable() {
+        let messages = vec![Message::user("first"), Message::user("second (latest)")];
+        let body = build_request_body("claude-x", &messages, None, &Default::default());
+
+        let out_messages = body["messages"].as_array().unwrap();
+        assert_eq!(out_messages.len(), 2);
+        // Earlier message untouched (still a plain string, no cache_control).
+        assert_eq!(out_messages[0]["content"], "first");
+        // Last message converted to block-array form with a cache_control breakpoint.
+        let last_content = out_messages[1]["content"].as_array().unwrap();
+        assert_eq!(last_content[0]["text"], "second (latest)");
+        assert_eq!(
+            cache_control_of(&last_content[0]),
+            Some(&serde_json::json!({ "type": "ephemeral" }))
+        );
+    }
+
+    #[test]
+    fn tool_result_as_last_message_gets_cache_control_on_the_tool_result_block() {
+        // A very common shape in real agent runs: the conversation's last
+        // turn is a tool result (the model just made a tool call, the tool
+        // ran, and its result was appended) -- per Anthropic's own
+        // documented pattern for caching tool-using conversations, the
+        // cache_control breakpoint belongs on the LAST block regardless of
+        // its type, including "tool_result".
+        let messages = vec![Message::tool("call_1", "issue #42: title, body...")];
+        let body = build_request_body("claude-x", &messages, None, &Default::default());
+
+        let out_messages = body["messages"].as_array().unwrap();
+        assert_eq!(out_messages.len(), 1);
+        assert_eq!(out_messages[0]["role"], "user");
+        let blocks = out_messages[0]["content"].as_array().unwrap();
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0]["type"], "tool_result");
+        assert_eq!(blocks[0]["tool_use_id"], "call_1");
+        assert_eq!(
+            cache_control_of(&blocks[0]),
+            Some(&serde_json::json!({ "type": "ephemeral" })),
+            "cache_control must land on the tool_result block itself, not be skipped"
+        );
+    }
+
+    #[test]
+    fn last_message_with_existing_block_array_gets_cache_control_on_its_last_block() {
+        let tool_call = ToolCall {
+            id: "call_1".to_string(),
+            type_: "function".to_string(),
+            function: ToolCallFunction {
+                name: "get_issue".to_string(),
+                arguments: "{}".to_string(),
+            },
+        };
+        let messages = vec![Message::assistant(Some("checking"), Some(vec![tool_call]))];
+        let body = build_request_body("claude-x", &messages, None, &Default::default());
+
+        let out_messages = body["messages"].as_array().unwrap();
+        let blocks = out_messages[0]["content"].as_array().unwrap();
+        assert_eq!(blocks.len(), 2, "expected a text block + a tool_use block");
+        // cache_control lands on the LAST block only, not the first.
+        assert_eq!(cache_control_of(&blocks[0]), None);
+        assert_eq!(
+            cache_control_of(&blocks[1]),
+            Some(&serde_json::json!({ "type": "ephemeral" }))
+        );
+    }
+
+    #[test]
+    fn empty_messages_does_not_panic() {
+        let body = build_request_body("claude-x", &[], None, &Default::default());
+        assert_eq!(body["messages"].as_array().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn extra_body_still_merges_alongside_cache_control_fields() {
+        let mut extra = std::collections::HashMap::new();
+        extra.insert("temperature".to_string(), serde_json::json!(0.5));
+        let messages = vec![Message::user("hi")];
+        let body = build_request_body("claude-x", &messages, None, &extra);
+        assert_eq!(body["temperature"], 0.5);
+    }
+
+    #[test]
+    fn transient_context_messages_translate_and_cache_normally() {
+        // atoma_metadata (including the transient_context flag) is Atoma's
+        // own internal bookkeeping, never read by messages_to_anthropic()
+        // -- it must have zero effect on the wire format sent to the LLM.
+        let mut transient = Message::user("new GitHub comment since last run");
+        transient.atoma_metadata = Some(serde_json::json!({ "transient_context": true }));
+        assert!(transient.is_transient_context());
+
+        let messages = vec![Message::user("old history"), transient];
+        let body = build_request_body("claude-x", &messages, None, &Default::default());
+
+        let out_messages = body["messages"].as_array().unwrap();
+        assert_eq!(out_messages.len(), 2);
+        let last_content = out_messages[1]["content"].as_array().unwrap();
+        assert_eq!(last_content[0]["text"], "new GitHub comment since last run");
+        assert_eq!(
+            cache_control_of(&last_content[0]),
+            Some(&serde_json::json!({ "type": "ephemeral" }))
+        );
+        // atoma_metadata itself must never leak into the request body.
+        assert!(!serde_json::to_string(&body)
+            .unwrap()
+            .contains("transient_context"));
     }
 }

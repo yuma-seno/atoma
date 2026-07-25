@@ -91,6 +91,25 @@ impl Message {
         }
     }
 
+    /// Metadata key set on messages loaded from a `--context-session` file
+    /// (see `application::runner::context`): these are appended to the
+    /// conversation for exactly one inference call and stripped again
+    /// before the session is persisted. Exposed here (not just in the
+    /// `runner` layer) so lower layers -- e.g. `infra::llm::anthropic`'s
+    /// prompt-cache breakpoint placement -- can recognize the same
+    /// boundary without duplicating the key string.
+    pub const TRANSIENT_CONTEXT_FLAG: &'static str = "transient_context";
+
+    /// True if this message was injected from a `--context-session` file
+    /// for the current run only (see `TRANSIENT_CONTEXT_FLAG`).
+    pub fn is_transient_context(&self) -> bool {
+        self.atoma_metadata
+            .as_ref()
+            .and_then(|v| v.get(Self::TRANSIENT_CONTEXT_FLAG))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+    }
+
     /// Return a `serde_json::Value` with `atoma_metadata` stripped, suitable
     /// for sending to the LLM API.
     pub fn to_llm_value(&self) -> Value {

@@ -6,7 +6,6 @@ use std::path::PathBuf;
 
 use crate::domain::ports::SessionPort;
 
-const TRANSIENT_CONTEXT_FLAG: &str = "transient_context";
 const TRANSIENT_CONTEXT_LAYER: &str = "context-session";
 
 pub fn load_transient_context_messages(
@@ -46,7 +45,7 @@ fn mark_transient_context_message(mut message: Message) -> Message {
     };
 
     metadata.insert(
-        TRANSIENT_CONTEXT_FLAG.to_string(),
+        Message::TRANSIENT_CONTEXT_FLAG.to_string(),
         serde_json::Value::Bool(true),
     );
     metadata
@@ -58,12 +57,7 @@ fn mark_transient_context_message(mut message: Message) -> Message {
 }
 
 pub fn is_transient_context_message(message: &Message) -> bool {
-    message
-        .atoma_metadata
-        .as_ref()
-        .and_then(|value| value.get(TRANSIENT_CONTEXT_FLAG))
-        .and_then(|value| value.as_bool())
-        .unwrap_or(false)
+    message.is_transient_context()
 }
 
 pub fn session_for_persistence(session: &Session) -> Session {
@@ -92,7 +86,7 @@ mod tests {
         assert_eq!(metadata.get("id").and_then(|v| v.as_i64()), Some(1));
         assert_eq!(
             metadata
-                .get(TRANSIENT_CONTEXT_FLAG)
+                .get(Message::TRANSIENT_CONTEXT_FLAG)
                 .and_then(|v| v.as_bool()),
             Some(true)
         );
