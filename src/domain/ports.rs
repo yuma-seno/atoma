@@ -6,6 +6,7 @@ use std::path::Path;
 
 use crate::domain::agent::ParsedAgentDef;
 use crate::domain::session::{Message, Session};
+use crate::domain::skill::SkillCatalog;
 use crate::domain::tool::ToolDef;
 
 // ── LLM port ──────────────────────────────────────────────────────────────────
@@ -85,6 +86,11 @@ pub trait AgentDefPort: Send + Sync {
 /// Port for loading tool definition files.
 pub trait ToolDefPort: Send + Sync {
     fn load(&self, path: &Path) -> Result<HashMap<String, ToolDef>>;
+}
+
+/// Port for loading and validating a skill catalog.
+pub trait SkillPort: Send + Sync {
+    fn load(&self, root: &Path) -> Result<SkillCatalog>;
 }
 
 // ── MCP factory port ──────────────────────────────────────────────────────────

@@ -148,7 +148,8 @@ Available placeholder variables:
 | `{{AGENT_ROLE_PROMPT}}` | Markdown body (or `description` if body is absent) |
 | `{{COLLEAGUES_LIST}}` | Bullet list of `knows_about` agents with their descriptions |
 | `{{AVAILABLE_TOOLS}}` | Bullet list of MCP-discovered tools with descriptions |
-| `{{WORKING_DIR}}` | Current working directory at invocation time |
+| `{{AVAILABLE_SKILLS}}` | Names and descriptions of dynamically loadable skills |
+| `{{WORKING_DIRECTORY}}` | Current working directory at invocation time |
 
 Example minimal template:
 
@@ -161,7 +162,14 @@ Working directory: {{WORKING_DIR}}
 
 ## Available tools
 {{AVAILABLE_TOOLS}}
+
+## Available skills
+{{AVAILABLE_SKILLS}}
 ```
+
+Skill assignment is deliberately not part of agent frontmatter. Every agent can
+load skills from the host-configured catalog through the built-in
+`atoma_builtin__load_skill` tool. See [Skills](skills.md).
 
 ---
 

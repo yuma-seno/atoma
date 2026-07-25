@@ -82,6 +82,10 @@ pub enum Command {
         #[arg(long, value_name = "FILE")]
         tools_file: Option<PathBuf>,
 
+        /// Directory containing dynamically loadable skill Markdown files
+        #[arg(long, value_name = "DIR")]
+        skills_dir: Option<PathBuf>,
+
         #[arg(long, value_name = "N")]
         max_iterations: Option<u32>,
     },

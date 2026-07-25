@@ -1,53 +1,36 @@
 use anyhow::{Context, Result};
-use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crate::domain::skill::{Skill, SkillMetadata};
+use crate::domain::skill::{Skill, SkillCatalog, SkillMetadata};
 
-/// Immutable, name-indexed set of skills validated at run startup.
-#[derive(Debug, Clone, Default)]
-pub struct SkillCatalog {
-    skills: BTreeMap<String, Skill>,
+pub fn load(root: &Path) -> Result<SkillCatalog> {
+    let root = root
+        .canonicalize()
+        .with_context(|| format!("Failed to resolve skills directory: {:?}", root))?;
+    if !root.is_dir() {
+        anyhow::bail!("Skills path is not a directory: {:?}", root);
+    }
+
+    let mut paths = Vec::new();
+    collect_markdown_files(&root, &mut paths)?;
+    paths.sort();
+
+    let mut skills = Vec::new();
+    for path in paths {
+        let skill = parse_skill(&path)?;
+        skills.push(skill);
+    }
+    SkillCatalog::new(skills)
 }
 
-impl SkillCatalog {
-    pub fn load(root: &Path) -> Result<Self> {
-        let root = root
-            .canonicalize()
-            .with_context(|| format!("Failed to resolve skills directory: {:?}", root))?;
-        if !root.is_dir() {
-            anyhow::bail!("Skills path is not a directory: {:?}", root);
-        }
+pub struct FileSkillAdapter;
 
-        let mut paths = Vec::new();
-        collect_markdown_files(&root, &mut paths)?;
-        paths.sort();
-
-        let mut skills = BTreeMap::new();
-        for path in paths {
-            let skill = parse_skill(&path)?;
-            let name = skill.metadata.name.clone();
-            if skills.insert(name.clone(), skill).is_some() {
-                anyhow::bail!("Duplicate skill name '{}': {:?}", name, path);
-            }
-        }
-
-        Ok(Self { skills })
-    }
-
-    pub fn metadata(&self) -> Vec<SkillMetadata> {
-        self.skills
-            .values()
-            .map(|skill| skill.metadata.clone())
-            .collect()
-    }
-
-    pub fn get(&self, name: &str) -> Option<&Skill> {
-        self.skills.get(name)
+impl crate::domain::ports::SkillPort for FileSkillAdapter {
+    fn load(&self, root: &Path) -> Result<SkillCatalog> {
+        load(root)
     }
 }
-
 fn collect_markdown_files(directory: &Path, paths: &mut Vec<PathBuf>) -> Result<()> {
     for entry in fs::read_dir(directory)
         .with_context(|| format!("Failed to read skills directory: {:?}", directory))?
@@ -121,7 +104,7 @@ mod tests {
         )
         .unwrap();
 
-        let catalog = SkillCatalog::load(dir.path()).unwrap();
+        let catalog = load(dir.path()).unwrap();
         let names: Vec<_> = catalog
             .metadata()
             .into_iter()
@@ -141,7 +124,7 @@ mod tests {
         fs::write(dir.path().join("one.md"), skill).unwrap();
         fs::write(dir.path().join("two.md"), skill).unwrap();
 
-        let error = SkillCatalog::load(dir.path()).unwrap_err();
+        let error = load(dir.path()).unwrap_err();
         assert!(error
             .to_string()
             .contains("Duplicate skill name 'duplicate'"));
@@ -156,7 +139,7 @@ mod tests {
         )
         .unwrap();
 
-        let error = SkillCatalog::load(dir.path()).unwrap_err();
+        let error = load(dir.path()).unwrap_err();
         assert!(error.to_string().contains("instructions must not be empty"));
     }
 }

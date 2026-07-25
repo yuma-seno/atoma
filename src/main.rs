@@ -33,6 +33,7 @@ async fn main() -> Result<()> {
             out_session,
             template,
             tools_file,
+            skills_dir,
             max_iterations,
         } => {
             let config = config_module::discover_and_load()?.1;
@@ -48,6 +49,7 @@ async fn main() -> Result<()> {
                 CliOverrides {
                     agent_def,
                     tools_file,
+                    skills_dir,
                     template,
                     max_iterations,
                     output: output_override,
@@ -69,6 +71,7 @@ async fn main() -> Result<()> {
             let llm = infra::llm::build_llm_client(provider_hint).await?;
             let session_port = infra::persistence::session::FileSessionAdapter;
             let tool_def_port = infra::persistence::tool_def::FileToolDefAdapter;
+            let skill_port = infra::persistence::skill::FileSkillAdapter;
             let mcp_factory = infra::mcp::McpRegistryFactory;
 
             let result = application::runner::run(
@@ -79,7 +82,7 @@ async fn main() -> Result<()> {
                     out_session,
                     template_path: resolved.template,
                     tools_file: resolved.tools_file,
-                    skills_dir: None,
+                    skills_dir: resolved.skills_dir,
                     max_iterations: resolved.max_iterations,
                 },
                 RunDeps {
@@ -87,6 +90,7 @@ async fn main() -> Result<()> {
                     agent_def: &agent_def_port,
                     session: &session_port,
                     tool_def: &tool_def_port,
+                    skill: &skill_port,
                     mcp_factory: &mcp_factory,
                 },
             )

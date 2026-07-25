@@ -9,10 +9,10 @@ use std::path::PathBuf;
 
 use crate::application::tools::RuntimeTools;
 use crate::domain::ports::{
-    AgentDefPort, LlmPort, LlmUsage, McpFactory, SessionPort, ToolDefPort, ToolPort,
+    AgentDefPort, LlmPort, LlmUsage, McpFactory, SessionPort, SkillPort, ToolDefPort, ToolPort,
 };
 use crate::domain::session::{Message, Session};
-use crate::infra::persistence::skill::SkillCatalog;
+use crate::domain::skill::SkillCatalog;
 use crate::infra::template;
 
 pub use execution::{inference_loop, CompletionReason, InferenceResult, MaxIterationsReached};
@@ -49,6 +49,7 @@ pub struct RunDeps<'a> {
     pub agent_def: &'a dyn AgentDefPort,
     pub session: &'a dyn SessionPort,
     pub tool_def: &'a dyn ToolDefPort,
+    pub skill: &'a dyn SkillPort,
     pub mcp_factory: &'a dyn McpFactory,
 }
 
@@ -111,7 +112,7 @@ pub async fn run(settings: RunSettings, deps: RunDeps<'_>) -> Result<RunOutcome>
     };
 
     let skill_catalog = match skills_dir.as_ref() {
-        Some(path) => SkillCatalog::load(path)?,
+        Some(path) => deps.skill.load(path)?,
         None => SkillCatalog::default(),
     };
     let skill_metadata = skill_catalog.metadata();

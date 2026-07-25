@@ -3,7 +3,7 @@ use async_trait::async_trait;
 use serde_json::Value;
 
 use crate::domain::ports::{ToolCallResult, ToolPort};
-use crate::infra::persistence::skill::SkillCatalog;
+use crate::domain::skill::SkillCatalog;
 
 pub const LOAD_SKILL_TOOL: &str = "atoma_builtin__load_skill";
 const BUILTIN_PREFIX: &str = "atoma_builtin__";
@@ -113,7 +113,7 @@ mod tests {
             "---\nname: engineering/tdd\ndescription: Test first.\n---\n\nUse red-green-refactor.\n",
         )
         .unwrap();
-        SkillCatalog::load(dir.path()).unwrap()
+        crate::infra::persistence::skill::load(dir.path()).unwrap()
     }
 
     #[tokio::test]

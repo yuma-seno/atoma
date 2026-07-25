@@ -68,6 +68,7 @@ atoma run \
                             # If both omitted, runs with no new user message
   [--template <FILE>]       # Custom system prompt template (overrides built-in)
   [--tools-file <FILE>]     # Tools YAML file (required if mcp_servers is non-empty)
+  [--skills-dir <DIR>]      # Dynamically loadable skill Markdown files
   [--max-iterations <N>]    # Max inference iterations (default: 50)
 
 atoma validate \
@@ -85,6 +86,7 @@ Place `atoma.toml` in your project root to set defaults for `atoma run`:
 [defaults]
 agent_def = "agents/default.md"
 tools_file = "tools.yaml"
+skills_dir = "skills"
 template = "templates/default.md"
 max_iterations = 50
 output = "text"
@@ -102,6 +104,15 @@ OPENAI_BASE_URL = "https://openrouter.ai/api/v1"
 ```
 
 Generate with `atoma init > atoma.toml`. Priority: **CLI arg > atoma.toml profile > atoma.toml defaults**.
+
+## Skills
+
+Skills are reusable instructions loaded dynamically through the always-available
+`atoma_builtin__load_skill` tool. The system prompt receives only each skill's
+name and description; full instructions enter context when loaded and remain in
+the normal session history. Skills are configured at the host level with
+`--skills-dir` or `skills_dir` in `atoma.toml`, never in agent definitions or
+tools files. See **[docs/skills.md](docs/skills.md)**.
 
 ## JSON Output
 

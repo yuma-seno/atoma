@@ -119,8 +119,9 @@ docker run --rm -it \
 src/
   domain/          # Pure entities and port traits — no I/O, no external deps
     agent.rs       # AgentDef, ParsedAgentDef
-    ports.rs       # LlmPort, McpPort, SessionPort, AgentDefPort, ToolDefPort, McpFactory
+    ports.rs       # LlmPort, ToolPort, persistence ports, McpFactory
     session.rs     # Message, ToolCall, Session
+    skill.rs       # SkillMetadata, Skill, SkillCatalog
     tool.rs        # Hooks, ToolDef
   infra/           # Port implementations — I/O, HTTP, file system
     config.rs      # atoma.toml model, discovery, and precedence resolution
@@ -128,8 +129,9 @@ src/
     mcp.rs         # McpRegistry (stdio MCP client) + McpRegistryFactory
     hooks.rs       # Hook script execution, allowlist/denylist filtering
     template.rs    # System prompt rendering
-    persistence/   # File-system adapters for session, agent def, tool def
+    persistence/   # File-system adapters for session, agent def, skill, tool def
   application/     # Use case orchestration — depends only on domain ports
+    tools.rs          # Built-in skill tool + external MCP tool composition
     runner/           # Main inference loop
       mod.rs          # Orchestration: parse, connect, loop, persist, return outcome
       execution.rs    # Inference loop + tool execution

@@ -31,6 +31,8 @@ pub struct DefaultsConfig {
     #[serde(default)]
     pub tools_file: Option<String>,
     #[serde(default)]
+    pub skills_dir: Option<String>,
+    #[serde(default)]
     pub template: Option<String>,
     #[serde(default = "default_max_iterations")]
     pub max_iterations: u32,
@@ -59,6 +61,8 @@ pub struct ProfileConfig {
     #[serde(default)]
     pub tools_file: Option<String>,
     #[serde(default)]
+    pub skills_dir: Option<String>,
+    #[serde(default)]
     pub template: Option<String>,
     #[serde(default)]
     pub max_iterations: Option<u32>,
@@ -73,6 +77,7 @@ pub struct ProfileConfig {
 pub struct ResolvedConfig {
     pub agent_def: PathBuf,
     pub tools_file: Option<PathBuf>,
+    pub skills_dir: Option<PathBuf>,
     pub template: Option<PathBuf>,
     pub max_iterations: u32,
     pub output: OutputFormat,
@@ -100,6 +105,7 @@ pub fn discover_and_load() -> Result<(Option<PathBuf>, Option<AtomaConfig>)> {
 pub struct CliOverrides {
     pub agent_def: Option<PathBuf>,
     pub tools_file: Option<PathBuf>,
+    pub skills_dir: Option<PathBuf>,
     pub template: Option<PathBuf>,
     pub max_iterations: Option<u32>,
     pub output: Option<OutputFormat>,
@@ -161,6 +167,21 @@ pub fn resolve_run_config(
                 .map(PathBuf::from)
         });
 
+    let skills_dir = overrides
+        .skills_dir
+        .or_else(|| {
+            profile
+                .as_ref()
+                .and_then(|p| p.skills_dir.clone())
+                .map(PathBuf::from)
+        })
+        .or_else(|| {
+            defaults
+                .as_ref()
+                .and_then(|d| d.skills_dir.clone())
+                .map(PathBuf::from)
+        });
+
     let template = overrides
         .template
         .or_else(|| {
@@ -196,6 +217,7 @@ pub fn resolve_run_config(
     Ok(ResolvedConfig {
         agent_def,
         tools_file,
+        skills_dir,
         template,
         max_iterations,
         output,
@@ -211,6 +233,7 @@ pub fn generate_default_config() -> String {
 [defaults]
 # agent_def = "agents/default.md"
 # tools_file = "tools.yaml"
+# skills_dir = "skills"
 # template = "templates/custom.md"
 max_iterations = 50
 # output = "text"   # "text" or "json"
@@ -232,14 +255,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn resolves_template_using_cli_profile_defaults_priority() {
+    fn resolves_run_settings_using_cli_profile_defaults_priority() {
         let config: AtomaConfig = toml::from_str(
             r#"
 [defaults]
 template = "default.md"
+skills_dir = "default-skills"
 
 [profile.review]
 template = "review.md"
+skills_dir = "review-skills"
 output = "json"
 "#,
         )
@@ -249,6 +274,7 @@ output = "json"
             CliOverrides {
                 agent_def: None,
                 tools_file: None,
+                skills_dir: None,
                 template: None,
                 max_iterations: None,
                 output: None,
@@ -258,12 +284,17 @@ output = "json"
         )
         .unwrap();
         assert_eq!(from_profile.template, Some(PathBuf::from("review.md")));
+        assert_eq!(
+            from_profile.skills_dir,
+            Some(PathBuf::from("review-skills"))
+        );
         assert_eq!(from_profile.output, OutputFormat::Json);
 
         let from_cli = resolve_run_config(
             CliOverrides {
                 agent_def: None,
                 tools_file: None,
+                skills_dir: Some(PathBuf::from("cli-skills")),
                 template: Some(PathBuf::from("cli.md")),
                 max_iterations: None,
                 output: None,
@@ -273,6 +304,7 @@ output = "json"
         )
         .unwrap();
         assert_eq!(from_cli.template, Some(PathBuf::from("cli.md")));
+        assert_eq!(from_cli.skills_dir, Some(PathBuf::from("cli-skills")));
     }
 
     #[test]
@@ -294,6 +326,7 @@ PROFILE_ONLY = "yes"
             CliOverrides {
                 agent_def: None,
                 tools_file: None,
+                skills_dir: None,
                 template: None,
                 max_iterations: None,
                 output: None,
@@ -324,6 +357,7 @@ PROFILE_ONLY = "yes"
             CliOverrides {
                 agent_def: None,
                 tools_file: None,
+                skills_dir: None,
                 template: None,
                 max_iterations: None,
                 output: None,

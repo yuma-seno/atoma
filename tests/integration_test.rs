@@ -163,6 +163,7 @@ async fn test_single_text_response() {
             agent_def: &agent_port,
             session: &session_port,
             tool_def: &tool_def_port,
+            skill: &atoma::infra::persistence::skill::FileSkillAdapter,
             mcp_factory: &mcp_factory,
         },
     )
@@ -217,6 +218,7 @@ async fn test_tool_call_then_text_response() {
             agent_def: &agent_port,
             session: &session_port,
             tool_def: &tool_def_port,
+            skill: &atoma::infra::persistence::skill::FileSkillAdapter,
             mcp_factory: &mcp_factory,
         },
     )
@@ -272,6 +274,7 @@ async fn test_skill_load_is_persisted_as_tool_history() {
             agent_def: &agent_port,
             session: &session_port,
             tool_def: &tool_def_port,
+            skill: &atoma::infra::persistence::skill::FileSkillAdapter,
             mcp_factory: &mcp_factory,
         },
     )
@@ -349,6 +352,7 @@ async fn test_max_iterations_exceeded() {
             agent_def: &agent_port,
             session: &session_port,
             tool_def: &tool_def_port,
+            skill: &atoma::infra::persistence::skill::FileSkillAdapter,
             mcp_factory: &mcp_factory,
         },
     )
@@ -416,6 +420,7 @@ async fn test_content_filter_returns_error() {
             agent_def: &agent_port,
             session: &session_port,
             tool_def: &tool_def_port,
+            skill: &atoma::infra::persistence::skill::FileSkillAdapter,
             mcp_factory: &mcp_factory,
         },
     )
@@ -479,6 +484,7 @@ async fn test_truncated_response_reports_length_reason() {
             agent_def: &agent_port,
             session: &session_port,
             tool_def: &tool_def_port,
+            skill: &atoma::infra::persistence::skill::FileSkillAdapter,
             mcp_factory: &mcp_factory,
         },
     )
@@ -563,6 +569,7 @@ async fn test_prompt_file_is_appended_and_persisted() {
             agent_def: &agent_port,
             session: &session_port,
             tool_def: &tool_def_port,
+            skill: &atoma::infra::persistence::skill::FileSkillAdapter,
             mcp_factory: &mcp_factory,
         },
     )
