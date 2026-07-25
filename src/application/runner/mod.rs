@@ -162,6 +162,7 @@ pub async fn run(settings: RunSettings, deps: RunDeps<'_>) -> Result<RunOutcome>
         custom_template.as_deref(),
         &working_dir,
         &colleagues,
+        &[],
     );
     tracing::debug!("System prompt:\n{}", system_prompt);
 

@@ -1,6 +1,7 @@
 #[cfg(test)]
 use crate::domain::agent::AgentDef;
 use crate::domain::agent::ParsedAgentDef;
+use crate::domain::skill::SkillMetadata;
 
 static DEFAULT_TEMPLATE: &str = r#"# Identity & Purpose
 You are "{{AGENT_NAME}}".
@@ -21,6 +22,11 @@ Working directory: `{{WORKING_DIRECTORY}}`
 You interact with the environment through the Model Context Protocol (MCP). Do not guess code or environment state; always execute tools to verify facts.
 
 {{AVAILABLE_TOOLS}}
+
+# Available Skills
+Skills are reusable instructions loaded on demand. Call `atoma_builtin__load_skill` before work covered by a relevant skill.
+
+{{AVAILABLE_SKILLS}}
 
 # Thought Process & Execution
 Before taking action or generating final output, always use the `<thought>` tag to develop a rigorous thought process following the steps below:
@@ -45,6 +51,7 @@ Before taking action or generating final output, always use the `<thought>` tag 
 /// - `{{AGENT_ROLE_PROMPT}}` — custom body or description fallback
 /// - `{{COLLEAGUES_LIST}}` — formatted list of known colleagues
 /// - `{{AVAILABLE_TOOLS}}` — formatted list of tool descriptions
+/// - `{{AVAILABLE_SKILLS}}` — skill names and descriptions (not full instructions)
 /// - `{{WORKING_DIRECTORY}}` — current working directory
 ///
 /// Pass `custom_template` to override the built-in template entirely.
@@ -54,6 +61,7 @@ pub fn build_system_prompt(
     custom_template: Option<&str>,
     working_dir: &str,
     colleagues: &[(String, String)],
+    skills: &[SkillMetadata],
 ) -> String {
     let template = custom_template.unwrap_or(DEFAULT_TEMPLATE);
     let mut prompt = template.to_string();
@@ -84,6 +92,16 @@ pub fn build_system_prompt(
         prompt = prompt.replace("{{AVAILABLE_TOOLS}}", "No tools currently available.");
     } else {
         prompt = prompt.replace("{{AVAILABLE_TOOLS}}", &tool_descriptions.join("\n"));
+    }
+
+    if skills.is_empty() {
+        prompt = prompt.replace("{{AVAILABLE_SKILLS}}", "No skills currently available.");
+    } else {
+        let lines: Vec<String> = skills
+            .iter()
+            .map(|skill| format!("- `{}`: {}", skill.name, skill.description))
+            .collect();
+        prompt = prompt.replace("{{AVAILABLE_SKILLS}}", &lines.join("\n"));
     }
 
     prompt
@@ -120,7 +138,7 @@ mod tests {
     #[test]
     fn test_custom_body_injected_into_template() {
         let agent = make_test_agent(Some("Custom role description".to_string()));
-        let result = build_system_prompt(&agent, &[], None, "/repo", &default_colleagues());
+        let result = build_system_prompt(&agent, &[], None, "/repo", &default_colleagues(), &[]);
         assert!(result.contains("TestAgent"));
         assert!(result.contains("Custom role description"));
         assert!(result.contains("Strict Rules"));
@@ -129,7 +147,7 @@ mod tests {
     #[test]
     fn test_description_fallback_when_no_body() {
         let agent = make_test_agent(None);
-        let result = build_system_prompt(&agent, &[], None, "/repo", &default_colleagues());
+        let result = build_system_prompt(&agent, &[], None, "/repo", &default_colleagues(), &[]);
         assert!(result.contains("A test agent for unit testing"));
     }
 
@@ -142,6 +160,7 @@ mod tests {
             None,
             "/repo",
             &default_colleagues(),
+            &[],
         );
         assert!(result.contains("TestAgent"));
         assert!(result.contains("A test agent for unit testing"));
@@ -154,7 +173,7 @@ mod tests {
     fn test_custom_template() {
         let agent = make_test_agent(None);
         let custom = "Hello {{AGENT_NAME}}! Role: {{AGENT_ROLE_PROMPT}}";
-        let result = build_system_prompt(&agent, &[], Some(custom), "/repo", &[]);
+        let result = build_system_prompt(&agent, &[], Some(custom), "/repo", &[], &[]);
         assert_eq!(
             result,
             "Hello TestAgent! Role: A test agent for unit testing"
@@ -170,6 +189,7 @@ mod tests {
             None,
             "/home/runner/work/myrepo",
             &default_colleagues(),
+            &[],
         );
         assert!(result.contains("/home/runner/work/myrepo"));
     }
@@ -187,8 +207,20 @@ mod tests {
                 "Agent responsible for reviews".to_string(),
             ),
         ];
-        let result = build_system_prompt(&agent, &[], None, "/repo", &colleagues);
+        let result = build_system_prompt(&agent, &[], None, "/repo", &colleagues, &[]);
         assert!(result.contains("`engineer`: Agent responsible for implementation"));
         assert!(result.contains("`reviewer`: Agent responsible for reviews"));
+    }
+
+    #[test]
+    fn test_skill_catalog_exposes_metadata_without_instructions() {
+        let agent = make_test_agent(None);
+        let skills = vec![SkillMetadata {
+            name: "engineering/tdd".to_string(),
+            description: "Test first.".to_string(),
+        }];
+        let result = build_system_prompt(&agent, &[], None, "/repo", &[], &skills);
+        assert!(result.contains("`engineering/tdd`: Test first."));
+        assert!(!result.contains("red-green-refactor"));
     }
 }
