@@ -71,9 +71,6 @@ pub enum Command {
         in_session: Option<PathBuf>,
 
         #[arg(long, value_name = "FILE")]
-        context_session: Vec<PathBuf>,
-
-        #[arg(long, value_name = "FILE")]
         prompt_file: Option<PathBuf>,
 
         #[arg(long, value_name = "FILE")]
@@ -87,9 +84,6 @@ pub enum Command {
 
         #[arg(long, value_name = "N")]
         max_iterations: Option<u32>,
-
-        #[arg(long, value_name = "FILE")]
-        after_iteration_hook: Option<PathBuf>,
     },
 
     /// Validate an agent definition and optional tools file

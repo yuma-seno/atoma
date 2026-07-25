@@ -32,11 +32,6 @@ pub struct AgentDef {
     /// The reserved fields `model` and `messages` cannot be overridden.
     #[serde(default)]
     pub extra_body: HashMap<String, Value>,
-    /// Arbitrary metadata for external tooling (e.g. orchestration configs).
-    /// Kept for YAML deserialization compatibility; not read at runtime.
-    #[serde(default)]
-    #[allow(dead_code)]
-    pub metadata: Option<Value>,
 }
 
 /// A fully parsed agent definition: frontmatter + optional body.

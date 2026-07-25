@@ -124,12 +124,7 @@ fn minimal_agent(name: &str) -> AgentDef {
         callable_by: vec![],
         mcp_servers: vec![],
         extra_body: HashMap::new(),
-        metadata: None,
     }
-}
-
-fn agent_def_path() -> std::path::PathBuf {
-    tempdir().unwrap().into_path().join("agent.md")
 }
 
 // ── Integration tests ─────────────────────────────────────────────────────────
@@ -157,13 +152,11 @@ async fn test_single_text_response() {
         RunSettings {
             agent_def_path: agent_path,
             in_session: None,
-            context_sessions: vec![],
             prompt_file: None,
             out_session: None,
             template_path: None,
             tools_file: None,
             max_iterations: 10,
-            after_iteration_hook: None,
             output_format: OutputFormat::Text,
         },
         RunDeps {
@@ -189,7 +182,7 @@ async fn test_tool_call_then_text_response() {
         .enqueue_tool_calls(vec![tool_call])
         .enqueue_text("Done!");
 
-    let mut registry = MockMcpRegistry::new()
+    let registry = MockMcpRegistry::new()
         .with_tool("test_tool", "A test tool")
         .with_response("test_tool", "tool result");
 
@@ -213,13 +206,11 @@ async fn test_tool_call_then_text_response() {
         RunSettings {
             agent_def_path: agent_path,
             in_session: None,
-            context_sessions: vec![],
             prompt_file: None,
             out_session: None,
             template_path: None,
             tools_file: Some(tools_path),
             max_iterations: 10,
-            after_iteration_hook: None,
             output_format: OutputFormat::Text,
         },
         RunDeps {
@@ -271,13 +262,11 @@ async fn test_max_iterations_exceeded() {
         RunSettings {
             agent_def_path: agent_path,
             in_session: None,
-            context_sessions: vec![],
             prompt_file: None,
             out_session: None,
             template_path: None,
             tools_file: Some(tools_path),
             max_iterations: 2,
-            after_iteration_hook: None,
             output_format: OutputFormat::Text,
         },
         RunDeps {
@@ -340,13 +329,11 @@ async fn test_content_filter_returns_error() {
         RunSettings {
             agent_def_path: agent_path,
             in_session: None,
-            context_sessions: vec![],
             prompt_file: None,
             out_session: None,
             template_path: None,
             tools_file: None,
             max_iterations: 10,
-            after_iteration_hook: None,
             output_format: OutputFormat::Text,
         },
         RunDeps {
@@ -369,7 +356,7 @@ async fn test_content_filter_returns_error() {
 }
 
 #[tokio::test]
-async fn test_context_session_is_injected_but_not_persisted() {
+async fn test_prompt_file_is_appended_and_persisted() {
     struct RecordingLlm {
         seen_messages: Arc<Mutex<Vec<Message>>>,
     }
@@ -410,9 +397,10 @@ async fn test_context_session_is_injected_but_not_persisted() {
     let dir = tempdir().unwrap();
     let agent_path = dir.path().join("agent.md");
     let in_session_path = dir.path().join("input-session.json");
-    let context_session_path = dir.path().join("context-session.json");
+    let prompt_path = dir.path().join("prompt.txt");
     let out_session_path = dir.path().join("out-session.json");
     std::fs::write(&agent_path, "").unwrap();
+    std::fs::write(&prompt_path, "new prompt").unwrap();
 
     let mut persisted_session = Session::default();
     persisted_session
@@ -420,26 +408,15 @@ async fn test_context_session_is_injected_but_not_persisted() {
         .push(Message::user("persistent history"));
     file_session::save(&persisted_session, &in_session_path).unwrap();
 
-    let mut context_session = Session::default();
-    context_session
-        .messages
-        .push(Message::system("ignored system context"));
-    context_session
-        .messages
-        .push(Message::user("ephemeral context"));
-    file_session::save(&context_session, &context_session_path).unwrap();
-
     let result = run(
         RunSettings {
             agent_def_path: agent_path,
             in_session: Some(in_session_path),
-            context_sessions: vec![context_session_path],
-            prompt_file: None,
+            prompt_file: Some(prompt_path),
             out_session: Some(out_session_path.clone()),
             template_path: None,
             tools_file: None,
             max_iterations: 10,
-            after_iteration_hook: None,
             output_format: OutputFormat::Text,
         },
         RunDeps {
@@ -457,16 +434,13 @@ async fn test_context_session_is_injected_but_not_persisted() {
     let seen = seen_messages.lock().unwrap().clone();
     assert_eq!(seen.len(), 3);
     assert_eq!(seen[0].role, "system");
-    // Persistent (resumed) history must come before transient context, and
-    // transient context must be last so the model always reacts to the most
-    // recent information rather than its own prior reply.
     assert_eq!(
         seen[1].content.as_ref().and_then(|value| value.as_str()),
         Some("persistent history")
     );
     assert_eq!(
         seen[2].content.as_ref().and_then(|value| value.as_str()),
-        Some("ephemeral context")
+        Some("new prompt")
     );
 
     let saved = file_session::load(&out_session_path).unwrap();
@@ -477,6 +451,6 @@ async fn test_context_session_is_injected_but_not_persisted() {
         .collect();
 
     assert!(saved_texts.contains(&"persistent history"));
+    assert!(saved_texts.contains(&"new prompt"));
     assert!(saved_texts.contains(&"Done!"));
-    assert!(!saved_texts.contains(&"ephemeral context"));
 }

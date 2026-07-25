@@ -25,7 +25,6 @@ Optional role prompt body (Markdown)
 | `callable_by` | `[String]` | No | Who may invoke this agent: `user` and/or `agent`. Purely advisory — checked by `atoma validate` (values must be recognized, and any agent referenced via `knows_about` must include `agent`), but not enforced by the `atoma` binary itself |
 | `mcp_servers` | `[String]` | No | Tool server keys (must match entries in `--tools-file`) |
 | `extra_body` | Object | No | Arbitrary key-value pairs merged into the LLM API request body. See [Extra Body](#extra-body) |
-| `metadata` | Object | No | Arbitrary data for external tooling (e.g. Atoma-Actions). Ignored by Atoma itself |
 
 ### Body (role prompt)
 
@@ -222,9 +221,6 @@ mcp_servers:
 extra_body:
   temperature: 0.1
   max_tokens: 8192
-metadata:
-  team: backend
-  tier: worker
 ---
 
 You are a senior software engineer working on a Rust project.

@@ -30,13 +30,11 @@ async fn main() -> Result<()> {
             profile,
             output,
             in_session,
-            context_session,
             prompt_file,
             out_session,
             template,
             tools_file,
             max_iterations,
-            after_iteration_hook,
         } => {
             let config = match config_module::discover_and_load() {
                 Ok((_path, Some(cfg))) => Some(cfg),
@@ -79,13 +77,11 @@ async fn main() -> Result<()> {
                 RunSettings {
                     agent_def_path: resolved.agent_def,
                     in_session,
-                    context_sessions: context_session,
                     prompt_file,
                     out_session,
                     template_path: template,
                     tools_file: resolved.tools_file,
                     max_iterations: resolved.max_iterations,
-                    after_iteration_hook,
                     output_format: resolved.output,
                 },
                 RunDeps {

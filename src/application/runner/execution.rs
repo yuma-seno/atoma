@@ -6,8 +6,6 @@ use std::collections::HashMap;
 
 use crate::domain::ports::{LlmPort, LlmUsage, McpPort};
 use crate::domain::session::{Message, Session, ToolCall};
-use crate::infra::hooks;
-
 /// Sentinel error returned when the inference loop runs out of iterations.
 #[derive(Debug)]
 pub struct MaxIterationsReached(pub u32);
@@ -113,7 +111,6 @@ pub async fn inference_loop(
     extra_body: &HashMap<String, Value>,
     mcp_registry: &mut Option<Box<dyn McpPort + Send>>,
     max_iterations: u32,
-    after_iteration_hook: Option<&str>,
 ) -> Result<InferenceResult> {
     let mut total_usage = LlmUsage::default();
 
@@ -165,18 +162,6 @@ pub async fn inference_loop(
                 tracing::info!("Tool requested session suspension; ending inference loop");
                 return Ok(InferenceResult::SessionEnded { usage: total_usage });
             }
-
-            if let Some(hook) = after_iteration_hook {
-                if let Some(new_content) =
-                    hooks::run_after_iteration_hook(hook, agent_name, iteration).await
-                {
-                    tracing::info!(
-                        "after_iteration hook produced {} chars; appending as user message",
-                        new_content.len()
-                    );
-                    session.messages.push(Message::user(&new_content));
-                }
-            }
         } else {
             match finish_reason.as_str() {
                 "stop" | "end_turn" => {
@@ -221,49 +206,4 @@ pub async fn inference_loop(
     }
 
     Err(anyhow::Error::new(MaxIterationsReached(max_iterations)))
-}
-
-/// Parse an optional GitHub comment ID from the first line of a prompt.
-pub fn extract_comment_id(text: &str) -> Option<u64> {
-    let first_line = text.lines().next()?;
-    let inner = first_line
-        .trim()
-        .strip_prefix("<!-- atoma:comment_id=")?
-        .strip_suffix(" -->")?;
-    inner.parse::<u64>().ok()
-}
-
-/// Extract a directive (agent name) from the first command-like line of text.
-pub fn extract_directive_from_text(text: &str) -> Option<String> {
-    let command_pattern =
-        regex_lite::Regex::new(r"^/(?P<agent>[a-z][a-z0-9-]+)(?:\b|\s|$)").ok()?;
-    for raw_line in text.lines() {
-        let line = raw_line.trim();
-        if line.is_empty() {
-            continue;
-        }
-        let cleaned = regex_lite::Regex::new(r"^(?:[-*+]\s+|>\s*)+")
-            .ok()
-            .map(|re| re.replace(line, ""))
-            .unwrap_or_else(|| line.into());
-        let cleaned = cleaned.trim();
-
-        let variants = [
-            cleaned.to_string(),
-            format!("/{}", cleaned.trim_start_matches('/')),
-        ];
-        for variant in &variants {
-            if let Some(cap) = command_pattern.captures(variant) {
-                let agent = cap.name("agent")?.as_str().to_string();
-                if regex_lite::Regex::new(r"^[a-z][a-z0-9-]*$")
-                    .ok()
-                    .map(|re| re.is_match(&agent))
-                    .unwrap_or(false)
-                {
-                    return Some(agent);
-                }
-            }
-        }
-    }
-    None
 }

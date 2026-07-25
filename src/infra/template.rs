@@ -105,7 +105,6 @@ mod tests {
                 callable_by: vec![],
                 mcp_servers: vec![],
                 extra_body: HashMap::default(),
-                metadata: None,
             },
             body,
         }

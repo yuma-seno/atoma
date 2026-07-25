@@ -44,12 +44,6 @@ impl MockMcpRegistry {
             .insert(tool_name.to_string(), result.to_string());
         self
     }
-
-    /// Mark a tool as session-ending (simulates _meta.session_ends: true).
-    pub fn with_session_ends(mut self, tool_name: &str) -> Self {
-        self.session_ends_tools.insert(tool_name.to_string());
-        self
-    }
 }
 
 #[async_trait]

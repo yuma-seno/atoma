@@ -85,7 +85,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("test-agent.md");
         let markdown =
-            "---\nname: TestAgent2\ndescription: Another test\nmodel: claude-3-5-sonnet\n---\n";
+            "---\nname: TestAgent2\ndescription: Another test\nmodel: claude-3-5-sonnet\nmetadata:\n  legacy: value\n---\n";
         fs::write(&path, markdown).unwrap();
         let parsed = parse(&path).unwrap();
         assert_eq!(parsed.frontmatter.name, "TestAgent2");

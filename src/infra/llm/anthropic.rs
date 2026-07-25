@@ -481,30 +481,4 @@ mod tests {
         let body = build_request_body("claude-x", &messages, None, &extra);
         assert_eq!(body["temperature"], 0.5);
     }
-
-    #[test]
-    fn transient_context_messages_translate_and_cache_normally() {
-        // atoma_metadata (including the transient_context flag) is Atoma's
-        // own internal bookkeeping, never read by messages_to_anthropic()
-        // -- it must have zero effect on the wire format sent to the LLM.
-        let mut transient = Message::user("new GitHub comment since last run");
-        transient.atoma_metadata = Some(serde_json::json!({ "transient_context": true }));
-        assert!(transient.is_transient_context());
-
-        let messages = vec![Message::user("old history"), transient];
-        let body = build_request_body("claude-x", &messages, None, &Default::default());
-
-        let out_messages = body["messages"].as_array().unwrap();
-        assert_eq!(out_messages.len(), 2);
-        let last_content = out_messages[1]["content"].as_array().unwrap();
-        assert_eq!(last_content[0]["text"], "new GitHub comment since last run");
-        assert_eq!(
-            cache_control_of(&last_content[0]),
-            Some(&serde_json::json!({ "type": "ephemeral" }))
-        );
-        // atoma_metadata itself must never leak into the request body.
-        assert!(!serde_json::to_string(&body)
-            .unwrap()
-            .contains("transient_context"));
-    }
 }

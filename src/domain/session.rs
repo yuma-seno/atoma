@@ -58,17 +58,6 @@ impl Message {
         }
     }
 
-    pub fn user_with_metadata(content: &str, metadata: Value) -> Self {
-        Self {
-            role: "user".to_string(),
-            content: Some(Value::String(content.to_string())),
-            tool_calls: None,
-            tool_call_id: None,
-            name: None,
-            atoma_metadata: Some(metadata),
-        }
-    }
-
     pub fn assistant(content: Option<&str>, tool_calls: Option<Vec<ToolCall>>) -> Self {
         Self {
             role: "assistant".to_string(),
@@ -89,25 +78,6 @@ impl Message {
             name: None,
             atoma_metadata: None,
         }
-    }
-
-    /// Metadata key set on messages loaded from a `--context-session` file
-    /// (see `application::runner::context`): these are appended to the
-    /// conversation for exactly one inference call and stripped again
-    /// before the session is persisted. Exposed here (not just in the
-    /// `runner` layer) so lower layers -- e.g. `infra::llm::anthropic`'s
-    /// prompt-cache breakpoint placement -- can recognize the same
-    /// boundary without duplicating the key string.
-    pub const TRANSIENT_CONTEXT_FLAG: &'static str = "transient_context";
-
-    /// True if this message was injected from a `--context-session` file
-    /// for the current run only (see `TRANSIENT_CONTEXT_FLAG`).
-    pub fn is_transient_context(&self) -> bool {
-        self.atoma_metadata
-            .as_ref()
-            .and_then(|v| v.get(Self::TRANSIENT_CONTEXT_FLAG))
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false)
     }
 
     /// Return a `serde_json::Value` with `atoma_metadata` stripped, suitable
@@ -155,14 +125,6 @@ mod tests {
     }
 
     #[test]
-    fn test_message_user_with_metadata() {
-        let meta = serde_json::json!({ "comment_id": 42 });
-        let m = Message::user_with_metadata("Hello!", meta.clone());
-        assert_eq!(m.role, "user");
-        assert_eq!(m.atoma_metadata, Some(meta));
-    }
-
-    #[test]
     fn test_message_assistant_text() {
         let m = Message::assistant(Some("I'm here."), None);
         assert_eq!(m.role, "assistant");
@@ -180,8 +142,12 @@ mod tests {
 
     #[test]
     fn test_to_llm_value_strips_metadata() {
-        let meta = serde_json::json!({ "comment_id": 99 });
-        let m = Message::user_with_metadata("Hi", meta);
+        let m: Message = serde_json::from_value(serde_json::json!({
+            "role": "user",
+            "content": "Hi",
+            "atoma_metadata": { "github_context": { "event_type": "issue_comment" } }
+        }))
+        .unwrap();
         let val = m.to_llm_value();
         let obj = val.as_object().unwrap();
         assert!(

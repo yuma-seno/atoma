@@ -180,62 +180,6 @@ async fn run_after_hook_inner(script: &str, payload: Value) -> Result<()> {
     Ok(())
 }
 
-/// Invoke an after-iteration hook; returns non-empty stdout or `None`.
-///
-/// The script receives `ATOMA_AGENT` and `ATOMA_ITERATION` env vars.
-/// Failures are logged but do not propagate.
-pub async fn run_after_iteration_hook(
-    script: &str,
-    agent_name: &str,
-    iteration: u32,
-) -> Option<String> {
-    match run_after_iteration_inner(script, agent_name, iteration).await {
-        Ok(output) if !output.trim().is_empty() => Some(output),
-        Ok(_) => None,
-        Err(e) => {
-            tracing::warn!("after_iteration hook '{}' error: {}", script, e);
-            None
-        }
-    }
-}
-
-async fn run_after_iteration_inner(
-    script: &str,
-    agent_name: &str,
-    iteration: u32,
-) -> Result<String> {
-    let timeout = hook_timeout();
-    let output = tokio::time::timeout(
-        timeout,
-        tokio::process::Command::new(script)
-            .env("ATOMA_AGENT", agent_name)
-            .env("ATOMA_ITERATION", iteration.to_string())
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::inherit())
-            .output(),
-    )
-    .await
-    .with_context(|| {
-        format!(
-            "after_iteration hook '{}' timed out after {}s",
-            script,
-            timeout.as_secs()
-        )
-    })?
-    .with_context(|| format!("Failed to spawn after_iteration hook: {}", script))?;
-
-    if !output.status.success() {
-        tracing::warn!(
-            "after_iteration hook '{}' exited with status {}",
-            script,
-            output.status
-        );
-    }
-
-    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

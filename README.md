@@ -62,7 +62,6 @@ atoma run \
   [--profile <NAME>]        # Named profile from atoma.toml
   [--output <FORMAT>]       # Output format: text (default) or json
   [--in-session <FILE>]     # Input session JSON (prior conversation history)
-  [--context-session <FILE>]  # Extra session JSON injected only for this run (repeatable)
   [--out-session <FILE>]    # Output session JSON (omit to discard after run)
   [--prompt-file <FILE>]    # User prompt from file
                             # If omitted and stdin is not a TTY, reads from stdin
@@ -70,7 +69,6 @@ atoma run \
   [--template <FILE>]       # Custom system prompt template (overrides built-in)
   [--tools-file <FILE>]     # Tools YAML file (required if mcp_servers is non-empty)
   [--max-iterations <N>]    # Max inference iterations (default: 50)
-  [--after-iteration-hook <FILE>]  # Script invoked after each iteration
 
 atoma validate \
   --agent-def <FILE>        # Validate an agent definition
@@ -108,8 +106,8 @@ For CI/CD pipelines:
 atoma run --agent-def ./agent.md --prompt-file ./task.txt --output json
 ```
 
-Output includes `response`, `usage` (prompt/completion/total tokens),
-`directive` (first `/agent-name` command found), and `session_path`.
+Output includes `response`, `usage` (prompt/completion/total tokens), and
+`session_path`.
 
 ---
 
@@ -127,21 +125,6 @@ atoma run --agent-def ./agent.md \
 git diff | atoma run --agent-def ./ReviewAgent.md \
   --in-session ./sess.json --out-session ./sess.json
 ```
-
-Per-run context can be supplied separately from the durable session:
-
-```bash
-atoma run --agent-def ./agent.md \
-  --in-session ./sess.json \
-  --context-session ./issue-summary.json \
-  --context-session ./current-diff.json \
-  --out-session ./sess.json
-```
-
-Messages loaded via `--context-session` are inserted after the system prompt and
-before the persistent session history, then discarded before `--out-session` is written.
-This lets external workflows build arbitrary context bundles without polluting the
-durable transcript.
 
 ## Agent Definition
 

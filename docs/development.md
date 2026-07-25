@@ -35,7 +35,6 @@ Test coverage includes:
 | `infra/hooks` | Unit — glob patterns, allowlist/denylist logic | `src/infra/hooks.rs` |
 | `infra/persistence` | Unit — session roundtrip, agent def parsing | `src/infra/persistence/` |
 | `infra/template` | Unit — system prompt rendering | `src/infra/template.rs` |
-| `application/runner` | Unit — `extract_comment_id` | `src/application/runner/execution.rs` |
 | Integration | E2E — single response, tool call loop, max iterations, content filter | `tests/integration_test.rs` |
 
 ---
@@ -133,7 +132,7 @@ src/
     runner/           # Main inference loop
       mod.rs          # Orchestration: parse, connect, loop, output
       context.rs      # Transient context injection and filtering
-      execution.rs    # Inference loop + tool execution + directive extraction
+      execution.rs    # Inference loop + tool execution
     validator.rs      # Agent definition validation (atoma validate)
   cli.rs           # CLI argument parsing (clap)
   lib.rs           # Library root (re-exports for integration tests)
