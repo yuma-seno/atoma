@@ -85,12 +85,17 @@ Place `atoma.toml` in your project root to set defaults for `atoma run`:
 [defaults]
 agent_def = "agents/default.md"
 tools_file = "tools.yaml"
+template = "templates/default.md"
 max_iterations = 50
 output = "text"
 
 [profile.review]
 agent_def = "agents/reviewer.md"
+template = "templates/review.md"
 output = "json"
+
+[profile.review.env]
+REVIEW_MODE = "strict"
 
 [env]
 OPENAI_BASE_URL = "https://openrouter.ai/api/v1"
@@ -106,8 +111,8 @@ For CI/CD pipelines:
 atoma run --agent-def ./agent.md --prompt-file ./task.txt --output json
 ```
 
-Output includes `response`, `usage` (prompt/completion/total tokens), and
-`session_path`.
+Output includes `response`, `usage` (prompt/completion/total tokens),
+`finish_reason` (`stop` or `length`), and `session_path`.
 
 ---
 

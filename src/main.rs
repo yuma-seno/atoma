@@ -7,11 +7,10 @@ use anyhow::Result;
 use clap::Parser;
 use tracing_subscriber::EnvFilter;
 
-use crate::application::runner::{RunDeps, RunSettings};
+use crate::application::runner::{CompletionReason, RunDeps, RunOutcome, RunSettings};
 use crate::cli::{Cli, Command};
-use crate::domain::config::OutputFormat;
 use crate::domain::ports::AgentDefPort;
-use crate::infra::config::{self as config_module, CliOverrides};
+use crate::infra::config::{self as config_module, CliOverrides, OutputFormat};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -36,32 +35,31 @@ async fn main() -> Result<()> {
             tools_file,
             max_iterations,
         } => {
-            let config = match config_module::discover_and_load() {
-                Ok((_path, Some(cfg))) => Some(cfg),
-                _ => None,
-            };
+            let config = config_module::discover_and_load()?.1;
 
-            let output_format = match output.as_deref() {
-                Some("json") => OutputFormat::Json,
-                _ => OutputFormat::Text,
+            let output_override = match output.as_deref() {
+                Some("json") => Some(OutputFormat::Json),
+                Some("text") => Some(OutputFormat::Text),
+                Some(other) => anyhow::bail!("Unsupported output format: {}", other),
+                None => None,
             };
 
             let resolved = config_module::resolve_run_config(
                 CliOverrides {
                     agent_def,
                     tools_file,
+                    template,
                     max_iterations,
-                    output: Some(output_format),
+                    output: output_override,
                 },
                 profile.as_deref(),
                 config.as_ref(),
             )?;
+            let output_format = resolved.output.clone();
 
-            if let Some(ref cfg) = config {
-                for (key, value) in &cfg.env {
-                    if std::env::var(key).is_err() {
-                        std::env::set_var(key, value);
-                    }
+            for (key, value) in &resolved.env {
+                if std::env::var(key).is_err() {
+                    std::env::set_var(key, value);
                 }
             }
 
@@ -79,10 +77,9 @@ async fn main() -> Result<()> {
                     in_session,
                     prompt_file,
                     out_session,
-                    template_path: template,
+                    template_path: resolved.template,
                     tools_file: resolved.tools_file,
                     max_iterations: resolved.max_iterations,
-                    output_format: resolved.output,
                 },
                 RunDeps {
                     llm: llm.as_ref(),
@@ -94,16 +91,47 @@ async fn main() -> Result<()> {
             )
             .await;
 
-            if let Err(err) = &result {
-                if err
-                    .downcast_ref::<application::runner::MaxIterationsReached>()
-                    .is_some()
+            let outcome = match result {
+                Ok(outcome) => outcome,
+                Err(err)
+                    if err
+                        .downcast_ref::<application::runner::MaxIterationsReached>()
+                        .is_some() =>
                 {
                     std::process::exit(2);
                 }
+                Err(err) => return Err(err),
+            };
+
+            if let RunOutcome::Completed {
+                text,
+                usage,
+                reason,
+                session_path,
+            } = outcome
+            {
+                match output_format {
+                    OutputFormat::Text => println!("{}", text),
+                    OutputFormat::Json => {
+                        let output = serde_json::json!({
+                            "response": text,
+                            "usage": {
+                                "prompt_tokens": usage.prompt_tokens,
+                                "completion_tokens": usage.completion_tokens,
+                                "total_tokens": usage.total_tokens,
+                            },
+                            "finish_reason": match reason {
+                                CompletionReason::Stop => "stop",
+                                CompletionReason::Length => "length",
+                            },
+                            "session_path": session_path.map(|p| p.to_string_lossy().to_string()),
+                        });
+                        println!("{}", serde_json::to_string(&output)?);
+                    }
+                }
             }
 
-            result
+            Ok(())
         }
         Command::Validate {
             agent_def,

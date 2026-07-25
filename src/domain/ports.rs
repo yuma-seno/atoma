@@ -23,7 +23,7 @@ pub struct LlmChoice {
 }
 
 /// Token usage statistics.
-#[derive(Default, Clone, Copy)]
+#[derive(Debug, Default, Clone, Copy)]
 pub struct LlmUsage {
     pub prompt_tokens: u64,
     pub completion_tokens: u64,

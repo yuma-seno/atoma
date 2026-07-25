@@ -18,14 +18,23 @@ impl std::fmt::Display for MaxIterationsReached {
 
 impl std::error::Error for MaxIterationsReached {}
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompletionReason {
+    Stop,
+    Length,
+}
+
 /// Result of the inference loop.
 pub enum InferenceResult {
     /// Normal completion with final text response.
-    Completed { text: String, usage: LlmUsage },
+    Completed {
+        text: String,
+        usage: LlmUsage,
+        reason: CompletionReason,
+    },
     /// A tool requested session suspension (session_ends: true).
     /// The session has been saved; caller should exit cleanly.
-    #[allow(dead_code)]
-    SessionEnded { usage: LlmUsage },
+    SessionEnded,
 }
 
 /// Execute all tool calls from an LLM response, appending results to the session.
@@ -160,7 +169,7 @@ pub async fn inference_loop(
 
             if session_ends {
                 tracing::info!("Tool requested session suspension; ending inference loop");
-                return Ok(InferenceResult::SessionEnded { usage: total_usage });
+                return Ok(InferenceResult::SessionEnded);
             }
         } else {
             match finish_reason.as_str() {
@@ -178,6 +187,7 @@ pub async fn inference_loop(
                     return Ok(InferenceResult::Completed {
                         text,
                         usage: total_usage,
+                        reason: CompletionReason::Stop,
                     });
                 }
                 "length" => {
@@ -194,6 +204,7 @@ pub async fn inference_loop(
                     return Ok(InferenceResult::Completed {
                         text,
                         usage: total_usage,
+                        reason: CompletionReason::Length,
                     });
                 }
                 "content_filter" => bail!("LLM response was blocked by content filter"),

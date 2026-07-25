@@ -1,5 +1,5 @@
 //! Agent runner — orchestrates agent definition loading, session management,
-//! MCP connection, inference loop, and output formatting.
+//! MCP connection, and the inference loop.
 
 mod execution;
 
@@ -7,12 +7,13 @@ use anyhow::{Context, Result};
 use std::io::IsTerminal;
 use std::path::PathBuf;
 
-use crate::domain::config::OutputFormat;
-use crate::domain::ports::{AgentDefPort, LlmPort, McpFactory, McpPort, SessionPort, ToolDefPort};
+use crate::domain::ports::{
+    AgentDefPort, LlmPort, LlmUsage, McpFactory, McpPort, SessionPort, ToolDefPort,
+};
 use crate::domain::session::{Message, Session};
 use crate::infra::template;
 
-pub use execution::{inference_loop, InferenceResult, MaxIterationsReached};
+pub use execution::{inference_loop, CompletionReason, InferenceResult, MaxIterationsReached};
 
 // ── Bundled parameter structs ────────────────────────────────────────────────
 
@@ -25,7 +26,18 @@ pub struct RunSettings {
     pub template_path: Option<PathBuf>,
     pub tools_file: Option<PathBuf>,
     pub max_iterations: u32,
-    pub output_format: OutputFormat,
+}
+
+/// Observable outcome of a completed run. Presentation belongs to the caller.
+#[derive(Debug)]
+pub enum RunOutcome {
+    Completed {
+        text: String,
+        usage: LlmUsage,
+        reason: CompletionReason,
+        session_path: Option<PathBuf>,
+    },
+    SessionEnded,
 }
 
 /// External dependencies (ports) required by the runner.
@@ -38,7 +50,7 @@ pub struct RunDeps<'a> {
 }
 
 /// Run the agent: parse agent def, load session, connect MCP, run inference loop, save session.
-pub async fn run(settings: RunSettings, deps: RunDeps<'_>) -> Result<()> {
+pub async fn run(settings: RunSettings, deps: RunDeps<'_>) -> Result<RunOutcome> {
     let RunSettings {
         agent_def_path,
         in_session,
@@ -47,7 +59,6 @@ pub async fn run(settings: RunSettings, deps: RunDeps<'_>) -> Result<()> {
         template_path,
         tools_file,
         max_iterations,
-        output_format,
     } = settings;
 
     // 1. Parse agent definition
@@ -206,16 +217,20 @@ pub async fn run(settings: RunSettings, deps: RunDeps<'_>) -> Result<()> {
     )
     .await;
 
-    let (response_text, total_usage) = match inference_result {
-        Ok(InferenceResult::Completed { text, usage }) => (text, usage),
-        Ok(InferenceResult::SessionEnded { usage: _ }) => {
+    let (response_text, total_usage, completion_reason) = match inference_result {
+        Ok(InferenceResult::Completed {
+            text,
+            usage,
+            reason,
+        }) => (text, usage, reason),
+        Ok(InferenceResult::SessionEnded) => {
             tracing::info!("Session suspended by tool request");
             // Save session and exit cleanly — no output needed
             if let Some(ref path) = out_path {
                 deps.session.save(&session, path)?;
                 tracing::info!("Session saved to: {:?} (suspended)", path);
             }
-            return Ok(());
+            return Ok(RunOutcome::SessionEnded);
         }
         Err(e) => {
             if e.downcast_ref::<MaxIterationsReached>().is_some() {
@@ -246,25 +261,10 @@ pub async fn run(settings: RunSettings, deps: RunDeps<'_>) -> Result<()> {
         tracing::info!("Session saved to: {:?}", path);
     }
 
-    // 9. Output
-    match output_format {
-        OutputFormat::Text => {
-            println!("{}", response_text);
-        }
-        OutputFormat::Json => {
-            let output = serde_json::json!({
-                "response": response_text,
-                "usage": {
-                    "prompt_tokens": total_usage.prompt_tokens,
-                    "completion_tokens": total_usage.completion_tokens,
-                    "total_tokens": total_usage.total_tokens,
-                },
-                "session_path": out_path.map(|p| p.to_string_lossy().to_string()),
-                "max_iterations_reached": false,
-            });
-            println!("{}", serde_json::to_string(&output)?);
-        }
-    }
-
-    Ok(())
+    Ok(RunOutcome::Completed {
+        text: response_text,
+        usage: total_usage,
+        reason: completion_reason,
+        session_path: out_path,
+    })
 }

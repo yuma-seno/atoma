@@ -8,9 +8,8 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 use tempfile::tempdir;
 
-use atoma::application::runner::{run, RunDeps, RunSettings};
+use atoma::application::runner::{run, CompletionReason, RunDeps, RunOutcome, RunSettings};
 use atoma::domain::agent::{AgentDef, ParsedAgentDef};
-use atoma::domain::config::OutputFormat;
 use atoma::domain::ports::{
     AgentDefPort, LlmChoice, LlmResponse, McpFactory, McpPort, SessionPort, ToolDefPort,
 };
@@ -157,7 +156,6 @@ async fn test_single_text_response() {
             template_path: None,
             tools_file: None,
             max_iterations: 10,
-            output_format: OutputFormat::Text,
         },
         RunDeps {
             llm: &llm,
@@ -211,7 +209,6 @@ async fn test_tool_call_then_text_response() {
             template_path: None,
             tools_file: Some(tools_path),
             max_iterations: 10,
-            output_format: OutputFormat::Text,
         },
         RunDeps {
             llm: &llm,
@@ -267,7 +264,6 @@ async fn test_max_iterations_exceeded() {
             template_path: None,
             tools_file: Some(tools_path),
             max_iterations: 2,
-            output_format: OutputFormat::Text,
         },
         RunDeps {
             llm: &llm,
@@ -334,7 +330,6 @@ async fn test_content_filter_returns_error() {
             template_path: None,
             tools_file: None,
             max_iterations: 10,
-            output_format: OutputFormat::Text,
         },
         RunDeps {
             llm: &ContentFilterLlm,
@@ -353,6 +348,69 @@ async fn test_content_filter_returns_error() {
         "Expected content filter error, got: {}",
         msg
     );
+}
+
+#[tokio::test]
+async fn test_truncated_response_reports_length_reason() {
+    struct TruncatedLlm;
+
+    #[async_trait]
+    impl atoma::domain::ports::LlmPort for TruncatedLlm {
+        async fn chat_completion(
+            &self,
+            _model: &str,
+            _messages: &[Message],
+            _tools: Option<&[serde_json::Value]>,
+            _extra_body: &HashMap<String, serde_json::Value>,
+        ) -> Result<LlmResponse> {
+            Ok(LlmResponse {
+                choices: vec![LlmChoice {
+                    message: Message::assistant(Some("partial"), None),
+                    finish_reason: Some("length".to_string()),
+                }],
+                usage: None,
+            })
+        }
+    }
+
+    let agent_port = StubAgentDefPort {
+        agent_def: minimal_agent("TruncatedAgent"),
+    };
+    let session_port = StubSessionPort;
+    let tool_def_port = StubToolDefPort;
+    let mcp_factory = StubMcpFactory::new(MockMcpRegistry::new());
+    let dir = tempdir().unwrap();
+    let agent_path = dir.path().join("agent.md");
+    std::fs::write(&agent_path, "").unwrap();
+
+    let outcome = run(
+        RunSettings {
+            agent_def_path: agent_path,
+            in_session: None,
+            prompt_file: None,
+            out_session: None,
+            template_path: None,
+            tools_file: None,
+            max_iterations: 10,
+        },
+        RunDeps {
+            llm: &TruncatedLlm,
+            agent_def: &agent_port,
+            session: &session_port,
+            tool_def: &tool_def_port,
+            mcp_factory: &mcp_factory,
+        },
+    )
+    .await
+    .unwrap();
+
+    assert!(matches!(
+        outcome,
+        RunOutcome::Completed {
+            reason: CompletionReason::Length,
+            ..
+        }
+    ));
 }
 
 #[tokio::test]
@@ -417,7 +475,6 @@ async fn test_prompt_file_is_appended_and_persisted() {
             template_path: None,
             tools_file: None,
             max_iterations: 10,
-            output_format: OutputFormat::Text,
         },
         RunDeps {
             llm: &llm,

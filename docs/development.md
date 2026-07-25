@@ -123,6 +123,7 @@ src/
     session.rs     # Message, ToolCall, Session
     tool.rs        # Hooks, ToolDef
   infra/           # Port implementations — I/O, HTTP, file system
+    config.rs      # atoma.toml model, discovery, and precedence resolution
     llm/           # LLM clients (OpenAI-compat, Anthropic, GitHub Copilot)
     mcp.rs         # McpRegistry (stdio MCP client) + McpRegistryFactory
     hooks.rs       # Hook script execution, allowlist/denylist filtering
@@ -130,13 +131,12 @@ src/
     persistence/   # File-system adapters for session, agent def, tool def
   application/     # Use case orchestration — depends only on domain ports
     runner/           # Main inference loop
-      mod.rs          # Orchestration: parse, connect, loop, output
-      context.rs      # Transient context injection and filtering
+      mod.rs          # Orchestration: parse, connect, loop, persist, return outcome
       execution.rs    # Inference loop + tool execution
     validator.rs      # Agent definition validation (atoma validate)
   cli.rs           # CLI argument parsing (clap)
   lib.rs           # Library root (re-exports for integration tests)
-  main.rs          # Binary entry point — wires infra adapters, calls application layer
+  main.rs          # Composition root and CLI presentation (text/JSON)
 tests/
   common/          # Shared test helpers (MockLlmClient, MockMcpRegistry)
   integration_test.rs
