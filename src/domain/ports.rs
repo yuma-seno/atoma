@@ -45,25 +45,26 @@ pub trait LlmPort: Send + Sync {
     ) -> Result<LlmResponse>;
 }
 
-// ── MCP port ──────────────────────────────────────────────────────────────────
+// ── Tool port ─────────────────────────────────────────────────────────────────
 
 /// Result from a single MCP tool call.
+#[derive(Debug)]
 pub struct ToolCallResult {
     pub content: String,
     pub session_ends: bool,
 }
 
-/// Port for MCP tool execution.
+/// Unified port for tools visible to the LLM.
 ///
-/// `McpRegistry` in the `infra` layer implements this trait.
+/// Implementations may be external MCP servers or Atoma built-in tools.
 #[async_trait]
-pub trait McpPort: Send {
+pub trait ToolPort: Send {
     fn tool_definitions(&self) -> Vec<Value>;
 
-    async fn call_tool_with_hooks(
+    async fn call_tool(
         &mut self,
         agent_name: &str,
-        prefixed_name: &str,
+        name: &str,
         arguments: &Value,
     ) -> Result<ToolCallResult>;
 }
@@ -91,5 +92,5 @@ pub trait ToolDefPort: Send + Sync {
 /// Port for constructing an MCP registry from a list of tool definitions.
 #[async_trait]
 pub trait McpFactory: Send + Sync {
-    async fn build(&self, tool_defs: &[ToolDef]) -> Result<Box<dyn McpPort + Send>>;
+    async fn build(&self, tool_defs: &[ToolDef]) -> Result<Box<dyn ToolPort + Send>>;
 }

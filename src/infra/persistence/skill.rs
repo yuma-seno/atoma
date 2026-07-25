@@ -46,10 +46,6 @@ impl SkillCatalog {
     pub fn get(&self, name: &str) -> Option<&Skill> {
         self.skills.get(name)
     }
-
-    pub fn is_empty(&self) -> bool {
-        self.skills.is_empty()
-    }
 }
 
 fn collect_markdown_files(directory: &Path, paths: &mut Vec<PathBuf>) -> Result<()> {

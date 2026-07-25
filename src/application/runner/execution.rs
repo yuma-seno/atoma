@@ -4,7 +4,7 @@ use anyhow::{bail, Context, Result};
 use serde_json::Value;
 use std::collections::HashMap;
 
-use crate::domain::ports::{LlmPort, LlmUsage, McpPort};
+use crate::domain::ports::{LlmPort, LlmUsage, ToolPort};
 use crate::domain::session::{Message, Session, ToolCall};
 /// Sentinel error returned when the inference loop runs out of iterations.
 #[derive(Debug)]
@@ -41,21 +41,17 @@ pub enum InferenceResult {
 ///
 /// Returns `true` if any tool requested session suspension.
 ///
-/// Tool calls are executed sequentially. Parallel execution requires McpPort
+/// Tool calls are executed sequentially. Parallel execution requires ToolPort
 /// to adopt `&self` with internal synchronization.
 async fn execute_tool_calls(
     agent_name: &str,
     tool_calls: &[ToolCall],
     session: &mut Session,
-    mcp_registry: &mut Option<Box<dyn McpPort + Send>>,
+    tools: &mut Box<dyn ToolPort + Send>,
 ) -> Result<bool> {
     session
         .messages
         .push(Message::assistant(None, Some(tool_calls.to_vec())));
-
-    let registry = mcp_registry
-        .as_mut()
-        .context("LLM requested tool calls but no MCP servers are configured")?;
 
     let mut session_ends = false;
 
@@ -77,10 +73,7 @@ async fn execute_tool_calls(
 
         tracing::info!("Executing tool: {} (id: {})", tool_name, tool_call.id);
 
-        match registry
-            .call_tool_with_hooks(agent_name, tool_name, &arguments)
-            .await
-        {
+        match tools.call_tool(agent_name, tool_name, &arguments).await {
             Ok(result) => {
                 tracing::debug!(
                     "Tool '{}' result ({} chars)",
@@ -116,9 +109,9 @@ pub async fn inference_loop(
     agent_name: &str,
     model: &str,
     session: &mut Session,
-    tools: Option<&[Value]>,
+    tool_definitions: Option<&[Value]>,
     extra_body: &HashMap<String, Value>,
-    mcp_registry: &mut Option<Box<dyn McpPort + Send>>,
+    tools: &mut Box<dyn ToolPort + Send>,
     max_iterations: u32,
 ) -> Result<InferenceResult> {
     let mut total_usage = LlmUsage::default();
@@ -132,7 +125,7 @@ pub async fn inference_loop(
         );
 
         let response = llm_client
-            .chat_completion(model, &session.messages, tools, extra_body)
+            .chat_completion(model, &session.messages, tool_definitions, extra_body)
             .await?;
 
         if let Some(u) = response.usage {
@@ -164,8 +157,7 @@ pub async fn inference_loop(
             }
 
             tracing::info!("LLM requested {} tool call(s)", calls.len());
-            let session_ends =
-                execute_tool_calls(agent_name, &calls, session, mcp_registry).await?;
+            let session_ends = execute_tool_calls(agent_name, &calls, session, tools).await?;
 
             if session_ends {
                 tracing::info!("Tool requested session suspension; ending inference loop");

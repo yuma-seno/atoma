@@ -3,7 +3,7 @@ use async_trait::async_trait;
 use serde_json::Value;
 use std::collections::HashMap;
 
-use atoma::domain::ports::{McpPort, ToolCallResult};
+use atoma::domain::ports::{ToolCallResult, ToolPort};
 
 /// A mock MCP registry that returns predefined tool results.
 pub struct MockMcpRegistry {
@@ -47,12 +47,12 @@ impl MockMcpRegistry {
 }
 
 #[async_trait]
-impl McpPort for MockMcpRegistry {
+impl ToolPort for MockMcpRegistry {
     fn tool_definitions(&self) -> Vec<Value> {
         self.tools.clone()
     }
 
-    async fn call_tool_with_hooks(
+    async fn call_tool(
         &mut self,
         _agent_name: &str,
         prefixed_name: &str,

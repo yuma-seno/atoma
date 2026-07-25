@@ -513,12 +513,12 @@ impl McpRegistry {
 // ── Port implementation ───────────────────────────────────────────────────────
 
 #[async_trait::async_trait]
-impl crate::domain::ports::McpPort for McpRegistry {
+impl crate::domain::ports::ToolPort for McpRegistry {
     fn tool_definitions(&self) -> Vec<serde_json::Value> {
         self.tool_definitions()
     }
 
-    async fn call_tool_with_hooks(
+    async fn call_tool(
         &mut self,
         agent_name: &str,
         prefixed_name: &str,
@@ -539,7 +539,7 @@ impl crate::domain::ports::McpFactory for McpRegistryFactory {
     async fn build(
         &self,
         tool_defs: &[crate::domain::tool::ToolDef],
-    ) -> anyhow::Result<Box<dyn crate::domain::ports::McpPort + Send>> {
+    ) -> anyhow::Result<Box<dyn crate::domain::ports::ToolPort + Send>> {
         let registry = McpRegistry::from_configs(tool_defs).await?;
         Ok(Box::new(registry))
     }

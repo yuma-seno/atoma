@@ -79,6 +79,7 @@ async fn main() -> Result<()> {
                     out_session,
                     template_path: resolved.template,
                     tools_file: resolved.tools_file,
+                    skills_dir: None,
                     max_iterations: resolved.max_iterations,
                 },
                 RunDeps {

@@ -11,7 +11,7 @@ use tempfile::tempdir;
 use atoma::application::runner::{run, CompletionReason, RunDeps, RunOutcome, RunSettings};
 use atoma::domain::agent::{AgentDef, ParsedAgentDef};
 use atoma::domain::ports::{
-    AgentDefPort, LlmChoice, LlmResponse, McpFactory, McpPort, SessionPort, ToolDefPort,
+    AgentDefPort, LlmChoice, LlmResponse, McpFactory, SessionPort, ToolDefPort, ToolPort,
 };
 use atoma::domain::session::{Message, Session};
 use atoma::domain::tool::ToolDef;
@@ -100,7 +100,7 @@ impl StubMcpFactory {
 
 #[async_trait]
 impl McpFactory for StubMcpFactory {
-    async fn build(&self, _tool_defs: &[ToolDef]) -> Result<Box<dyn McpPort + Send>> {
+    async fn build(&self, _tool_defs: &[ToolDef]) -> Result<Box<dyn ToolPort + Send>> {
         let registry = self
             .registry
             .lock()
@@ -155,6 +155,7 @@ async fn test_single_text_response() {
             out_session: None,
             template_path: None,
             tools_file: None,
+            skills_dir: None,
             max_iterations: 10,
         },
         RunDeps {
@@ -208,6 +209,7 @@ async fn test_tool_call_then_text_response() {
             out_session: None,
             template_path: None,
             tools_file: Some(tools_path),
+            skills_dir: None,
             max_iterations: 10,
         },
         RunDeps {
@@ -221,6 +223,82 @@ async fn test_tool_call_then_text_response() {
     .await;
 
     assert!(result.is_ok(), "Expected Ok, got: {:?}", result);
+}
+
+/// Built-in skill loading is available without MCP configuration and persists
+/// through the ordinary assistant/tool message history.
+#[tokio::test]
+async fn test_skill_load_is_persisted_as_tool_history() {
+    use atoma::application::tools::LOAD_SKILL_TOOL;
+    use common::mock_llm::make_tool_call;
+
+    let tool_call = make_tool_call("skill-1", LOAD_SKILL_TOOL, r#"{"name":"engineering/tdd"}"#);
+    let llm = MockLlmClient::new()
+        .enqueue_tool_calls(vec![tool_call])
+        .enqueue_text("Applied the skill.");
+
+    let agent_port = StubAgentDefPort {
+        agent_def: minimal_agent("SkillAgent"),
+    };
+    let session_port = atoma::infra::persistence::session::FileSessionAdapter;
+    let tool_def_port = StubToolDefPort;
+    let mcp_factory = StubMcpFactory::new(MockMcpRegistry::new());
+
+    let dir = tempdir().unwrap();
+    let agent_path = dir.path().join("agent.md");
+    let skills_dir = dir.path().join("skills");
+    let out_session_path = dir.path().join("session.json");
+    std::fs::write(&agent_path, "").unwrap();
+    std::fs::create_dir(&skills_dir).unwrap();
+    std::fs::write(
+        skills_dir.join("tdd.md"),
+        "---\nname: engineering/tdd\ndescription: Test first.\n---\n\nUse red-green-refactor.\n",
+    )
+    .unwrap();
+
+    run(
+        RunSettings {
+            agent_def_path: agent_path,
+            in_session: None,
+            prompt_file: None,
+            out_session: Some(out_session_path.clone()),
+            template_path: None,
+            tools_file: None,
+            skills_dir: Some(skills_dir),
+            max_iterations: 10,
+        },
+        RunDeps {
+            llm: &llm,
+            agent_def: &agent_port,
+            session: &session_port,
+            tool_def: &tool_def_port,
+            mcp_factory: &mcp_factory,
+        },
+    )
+    .await
+    .unwrap();
+
+    let saved = file_session::load(&out_session_path).unwrap();
+    let tool_call_index = saved
+        .messages
+        .iter()
+        .position(|message| {
+            message.tool_calls.as_ref().is_some_and(|calls| {
+                calls
+                    .iter()
+                    .any(|call| call.function.name == LOAD_SKILL_TOOL)
+            })
+        })
+        .unwrap();
+    let skill_result = &saved.messages[tool_call_index + 1];
+    assert_eq!(skill_result.role, "tool");
+    assert_eq!(skill_result.tool_call_id.as_deref(), Some("skill-1"));
+    assert!(skill_result
+        .content
+        .as_ref()
+        .and_then(|content| content.as_str())
+        .unwrap()
+        .contains("Use red-green-refactor."));
 }
 
 /// Max iterations exceeded returns an error.
@@ -263,6 +341,7 @@ async fn test_max_iterations_exceeded() {
             out_session: None,
             template_path: None,
             tools_file: Some(tools_path),
+            skills_dir: None,
             max_iterations: 2,
         },
         RunDeps {
@@ -329,6 +408,7 @@ async fn test_content_filter_returns_error() {
             out_session: None,
             template_path: None,
             tools_file: None,
+            skills_dir: None,
             max_iterations: 10,
         },
         RunDeps {
@@ -391,6 +471,7 @@ async fn test_truncated_response_reports_length_reason() {
             out_session: None,
             template_path: None,
             tools_file: None,
+            skills_dir: None,
             max_iterations: 10,
         },
         RunDeps {
@@ -474,6 +555,7 @@ async fn test_prompt_file_is_appended_and_persisted() {
             out_session: Some(out_session_path.clone()),
             template_path: None,
             tools_file: None,
+            skills_dir: None,
             max_iterations: 10,
         },
         RunDeps {

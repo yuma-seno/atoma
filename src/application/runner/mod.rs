@@ -7,10 +7,12 @@ use anyhow::{Context, Result};
 use std::io::IsTerminal;
 use std::path::PathBuf;
 
+use crate::application::tools::RuntimeTools;
 use crate::domain::ports::{
-    AgentDefPort, LlmPort, LlmUsage, McpFactory, McpPort, SessionPort, ToolDefPort,
+    AgentDefPort, LlmPort, LlmUsage, McpFactory, SessionPort, ToolDefPort, ToolPort,
 };
 use crate::domain::session::{Message, Session};
+use crate::infra::persistence::skill::SkillCatalog;
 use crate::infra::template;
 
 pub use execution::{inference_loop, CompletionReason, InferenceResult, MaxIterationsReached};
@@ -25,6 +27,7 @@ pub struct RunSettings {
     pub out_session: Option<PathBuf>,
     pub template_path: Option<PathBuf>,
     pub tools_file: Option<PathBuf>,
+    pub skills_dir: Option<PathBuf>,
     pub max_iterations: u32,
 }
 
@@ -58,6 +61,7 @@ pub async fn run(settings: RunSettings, deps: RunDeps<'_>) -> Result<RunOutcome>
         out_session,
         template_path,
         tools_file,
+        skills_dir,
         max_iterations,
     } = settings;
 
@@ -79,7 +83,7 @@ pub async fn run(settings: RunSettings, deps: RunDeps<'_>) -> Result<RunOutcome>
     tracing::info!("Session has {} messages", session.messages.len());
 
     // 3. Connect to MCP servers and discover tools
-    let mut mcp_registry: Option<Box<dyn McpPort + Send>> = if agent.mcp_servers.is_empty() {
+    let external_tools: Option<Box<dyn ToolPort + Send>> = if agent.mcp_servers.is_empty() {
         None
     } else {
         let tools_path = tools_file
@@ -106,10 +110,15 @@ pub async fn run(settings: RunSettings, deps: RunDeps<'_>) -> Result<RunOutcome>
         Some(reg)
     };
 
-    let tool_definitions = mcp_registry
-        .as_ref()
-        .map(|r| r.tool_definitions())
-        .unwrap_or_default();
+    let skill_catalog = match skills_dir.as_ref() {
+        Some(path) => SkillCatalog::load(path)?,
+        None => SkillCatalog::default(),
+    };
+    let skill_metadata = skill_catalog.metadata();
+    let mut runtime_tools: Box<dyn ToolPort + Send> =
+        Box::new(RuntimeTools::new(skill_catalog, external_tools)?);
+
+    let tool_definitions = runtime_tools.tool_definitions();
 
     let tool_descriptions: Vec<String> = tool_definitions
         .iter()
@@ -162,7 +171,7 @@ pub async fn run(settings: RunSettings, deps: RunDeps<'_>) -> Result<RunOutcome>
         custom_template.as_deref(),
         &working_dir,
         &colleagues,
-        &[],
+        &skill_metadata,
     );
     tracing::debug!("System prompt:\n{}", system_prompt);
 
@@ -213,7 +222,7 @@ pub async fn run(settings: RunSettings, deps: RunDeps<'_>) -> Result<RunOutcome>
         &mut session,
         tools.as_deref(),
         &agent.extra_body,
-        &mut mcp_registry,
+        &mut runtime_tools,
         max_iterations,
     )
     .await;
