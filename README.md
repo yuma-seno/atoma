@@ -1,245 +1,71 @@
-# Atoma - Stateless MCP Orchestrator CLI
+# Atoma
 
-[![CI](https://github.com/yuma-seno/atoma/actions/workflows/ci.yml/badge.svg)](https://github.com/yuma-seno/atoma/actions/workflows/ci.yml)
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+Atoma is a stateless MCP orchestrator CLI for running agent definitions against LLM providers and tool servers.
 
-Atoma is a lightweight, platform-independent CLI tool that orchestrates AI agents via [Model Context Protocol (MCP)](https://modelcontextprotocol.io). It connects LLMs (via OpenAI-compatible APIs like OpenRouter) with MCP server tools in a stateless inference loop.
+Atoma core is the Rust binary in this repository. Agent templates, skills, and workflow automation for GitHub delivery live in a separate repository: https://github.com/yuma-seno/atoma-autonomous-delivery.
 
-## Installation
-
-### Pre-built binaries
-
-Download the latest binary for your platform from the [Releases](https://github.com/yuma-seno/atoma/releases) page:
-
-| Platform | File |
-|---|---|
-| Linux (x86_64) | `atoma-linux-x86_64` |
-| macOS (Apple Silicon) | `atoma-macos-arm64` |
-| macOS (Intel) | `atoma-macos-x86_64` |
-| Windows (x86_64) | `atoma-windows-x86_64.exe` |
+## Quick start
 
 ```bash
-# Linux example
-curl -Lo atoma https://github.com/yuma-seno/atoma/releases/latest/download/atoma-linux-x86_64
-chmod +x atoma
-sudo mv atoma /usr/local/bin/
-```
+# 1) Build the CLI
+cargo build
 
-### Build from source
+# 2) Generate a starter config (optional)
+cargo run -- init > atoma.toml
 
-```bash
-# From crates.io (once published)
-cargo install atoma
-
-# Or directly from source
-git clone https://github.com/yuma-seno/atoma
-cd atoma
-cargo build --release
-# binary: target/release/atoma
-```
-
-## Quick Start
-
-```bash
-# Build from source (recommended)
-cd atoma
-cargo build --release
-
-# Set your API key
-export OPENAI_API_KEY="sk-your-key-here"
-
-# Run with a prompt via stdin
-echo "Hello, what can you do?" | ./target/release/atoma run --agent-def ./agent.md
-```
-
-See **[atoma-autonomous-delivery](https://github.com/yuma-seno/atoma-autonomous-delivery)** for a complete multi-agent workflow template with Docker and GitHub Actions.
-
-## CLI Reference
-
-```
-atoma run \
-  [--agent-def <FILE>]      # Agent definition (Markdown + YAML frontmatter)
-  [--profile <NAME>]        # Named profile from atoma.toml
-  [--output <FORMAT>]       # Output format: text (default) or json
-  [--in-session <FILE>]     # Input session JSON (prior conversation history)
-  [--out-session <FILE>]    # Output session JSON (omit to discard after run)
-  [--prompt-file <FILE>]    # User prompt from file
-                            # If omitted and stdin is not a TTY, reads from stdin
-                            # If both omitted, runs with no new user message
-  [--template <FILE>]       # Custom system prompt template (overrides built-in)
-  [--tools-file <FILE>]     # Tools YAML file (required if mcp_servers is non-empty)
-  [--skills-dir <DIR>]      # Dynamically loadable skill Markdown files
-  [--max-iterations <N>]    # Max inference iterations (default: 50)
-
-atoma validate \
-  --agent-def <FILE>        # Validate an agent definition
-  [--tools-file <FILE>]     # Validate together with tools file
-
-atoma init                  # Generate default atoma.toml
-```
-
-## Configuration File (atoma.toml)
-
-Place `atoma.toml` in your project root to set defaults for `atoma run`:
-
-```toml
-[defaults]
-agent_def = "agents/default.md"
-tools_file = "tools.yaml"
-skills_dir = "skills"
-template = "templates/default.md"
-max_iterations = 50
-output = "text"
-
-[profile.review]
-agent_def = "agents/reviewer.md"
-template = "templates/review.md"
-output = "json"
-
-[profile.review.env]
-REVIEW_MODE = "strict"
-
-[env]
-OPENAI_BASE_URL = "https://openrouter.ai/api/v1"
-```
-
-Generate with `atoma init > atoma.toml`. Priority: **CLI arg > atoma.toml profile > atoma.toml defaults**.
-
-## Skills
-
-Skills are reusable instructions loaded dynamically through the always-available
-`atoma_builtin__load_skill` tool. The system prompt receives only each skill's
-name and description; full instructions enter context when loaded and remain in
-the normal session history. Skills are configured at the host level with
-`--skills-dir` or `skills_dir` in `atoma.toml`, never in agent definitions or
-tools files. See **[docs/skills.md](docs/skills.md)**.
-
-## JSON Output
-
-For CI/CD pipelines:
-
-```bash
-atoma run --agent-def ./agent.md --prompt-file ./task.txt --output json
-```
-
-Output includes `response`, `usage` (prompt/completion/total tokens),
-`finish_reason` (`stop` or `length`), and `session_path`.
-
+# 3) Create a minimal agent definition
+cat > agent.md <<'MD'
 ---
-
-Session input and output are always **separate arguments**, making data flow explicit.
-Specify the same path for both to update a session in place:
-
-```bash
-# Resume a conversation (read and write the same session file)
-atoma run --agent-def ./agent.md \
-  --in-session ./sess.json \
-  --prompt-file ./followup.txt \
-  --out-session ./sess.json
-
-# Pipeline: stdin as prompt
-git diff | atoma run --agent-def ./ReviewAgent.md \
-  --in-session ./sess.json --out-session ./sess.json
-```
-
-## Agent Definition
-
-Agent definitions are Markdown files with YAML frontmatter.
-Pass the path via `--agent-def`.
-
-```markdown
+name: assistant
+description: Answer the user's request directly.
+model: openai/gpt-5-mini
+callable_by:
+  - user
 ---
-name: ReviewAgent
-description: Code review and quality assurance specialist.
-model: openrouter/anthropic/claude-3.5-sonnet
-knows_about:
-  - EngineerAgent
-mcp_servers:
-  - filesystem
-  - shell
-extra_body:
-  temperature: 0.2      # any LLM API parameter goes here
-  max_tokens: 8192
----
+MD
 
-Optional custom role prompt body. When present, replaces {{AGENT_ROLE_PROMPT}}
-in the system prompt template.
+# 4) Validate the definition
+cargo run -- validate --agent-def agent.md
+
+# 5) Run with a prompt file
+echo "Summarize the purpose of this repository in 3 bullets." > prompt.txt
+OPENAI_API_KEY=your_key_here cargo run -- run --agent-def agent.md --prompt-file prompt.txt
 ```
 
-For the full field reference, provider selection rules, `extra_body` recipes
-(Anthropic extended thinking, OpenAI reasoning effort, OpenRouter routing), and
-template variables, see **[docs/agent-definition.md](docs/agent-definition.md)**.
+Success means the command prints an assistant response (default text mode) and exits with code 0.
 
-## Tool Servers (`--tools-file`)
+## Choose your path
 
-MCP server definitions live in a separate YAML file specified with `--tools-file`.
-This is required whenever the agent's `mcp_servers` list is non-empty.
+| I want to... | Go to |
+| --- | --- |
+| Run my first agent | [docs/getting-started.md](docs/getting-started.md) |
+| Configure files, profiles, and providers | [docs/configuration.md](docs/configuration.md) |
+| Write agent definitions correctly | [docs/agents.md](docs/agents.md) |
+| Connect MCP tools and use skills | [docs/tools-and-skills.md](docs/tools-and-skills.md) |
+| Understand runtime behavior and failure modes | [docs/runtime.md](docs/runtime.md) |
+| Contribute to Atoma core | [CONTRIBUTING.md](CONTRIBUTING.md) |
 
-```yaml
-# tools/tools.yaml
-filesystem:
-  command: npx
-  args: ["-y", "@modelcontextprotocol/server-filesystem", "."]
+## Mental model
 
-shell:
-  command: npx
-  args: ["-y", "mcp-shell-server", "."]
-  hooks:
-    tool_denylist: ["shell__rm*", "shell__sudo*"]
-    before_tool: ./scripts/shell_guard.py
+```mermaid
+flowchart LR
+    A[Agent definition markdown] --> B[System prompt build]
+    C[tools.yaml and MCP servers] --> D[Runtime tools]
+    E[skills directory] --> D
+    B --> F[Inference loop]
+    D --> F
+    G[session.json optional] --> F
+    F -->|tool_calls| D
+    F -->|final response| H[stdout text or json]
 ```
 
-For the full field reference, hook script protocol (stdin/stdout JSON format),
-allowlist/denylist patterns, and tool naming conventions,
-see **[docs/tool-servers.md](docs/tool-servers.md)**.
+## Production concerns
 
-## Inference Loop
+- Provider and credential resolution is explicit. See [docs/configuration.md](docs/configuration.md).
+- Tool hooks can fail closed before execution, and fail open after execution. See [docs/tools-and-skills.md](docs/tools-and-skills.md).
+- Session persistence is file-based and opt-in through `--in-session` and `--out-session`. See [docs/runtime.md](docs/runtime.md).
+- `max_iterations` guard exits with status code 2 after saving session when possible. See [docs/runtime.md](docs/runtime.md).
 
-1. Read input session from `--in-session` (or start with empty session)
-2. Parse agent definition → build system prompt
-3. Connect to MCP servers → discover tools
-4. Append user message: `--prompt-file` → stdin (if not a TTY) → none
-5. **Loop**:
-   - Call LLM API (OpenAI-compatible)
-   - If `tool_calls` returned → execute via MCP stdio, add results, continue
-   - If text response returned → print to stdout, save session to `--out-session`, exit
+## License
 
-## Environment Variables
-
-### OpenAI / OpenRouter (default provider)
-
-| Variable | Required | Default | Description |
-|---|---|---|---|
-| `OPENAI_API_KEY` | Yes | — | API key |
-| `OPENAI_BASE_URL` | No | `https://openrouter.ai/api/v1` | API base URL |
-| `OPENAI_APP_NAME` | No | `atoma` | Shown in OpenRouter dashboard |
-
-### Anthropic
-
-| Variable | Required | Default | Description |
-|---|---|---|---|
-| `ANTHROPIC_API_KEY` | Yes | — | API key |
-| `ANTHROPIC_BASE_URL` | No | `https://api.anthropic.com` | Override for proxies |
-
-### GitHub Copilot
-
-| Variable | Required | Description |
-|---|---|---|
-| `ATOMA_COPILOT_TOKEN` | Yes | Personal access token with `copilot` scope |
-| `GITHUB_TOKEN` or `GH_TOKEN` | No | Fallback (not recommended; use `ATOMA_COPILOT_TOKEN` instead) |
-
-### Provider selection
-
-| Variable | Description |
-|---|---|
-| `ATOMA_PROVIDER` | Force provider: `openai`, `anthropic`, or `github-copilot`. Overridden by the `provider` field in agent frontmatter |
-
-## Development
-
-```bash
-cargo build --release   # build the atoma binary
-cargo test              # run all tests
-``````
-
-For container builds (Docker / Podman), Podman rootless notes, and the overall
-project structure, see **[docs/development.md](docs/development.md)**.
+MIT. See [LICENSE](LICENSE).
