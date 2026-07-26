@@ -367,6 +367,73 @@ async fn test_max_iterations_exceeded() {
     );
 }
 
+/// Identical failed calls abort before consuming the full iteration budget.
+#[tokio::test]
+async fn test_identical_failed_tool_calls_abort() {
+    use common::mock_llm::make_tool_call;
+
+    let llm = MockLlmClient::new()
+        .enqueue_tool_calls(vec![make_tool_call(
+            "c1",
+            "test_tool",
+            r#"{"input":"same"}"#,
+        )])
+        .enqueue_tool_calls(vec![make_tool_call(
+            "c2",
+            "test_tool",
+            r#"{"input":"same"}"#,
+        )])
+        .enqueue_tool_calls(vec![make_tool_call(
+            "c3",
+            "test_tool",
+            r#"{"input":"same"}"#,
+        )]);
+
+    let registry = MockMcpRegistry::new().with_tool("test_tool", "failing tool");
+    let agent_port = StubAgentDefPort {
+        agent_def: AgentDef {
+            mcp_servers: vec!["srv".to_string()],
+            ..minimal_agent("LoopAgent")
+        },
+    };
+    let session_port = StubSessionPort;
+    let tool_def_port = SingleEntryToolDefPort::new("srv");
+    let mcp_factory = StubMcpFactory::new(registry);
+
+    let dir = tempdir().unwrap();
+    let agent_path = dir.path().join("agent.md");
+    std::fs::write(&agent_path, "").unwrap();
+    let tools_path = dir.path().join("tools.yaml");
+    std::fs::write(&tools_path, "").unwrap();
+
+    let error = run(
+        RunSettings {
+            agent_def_path: agent_path,
+            in_session: None,
+            prompt_file: None,
+            out_session: None,
+            template_path: None,
+            tools_file: Some(tools_path),
+            skills_dir: None,
+            max_iterations: 10,
+        },
+        RunDeps {
+            llm: &llm,
+            agent_def: &agent_port,
+            session: &session_port,
+            tool_def: &tool_def_port,
+            skill: &atoma::infra::persistence::skill::FileSkillAdapter,
+            mcp_factory: &mcp_factory,
+        },
+    )
+    .await
+    .unwrap_err();
+
+    let message = error.to_string();
+    assert!(message.contains("3 identical failed calls"), "{message}");
+    assert!(!message.contains("maximum iterations"), "{message}");
+}
+
 /// content_filter finish_reason returns an error.
 #[tokio::test]
 async fn test_content_filter_returns_error() {

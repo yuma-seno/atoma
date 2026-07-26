@@ -402,7 +402,9 @@ impl McpRegistry {
 
         for config in configs {
             let mut conn = McpConnection::spawn(config).await?;
-            let tools = conn.list_tools().await?;
+            let tools = conn.list_tools().await?.into_iter().filter(|tool| {
+                hooks::access_denial_reason(&config.hooks, &tool.prefixed_name).is_none()
+            });
             all_tools.extend(tools);
             connections.insert(config.name.clone(), conn);
         }

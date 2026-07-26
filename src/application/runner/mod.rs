@@ -128,11 +128,7 @@ pub async fn run(settings: RunSettings, deps: RunDeps<'_>) -> Result<RunOutcome>
                 .pointer("/function/name")
                 .and_then(|v| v.as_str())
                 .unwrap_or("unknown");
-            let desc = t
-                .pointer("/function/description")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            format!("- `{}`: {}", name, desc)
+            format!("- `{}`", name)
         })
         .collect();
 

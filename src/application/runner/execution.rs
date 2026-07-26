@@ -6,6 +6,31 @@ use std::collections::HashMap;
 
 use crate::domain::ports::{LlmPort, LlmUsage, ToolPort};
 use crate::domain::session::{Message, Session, ToolCall};
+
+const MAX_IDENTICAL_TOOL_FAILURES: u8 = 3;
+
+#[derive(Default)]
+struct ToolFailureTracker {
+    last_signature: Option<String>,
+    consecutive: u8,
+}
+
+impl ToolFailureTracker {
+    fn record_failure(&mut self, signature: String) -> u8 {
+        if self.last_signature.as_deref() == Some(signature.as_str()) {
+            self.consecutive = self.consecutive.saturating_add(1);
+        } else {
+            self.last_signature = Some(signature);
+            self.consecutive = 1;
+        }
+        self.consecutive
+    }
+
+    fn record_success(&mut self) {
+        self.last_signature = None;
+        self.consecutive = 0;
+    }
+}
 /// Sentinel error returned when the inference loop runs out of iterations.
 #[derive(Debug)]
 pub struct MaxIterationsReached(pub u32);
@@ -48,6 +73,7 @@ async fn execute_tool_calls(
     tool_calls: &[ToolCall],
     session: &mut Session,
     tools: &mut Box<dyn ToolPort + Send>,
+    failure_tracker: &mut ToolFailureTracker,
 ) -> Result<bool> {
     session
         .messages
@@ -67,14 +93,29 @@ async fn execute_tool_calls(
                 );
                 tracing::error!("{}", msg);
                 session.messages.push(Message::tool(&tool_call.id, &msg));
+                let signature = format!("{}:{}", tool_name, tool_call.function.arguments);
+                if failure_tracker.record_failure(signature) >= MAX_IDENTICAL_TOOL_FAILURES {
+                    bail!(
+                        "Aborting after {} identical failed calls to '{}'. Change the tool or arguments before retrying.",
+                        MAX_IDENTICAL_TOOL_FAILURES,
+                        tool_name,
+                    );
+                }
                 continue;
             }
         };
+        let signature = format!(
+            "{}:{}",
+            tool_name,
+            serde_json::to_string(&arguments)
+                .unwrap_or_else(|_| tool_call.function.arguments.clone())
+        );
 
         tracing::info!("Executing tool: {} (id: {})", tool_name, tool_call.id);
 
         match tools.call_tool(agent_name, tool_name, &arguments).await {
             Ok(result) => {
+                failure_tracker.record_success();
                 tracing::debug!(
                     "Tool '{}' result ({} chars)",
                     tool_name,
@@ -95,6 +136,14 @@ async fn execute_tool_calls(
                 let msg = format!("Error: {}", e);
                 tracing::error!("Tool '{}' failed: {}", tool_name, e);
                 session.messages.push(Message::tool(&tool_call.id, &msg));
+                if failure_tracker.record_failure(signature) >= MAX_IDENTICAL_TOOL_FAILURES {
+                    bail!(
+                        "Aborting after {} identical failed calls to '{}'. Change the tool or arguments before retrying. Last error: {}",
+                        MAX_IDENTICAL_TOOL_FAILURES,
+                        tool_name,
+                        e,
+                    );
+                }
             }
         }
     }
@@ -115,6 +164,7 @@ pub async fn inference_loop(
     max_iterations: u32,
 ) -> Result<InferenceResult> {
     let mut total_usage = LlmUsage::default();
+    let mut failure_tracker = ToolFailureTracker::default();
 
     for iteration in 1..=max_iterations {
         tracing::info!(
@@ -157,7 +207,9 @@ pub async fn inference_loop(
             }
 
             tracing::info!("LLM requested {} tool call(s)", calls.len());
-            let session_ends = execute_tool_calls(agent_name, &calls, session, tools).await?;
+            let session_ends =
+                execute_tool_calls(agent_name, &calls, session, tools, &mut failure_tracker)
+                    .await?;
 
             if session_ends {
                 tracing::info!("Tool requested session suspension; ending inference loop");
@@ -209,4 +261,26 @@ pub async fn inference_loop(
     }
 
     Err(anyhow::Error::new(MaxIterationsReached(max_iterations)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn identical_failures_reach_the_abort_threshold() {
+        let mut tracker = ToolFailureTracker::default();
+        assert_eq!(tracker.record_failure("tool:{\"x\":1}".into()), 1);
+        assert_eq!(tracker.record_failure("tool:{\"x\":1}".into()), 2);
+        assert_eq!(tracker.record_failure("tool:{\"x\":1}".into()), 3);
+    }
+
+    #[test]
+    fn changed_call_or_success_resets_the_failure_streak() {
+        let mut tracker = ToolFailureTracker::default();
+        assert_eq!(tracker.record_failure("tool:{\"x\":1}".into()), 1);
+        assert_eq!(tracker.record_failure("tool:{\"x\":2}".into()), 1);
+        tracker.record_success();
+        assert_eq!(tracker.record_failure("tool:{\"x\":2}".into()), 1);
+    }
 }

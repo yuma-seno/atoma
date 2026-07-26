@@ -29,17 +29,26 @@ pub fn glob_matches(pattern: &str, value: &str) -> bool {
 /// 1. Denylist — any match → blocked immediately.
 /// 2. Allowlist — if non-empty and no match → blocked.
 pub fn check_access(hooks: &Hooks, tool_name: &str) -> Result<()> {
+    if let Some(message) = access_denial_reason(hooks, tool_name) {
+        tracing::warn!("{}", message);
+        anyhow::bail!(message);
+    }
+
+    Ok(())
+}
+
+/// Return the static access-control reason for hiding or rejecting a tool.
+/// Dynamic `before_tool` hooks are intentionally not evaluated here.
+pub fn access_denial_reason(hooks: &Hooks, tool_name: &str) -> Option<String> {
     if let Some(pattern) = hooks
         .tool_denylist
         .iter()
         .find(|p| glob_matches(p, tool_name))
     {
-        let msg = format!(
+        return Some(format!(
             "Tool '{}' is blocked by denylist pattern '{}'",
             tool_name, pattern
-        );
-        tracing::warn!("{}", msg);
-        anyhow::bail!("{}", msg);
+        ));
     }
 
     if !hooks.tool_allowlist.is_empty()
@@ -48,12 +57,13 @@ pub fn check_access(hooks: &Hooks, tool_name: &str) -> Result<()> {
             .iter()
             .any(|p| glob_matches(p, tool_name))
     {
-        let msg = format!("Tool '{}' is not permitted by the allowlist", tool_name);
-        tracing::warn!("{}", msg);
-        anyhow::bail!("{}", msg);
+        return Some(format!(
+            "Tool '{}' is not permitted by the allowlist",
+            tool_name
+        ));
     }
 
-    Ok(())
+    None
 }
 
 /// Validate hook configuration. Returns an error if both allowlist and denylist
