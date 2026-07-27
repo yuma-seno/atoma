@@ -90,6 +90,18 @@ pub fn validate(
             }
         }
 
+        // `extra_body.tools` is appended to the runtime tool definitions rather
+        // than replacing them, which is only possible for an array.
+        if let Some(tools) = agent.extra_body.get("tools") {
+            if !tools.is_array() {
+                errors.push(
+                    "extra_body 'tools' must be an array so it can be merged with the \
+                     runtime tool definitions"
+                        .to_string(),
+                );
+            }
+        }
+
         if let Some(ref tools_path) = tools_file {
             match tool_def_port.load(tools_path) {
                 Ok(tools_map) => {
@@ -163,6 +175,27 @@ mod tests {
         let path = write_agent(dir.path(), "solo", "callable_by:\n  - user\n  - agent\n");
         let result = validate(path, None, &FileAgentDefAdapter, &FileToolDefAdapter);
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn extra_body_tools_must_be_an_array() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_agent(dir.path(), "solo", "extra_body:\n  tools: web_search\n");
+        let error = validate(path, None, &FileAgentDefAdapter, &FileToolDefAdapter)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("extra_body 'tools' must be an array"), "{error}");
+    }
+
+    #[test]
+    fn extra_body_tools_as_an_array_is_accepted() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_agent(
+            dir.path(),
+            "solo",
+            "extra_body:\n  tools:\n    - type: openrouter:web_search\n",
+        );
+        assert!(validate(path, None, &FileAgentDefAdapter, &FileToolDefAdapter).is_ok());
     }
 
     #[test]

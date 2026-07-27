@@ -127,4 +127,5 @@ Validation checks:
 - Each `knows_about` target includes `agent` in `callable_by`.
 - `callable_by` values are limited to `user` or `agent`.
 - `extra_body` does not include reserved keys `model` or `messages`.
+- `extra_body.tools`, when present, is an array so it can be merged with the runtime tool definitions. See [agents.md](agents.md).
 - `mcp_servers` entries exist in `tools.yaml` when a tools file is given.

@@ -34,6 +34,25 @@ Optional:
 - `mcp_servers: string[]`
 - `extra_body: object`
 
+## `extra_body` merge semantics
+
+`extra_body` keys are merged into the provider request body.
+
+- `model` and `messages` are reserved and dropped; `atoma validate` reports them.
+- `tools` is **appended** to the runtime tool definitions, never substituted for
+  them. This keeps every MCP tool's JSON Schema in the request while letting an
+  agent add provider-side tools, such as OpenRouter's
+  `{"type": "openrouter:web_search"}`. It must be an array.
+- Every other key overrides whatever Atoma put there, including `tool_choice`.
+
+The runtime tool definitions carry the parameter schemas the model needs;
+`{{AVAILABLE_TOOLS}}` in the system prompt lists tool names only. Replacing
+`tools` would therefore leave the model naming tools it has no schema for.
+
+On the `anthropic` provider, `extra_body` cannot set `tools`, `tool_choice`,
+`system`, or `max_tokens` beyond the documented `max_tokens` lookup, because
+that request body is assembled in Anthropic's native format.
+
 `callable_by` semantics:
 
 - `atoma validate` accepts only `user` and `agent`.

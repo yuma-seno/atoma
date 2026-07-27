@@ -43,6 +43,64 @@ async fn retry_delay(attempt: u8, reason: &str) {
     tokio::time::sleep(delay).await;
 }
 
+/// Request keys Atoma owns outright; `extra_body` may not set them.
+const RESERVED_KEYS: [&str; 2] = ["model", "messages"];
+
+/// Reconcile an `extra_body` `tools` value with the runtime tool definitions.
+///
+/// Returns the value to store, or `None` when a plain insert is correct.
+///
+/// A plain insert would REPLACE the runtime tools. That silently strips every
+/// MCP tool's JSON Schema from the request, and because the system prompt lists
+/// only tool *names*, the model is then left to guess argument shapes — observed
+/// in production as a stream of wrong-typed and missing arguments.
+///
+/// OpenRouter's server tools (`{"type": "openrouter:web_search"}`) are declared
+/// in this same array and are documented to work alongside user-defined tools,
+/// so both sets belong in it: append rather than overwrite.
+fn reconcile_tools(runtime: Option<&Value>, extra: &Value) -> Option<Value> {
+    // No runtime tools to protect: whatever the agent supplied stands alone.
+    let runtime = runtime?.as_array()?;
+
+    match extra.as_array() {
+        Some(extra) => {
+            let mut merged = runtime.clone();
+            merged.extend(extra.iter().cloned());
+            Some(Value::Array(merged))
+        }
+        None => {
+            tracing::warn!(
+                "extra_body.tools is not an array; ignoring it and keeping the \
+                 {} runtime tool definition(s)",
+                runtime.len(),
+            );
+            Some(Value::Array(runtime.clone()))
+        }
+    }
+}
+
+/// Merge an agent's `extra_body` into an assembled request body.
+///
+/// Reserved keys are dropped; `tools` is merged with what the runtime already
+/// put there; everything else overrides.
+fn merge_extra_body(
+    body: &mut serde_json::Map<String, Value>,
+    extra_body: &std::collections::HashMap<String, Value>,
+) {
+    for (key, value) in extra_body {
+        if RESERVED_KEYS.contains(&key.as_str()) {
+            continue;
+        }
+        if key == "tools" {
+            if let Some(reconciled) = reconcile_tools(body.get("tools"), value) {
+                body.insert(key.clone(), reconciled);
+                continue;
+            }
+        }
+        body.insert(key.clone(), value.clone());
+    }
+}
+
 /// Shared HTTP response types (OpenAI-compatible wire format).
 #[derive(Debug, Deserialize)]
 pub struct ChatResponse {
@@ -180,11 +238,7 @@ pub async fn openai_compat_call(
     }
 
     if let Some(obj) = body.as_object_mut() {
-        for (k, v) in extra_body {
-            if k != "model" && k != "messages" {
-                obj.insert(k.clone(), v.clone());
-            }
-        }
+        merge_extra_body(obj, extra_body);
     }
 
     tracing::debug!("Request URL: {}", url);
@@ -343,6 +397,111 @@ mod tests {
         assert!(rendered.contains("upstream timed out"), "got: {rendered}");
         assert!(rendered.contains("504"), "got: {rendered}");
         server.abort();
+    }
+
+    fn body_with_runtime_tools() -> serde_json::Map<String, Value> {
+        let body = serde_json::json!({
+            "model": "test-model",
+            "messages": [],
+            "tools": [
+                { "type": "function", "function": { "name": "github__get_issue" } },
+                { "type": "function", "function": { "name": "atoma_builtin__load_skill" } },
+            ],
+            "tool_choice": "auto",
+        });
+        body.as_object().unwrap().clone()
+    }
+
+    fn tool_names(body: &serde_json::Map<String, Value>) -> Vec<String> {
+        body["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| {
+                t.pointer("/function/name")
+                    .or_else(|| t.get("type"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("?")
+                    .to_string()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn extra_body_tools_are_appended_not_substituted_for_runtime_tools() {
+        let mut body = body_with_runtime_tools();
+        let extra = HashMap::from([(
+            "tools".to_string(),
+            serde_json::json!([
+                { "type": "openrouter:web_search" },
+                { "type": "openrouter:web_fetch" },
+            ]),
+        )]);
+
+        merge_extra_body(&mut body, &extra);
+
+        assert_eq!(
+            tool_names(&body),
+            vec![
+                "github__get_issue",
+                "atoma_builtin__load_skill",
+                "openrouter:web_search",
+                "openrouter:web_fetch",
+            ],
+            "runtime tool schemas must survive alongside the agent's server tools"
+        );
+    }
+
+    #[test]
+    fn extra_body_tools_stand_alone_when_there_are_no_runtime_tools() {
+        let mut body = serde_json::json!({ "model": "m", "messages": [] })
+            .as_object()
+            .unwrap()
+            .clone();
+        let extra = HashMap::from([(
+            "tools".to_string(),
+            serde_json::json!([{ "type": "openrouter:web_search" }]),
+        )]);
+
+        merge_extra_body(&mut body, &extra);
+
+        assert_eq!(tool_names(&body), vec!["openrouter:web_search"]);
+    }
+
+    #[test]
+    fn a_non_array_extra_body_tools_cannot_strip_the_runtime_tools() {
+        let mut body = body_with_runtime_tools();
+        let extra = HashMap::from([("tools".to_string(), serde_json::json!("web_search"))]);
+
+        merge_extra_body(&mut body, &extra);
+
+        assert_eq!(
+            tool_names(&body),
+            vec!["github__get_issue", "atoma_builtin__load_skill"]
+        );
+    }
+
+    #[test]
+    fn extra_body_overrides_other_keys_and_never_reserved_ones() {
+        let mut body = body_with_runtime_tools();
+        let extra = HashMap::from([
+            ("model".to_string(), serde_json::json!("hijacked")),
+            ("messages".to_string(), serde_json::json!(["hijacked"])),
+            ("tool_choice".to_string(), serde_json::json!("none")),
+            ("temperature".to_string(), serde_json::json!(0)),
+            (
+                "provider".to_string(),
+                serde_json::json!({ "order": ["Xiaomi"], "allow_fallbacks": false }),
+            ),
+        ]);
+
+        merge_extra_body(&mut body, &extra);
+
+        assert_eq!(body["model"], serde_json::json!("test-model"));
+        assert_eq!(body["messages"], serde_json::json!([]));
+        assert_eq!(body["tool_choice"], serde_json::json!("none"));
+        assert_eq!(body["temperature"], serde_json::json!(0));
+        assert_eq!(body["provider"]["order"], serde_json::json!(["Xiaomi"]));
     }
 
     #[test]
