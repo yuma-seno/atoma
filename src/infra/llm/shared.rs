@@ -98,7 +98,11 @@ pub(crate) async fn send_json_with_retry<T: DeserializeOwned>(
                 .await
                 .unwrap_or_else(|_| "unknown error".to_string());
             if attempt < MAX_HTTP_ATTEMPTS && retryable {
-                retry_delay(attempt, &format!("{label} API error ({status}): {error_text}")).await;
+                retry_delay(
+                    attempt,
+                    &format!("{label} API error ({status}): {error_text}"),
+                )
+                .await;
                 continue;
             }
             anyhow::bail!("{} API error ({}): {}", label, status, error_text);
