@@ -19,6 +19,19 @@ Completion handling:
 - `content_filter`: run fails
 - unknown finish reason: run fails
 
+## Contentless completions
+
+A completion carrying neither text nor tool calls is treated as a provider-side
+misfire, not as a decision by the model. There is nothing in it to append to the
+session, so Atoma re-sends the same request.
+
+This is bounded: after 2 consecutive contentless completions the run fails. The
+bound applies to both shapes — an empty `tool_calls` array, and `stop`/`end_turn`
+with empty text. Any productive completion resets the counter.
+
+For transport-level failures and the request timeout, see
+[configuration.md](configuration.md).
+
 If iteration count exceeds `max_iterations`, Atoma returns an error and the CLI exits with status 2.
 
 ## Tool history and `session_ends`
@@ -87,4 +100,6 @@ Exit behavior summary:
 | `Tool 'X' not found in tools file` | Agent `mcp_servers` and tools YAML keys do not match | Align names exactly and re-run `atoma validate` |
 | Hook script not found | Relative hook path cannot be resolved from tools file directory | Fix path in `tools.yaml` and ensure file exists |
 | `Unknown skill` from `atoma_builtin__load_skill` | Skill name not present in loaded catalog | Use one of the names listed in `AVAILABLE_SKILLS` |
-| Empty final response with `stop` | Provider returned no assistant text | Inspect model/provider config and retry with debug logs enabled |
+| `LLM returned empty response ... times in a row` | Provider kept returning contentless completions | Check provider/endpoint health; on OpenRouter, pin routing with `extra_body.provider` |
+| `Failed to parse ... response` | Body did not match the expected shape (truncated bodies are retried automatically) | Verify the model is served in an OpenAI-compatible format at the configured base URL |
+| Single request takes far longer than expected | Upstream endpoint stalled; each attempt waits `ATOMA_LLM_TIMEOUT` | Lower `ATOMA_LLM_TIMEOUT` to fail faster, and route away from the stalling endpoint |

@@ -5,7 +5,7 @@ use serde_json::Value;
 
 use crate::domain::ports::{LlmChoice, LlmPort, LlmResponse, LlmUsage};
 use crate::domain::session::{Message, ToolCall, ToolCallFunction};
-use crate::infra::llm::shared::{ChatChoice, ChatResponse, Usage};
+use crate::infra::llm::shared::{send_json_with_retry, ChatChoice, ChatResponse, Usage};
 
 const ANTHROPIC_BASE_URL: &str = "https://api.anthropic.com";
 const ANTHROPIC_API_VERSION: &str = "2023-06-01";
@@ -44,30 +44,15 @@ impl AnthropicClient {
         tracing::debug!("Request URL: {}", url);
         tracing::debug!("Request body: {}", serde_json::to_string_pretty(&body)?);
 
-        let response = self
-            .client
-            .post(&url)
-            .header("x-api-key", &self.api_key)
-            .header("anthropic-version", ANTHROPIC_API_VERSION)
-            .header("Content-Type", "application/json")
-            .json(&body)
-            .send()
-            .await
-            .context("Failed to send Anthropic request")?;
-
-        if !response.status().is_success() {
-            let status = response.status();
-            let error_text = response
-                .text()
-                .await
-                .unwrap_or_else(|_| "unknown error".to_string());
-            anyhow::bail!("Anthropic API error ({}): {}", status, error_text);
-        }
-
-        let raw: AnthropicResponse = response
-            .json()
-            .await
-            .context("Failed to parse Anthropic response")?;
+        let raw: AnthropicResponse = send_json_with_retry("Anthropic", || {
+            self.client
+                .post(&url)
+                .header("x-api-key", &self.api_key)
+                .header("anthropic-version", ANTHROPIC_API_VERSION)
+                .header("Content-Type", "application/json")
+                .json(&body)
+        })
+        .await?;
 
         Ok(anthropic_to_chat_response(raw))
     }

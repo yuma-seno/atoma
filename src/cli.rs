@@ -21,6 +21,7 @@ orchestrator: parse agent definition → call LLM → execute tools → repeat u
   ANTHROPIC_BASE_URL     (optional)   Anthropic API base URL (default: https://api.anthropic.com)
   ATOMA_PROVIDER         (optional)   Force provider: 'openai', 'github-copilot', or 'anthropic'
                                        Auto-detected when unset.
+  ATOMA_LLM_TIMEOUT      (optional)   Per-request LLM timeout in seconds (default: 300)
   ATOMA_HOOK_TIMEOUT     (optional)   Hook script timeout in seconds (default: 30)
   ATOMA_MCP_TIMEOUT      (optional)   MCP tool call timeout in seconds (default: 60)
   ATOMA_MCP_INIT_TIMEOUT (optional)   MCP server init timeout in seconds (default: 120)

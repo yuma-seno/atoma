@@ -9,6 +9,16 @@ use crate::domain::session::{Message, Session, ToolCall};
 
 const MAX_IDENTICAL_TOOL_FAILURES: u8 = 3;
 
+/// How many consecutive degenerate (contentless) completions to re-request
+/// before giving up.
+///
+/// A completion carrying neither text nor tool calls is a provider-side
+/// misfire, not a decision the model made — there is nothing in it to append to
+/// the session, so re-sending the identical payload is a genuine retry and gets
+/// a fresh sample. Bounded because a provider stuck in this state would
+/// otherwise silently consume the whole iteration budget.
+const MAX_EMPTY_COMPLETION_RETRIES: u8 = 2;
+
 #[derive(Default)]
 struct ToolFailureTracker {
     last_signature: Option<String>,
@@ -165,6 +175,7 @@ pub async fn inference_loop(
 ) -> Result<InferenceResult> {
     let mut total_usage = LlmUsage::default();
     let mut failure_tracker = ToolFailureTracker::default();
+    let mut consecutive_empty: u8 = 0;
 
     for iteration in 1..=max_iterations {
         tracing::info!(
@@ -196,9 +207,21 @@ pub async fn inference_loop(
 
         if let Some(calls) = tool_calls {
             if calls.is_empty() {
-                tracing::warn!("LLM returned empty tool_calls array — continuing");
+                consecutive_empty += 1;
+                if consecutive_empty > MAX_EMPTY_COMPLETION_RETRIES {
+                    bail!(
+                        "LLM returned an empty tool_calls array {} times in a row",
+                        consecutive_empty
+                    );
+                }
+                tracing::warn!(
+                    "LLM returned empty tool_calls array — re-requesting ({}/{})",
+                    consecutive_empty,
+                    MAX_EMPTY_COMPLETION_RETRIES
+                );
                 continue;
             }
+            consecutive_empty = 0;
             if finish_reason != "tool_calls" {
                 tracing::warn!(
                     "LLM returned finish_reason '{}' with tool_calls — processing anyway",
@@ -224,8 +247,23 @@ pub async fn inference_loop(
                         .unwrap_or("")
                         .to_owned();
                     if text.is_empty() {
-                        bail!("LLM returned empty response (finish_reason: stop)");
+                        consecutive_empty += 1;
+                        if consecutive_empty > MAX_EMPTY_COMPLETION_RETRIES {
+                            bail!(
+                                "LLM returned empty response (finish_reason: {}) {} times in a row",
+                                finish_reason,
+                                consecutive_empty
+                            );
+                        }
+                        tracing::warn!(
+                            "LLM returned empty response (finish_reason: {}) — re-requesting ({}/{})",
+                            finish_reason,
+                            consecutive_empty,
+                            MAX_EMPTY_COMPLETION_RETRIES
+                        );
+                        continue;
                     }
+                    consecutive_empty = 0;
                     session.messages.push(Message::assistant(Some(&text), None));
                     tracing::info!("LLM returned final response ({} chars)", text.len());
                     return Ok(InferenceResult::Completed {

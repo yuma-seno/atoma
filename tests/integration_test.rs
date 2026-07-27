@@ -434,6 +434,100 @@ async fn test_identical_failed_tool_calls_abort() {
     assert!(!message.contains("maximum iterations"), "{message}");
 }
 
+/// A contentless completion is re-requested rather than failing the run.
+#[tokio::test]
+async fn test_empty_completion_is_retried_then_succeeds() {
+    // First completion carries neither text nor tool calls; the next one is real.
+    let llm = MockLlmClient::new()
+        .enqueue_text("")
+        .enqueue_text("Recovered on the second attempt.");
+
+    let agent_port = StubAgentDefPort {
+        agent_def: minimal_agent("FlakyProviderAgent"),
+    };
+    let session_port = StubSessionPort;
+    let tool_def_port = StubToolDefPort;
+    let mcp_factory = StubMcpFactory::new(MockMcpRegistry::new());
+
+    let dir = tempdir().unwrap();
+    let agent_path = dir.path().join("agent.md");
+    std::fs::write(&agent_path, "").unwrap();
+
+    let result = run(
+        RunSettings {
+            agent_def_path: agent_path,
+            in_session: None,
+            prompt_file: None,
+            out_session: None,
+            template_path: None,
+            tools_file: None,
+            skills_dir: None,
+            max_iterations: 10,
+        },
+        RunDeps {
+            llm: &llm,
+            agent_def: &agent_port,
+            session: &session_port,
+            tool_def: &tool_def_port,
+            skill: &atoma::infra::persistence::skill::FileSkillAdapter,
+            mcp_factory: &mcp_factory,
+        },
+    )
+    .await;
+
+    assert!(result.is_ok(), "Expected Ok, got: {:?}", result);
+}
+
+/// Consecutive contentless completions abort instead of draining the budget.
+#[tokio::test]
+async fn test_repeated_empty_completions_abort() {
+    let llm = MockLlmClient::new()
+        .enqueue_text("")
+        .enqueue_text("")
+        .enqueue_text("")
+        .enqueue_text("");
+
+    let agent_port = StubAgentDefPort {
+        agent_def: minimal_agent("DeadProviderAgent"),
+    };
+    let session_port = StubSessionPort;
+    let tool_def_port = StubToolDefPort;
+    let mcp_factory = StubMcpFactory::new(MockMcpRegistry::new());
+
+    let dir = tempdir().unwrap();
+    let agent_path = dir.path().join("agent.md");
+    std::fs::write(&agent_path, "").unwrap();
+
+    let error = run(
+        RunSettings {
+            agent_def_path: agent_path,
+            in_session: None,
+            prompt_file: None,
+            out_session: None,
+            template_path: None,
+            tools_file: None,
+            skills_dir: None,
+            max_iterations: 50,
+        },
+        RunDeps {
+            llm: &llm,
+            agent_def: &agent_port,
+            session: &session_port,
+            tool_def: &tool_def_port,
+            skill: &atoma::infra::persistence::skill::FileSkillAdapter,
+            mcp_factory: &mcp_factory,
+        },
+    )
+    .await
+    .unwrap_err();
+
+    let message = error.to_string();
+    assert!(message.contains("empty response"), "{message}");
+    assert!(message.contains("times in a row"), "{message}");
+    // Aborted on the bound, not by exhausting the 50-iteration budget.
+    assert!(!message.contains("maximum iterations"), "{message}");
+}
+
 /// content_filter finish_reason returns an error.
 #[tokio::test]
 async fn test_content_filter_returns_error() {

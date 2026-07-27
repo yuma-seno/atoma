@@ -60,6 +60,26 @@ Optional provider endpoints:
 - `OPENAI_BASE_URL` (default: `https://openrouter.ai/api/v1`)
 - `ANTHROPIC_BASE_URL` (default: `https://api.anthropic.com`)
 
+## Request timeout and retries
+
+`ATOMA_LLM_TIMEOUT` bounds a single completion request, in seconds (default `300`). Absent, non-numeric, and zero values fall back to the default.
+
+Treat this as a stall detector rather than a generation budget. A provider that has returned nothing for several minutes has usually stopped responding altogether, and raising the ceiling only delays detecting that. Raise it when a model legitimately generates for longer than the default; lower it to abandon a stalling endpoint sooner.
+
+Each request is attempted up to 3 times, with a 1s then 4s pause between attempts. Retried:
+
+- connect, timeout, and body/decode errors
+- HTTP 429 and 5xx
+- a response body that was cut off mid-payload
+
+Not retried, because the outcome cannot change:
+
+- any other non-success status
+- a provider error object returned under HTTP 200
+- a body whose JSON structure does not match the expected response shape
+
+Worst-case wall clock for one request is therefore roughly `3 × ATOMA_LLM_TIMEOUT`. Account for that when raising the timeout under a CI job limit.
+
 ## Representative config
 
 ```toml
