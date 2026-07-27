@@ -184,7 +184,10 @@ mod tests {
         let error = validate(path, None, &FileAgentDefAdapter, &FileToolDefAdapter)
             .unwrap_err()
             .to_string();
-        assert!(error.contains("extra_body 'tools' must be an array"), "{error}");
+        assert!(
+            error.contains("extra_body 'tools' must be an array"),
+            "{error}"
+        );
     }
 
     #[test]
