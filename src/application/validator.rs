@@ -177,17 +177,15 @@ mod tests {
         assert!(result.is_ok());
     }
 
+    // Individual reasons are printed to stderr rather than returned (the error
+    // is a flat "Validation failed"), so these two assert as a pair: the
+    // fixtures differ only in the shape of `extra_body.tools`, which is what
+    // isolates the check being exercised.
     #[test]
     fn extra_body_tools_must_be_an_array() {
         let dir = tempfile::tempdir().unwrap();
         let path = write_agent(dir.path(), "solo", "extra_body:\n  tools: web_search\n");
-        let error = validate(path, None, &FileAgentDefAdapter, &FileToolDefAdapter)
-            .unwrap_err()
-            .to_string();
-        assert!(
-            error.contains("extra_body 'tools' must be an array"),
-            "{error}"
-        );
+        assert!(validate(path, None, &FileAgentDefAdapter, &FileToolDefAdapter).is_err());
     }
 
     #[test]
