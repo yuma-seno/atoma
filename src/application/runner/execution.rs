@@ -263,7 +263,8 @@ pub async fn inference_loop(
                         );
                         continue;
                     }
-                    consecutive_empty = 0;
+                    // No counter reset here: this arm returns, so only the
+                    // tool_calls branch needs to clear it before looping again.
                     session.messages.push(Message::assistant(Some(&text), None));
                     tracing::info!("LLM returned final response ({} chars)", text.len());
                     return Ok(InferenceResult::Completed {
