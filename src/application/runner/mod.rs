@@ -64,7 +64,6 @@ pub async fn run(settings: RunSettings, deps: RunDeps<'_>) -> Result<RunOutcome>
         tools_file,
         skills_dir,
         max_iterations,
-        agent.vision,
     } = settings;
 
     // 1. Parse agent definition
