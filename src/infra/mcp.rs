@@ -40,7 +40,10 @@ fn init_timeout() -> Duration {
 /// before. An unknown block type is not a reason to lose it.
 fn split_content(result: &Value) -> (String, Vec<Value>) {
     let Some(items) = result.get("content").and_then(|c| c.as_array()) else {
-        return (serde_json::to_string(result).unwrap_or_default(), Vec::new());
+        return (
+            serde_json::to_string(result).unwrap_or_default(),
+            Vec::new(),
+        );
     };
 
     let mut images = Vec::new();
@@ -586,7 +589,10 @@ mod split_content_tests {
         assert_eq!(text, "Here is the screen:\n[image]");
         assert_eq!(images.len(), 1);
         assert_eq!(images[0]["data"], "AAAA");
-        assert!(!text.contains("AAAA"), "base64 must not be left in the text");
+        assert!(
+            !text.contains("AAAA"),
+            "base64 must not be left in the text"
+        );
     }
 
     #[test]
