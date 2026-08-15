@@ -212,8 +212,6 @@ pub(crate) async fn send_json_with_retry<T: DeserializeOwned>(
     anyhow::bail!("{} HTTP retry loop exhausted without a response", label)
 }
 
-/// Shared OpenAI-compatible HTTP call used by OpenAI and Copilot providers.
-#[allow(clippy::too_many_arguments)]
 /// Move a tool result's pictures into a following `user` message.
 ///
 /// The OpenAI schema has no way to return an image from a tool: a `tool`
@@ -277,6 +275,8 @@ fn split_images_out_of_tool_message(message: Value) -> Vec<Value> {
     ]
 }
 
+/// Shared OpenAI-compatible HTTP call used by OpenAI and Copilot providers.
+#[allow(clippy::too_many_arguments)]
 pub async fn openai_compat_call(
     client: &reqwest::Client,
     base_url: &str,
