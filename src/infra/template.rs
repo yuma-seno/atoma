@@ -119,6 +119,7 @@ mod tests {
                 description: "A test agent for unit testing".to_string(),
                 model: "openrouter/anthropic/claude-3.5-sonnet".to_string(),
                 provider: None,
+                vision: false,
                 knows_about: vec!["ReviewAgent".to_string()],
                 callable_by: vec![],
                 mcp_servers: vec![],
