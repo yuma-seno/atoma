@@ -6,7 +6,7 @@ use crate::domain::ports::{LlmChoice, LlmPort, LlmResponse, LlmUsage};
 use crate::domain::session::Message;
 use crate::infra::llm::shared::openai_compat_call;
 
-const DEFAULT_OPENAI_BASE_URL: &str = "https://openrouter.ai/api/v1";
+pub(crate) const DEFAULT_OPENAI_BASE_URL: &str = "https://openrouter.ai/api/v1";
 
 /// Client for OpenAI and OpenAI-compatible endpoints (e.g. OpenRouter).
 pub struct OpenAIClient {
