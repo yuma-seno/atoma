@@ -49,9 +49,18 @@ pub trait LlmPort: Send + Sync {
 // ── Tool port ─────────────────────────────────────────────────────────────────
 
 /// Result from a single MCP tool call.
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct ToolCallResult {
     pub content: String,
+    /// Image blocks the tool returned, in MCP's own wire shape
+    /// (`{"type":"image","data":"<base64>","mimeType":"image/png"}`).
+    ///
+    /// Kept beside `content` rather than folded into it because every consumer
+    /// of a tool result reads text — logs, hooks, the built-in skill tool — and
+    /// only the message the model receives cares about pictures. MCP's shape is
+    /// stored as-is so nothing here has to pick a provider's; each LLM adapter
+    /// maps it to its own, which is where that knowledge already lives.
+    pub images: Vec<Value>,
     pub session_ends: bool,
 }
 

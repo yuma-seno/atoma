@@ -260,6 +260,7 @@ fn messages_to_anthropic(messages: &[Message]) -> (Option<String>, Vec<Value>) {
             }
             "tool" => {
                 let content = msg.content.clone().unwrap_or(Value::String(String::new()));
+                let content = mcp_blocks_to_anthropic(content);
                 let tool_use_id = msg.tool_call_id.as_deref().unwrap_or("unknown");
                 out.push(serde_json::json!({
                     "role": "user",
@@ -275,6 +276,41 @@ fn messages_to_anthropic(messages: &[Message]) -> (Option<String>, Vec<Value>) {
     }
 
     (system_content, out)
+}
+
+/// Rewrite MCP image blocks into Anthropic's shape, leaving everything else be.
+///
+/// MCP says `{"type":"image","data":...,"mimeType":...}`; Anthropic wants
+/// `{"type":"image","source":{"type":"base64","media_type":...,"data":...}}`.
+/// A tool result whose content is a plain string — every result that carries no
+/// picture — passes through untouched.
+fn mcp_blocks_to_anthropic(content: Value) -> Value {
+    let Value::Array(blocks) = content else {
+        return content;
+    };
+    Value::Array(
+        blocks
+            .into_iter()
+            .map(|block| {
+                if block.get("type").and_then(Value::as_str) != Some("image") {
+                    return block;
+                }
+                let (Some(data), Some(media_type)) = (
+                    block.get("data").and_then(Value::as_str),
+                    block.get("mimeType").and_then(Value::as_str),
+                ) else {
+                    // Not the shape we know how to move. Leaving it as it is
+                    // sends something Anthropic will reject with a clear
+                    // message, which beats silently dropping the picture.
+                    return block;
+                };
+                serde_json::json!({
+                    "type": "image",
+                    "source": { "type": "base64", "media_type": media_type, "data": data },
+                })
+            })
+            .collect::<Vec<_>>(),
+    )
 }
 
 fn tools_to_anthropic(tools: &[Value]) -> Vec<Value> {
@@ -465,5 +501,39 @@ mod tests {
         let messages = vec![Message::user("hi")];
         let body = build_request_body("claude-x", &messages, None, &extra);
         assert_eq!(body["temperature"], 0.5);
+    }
+}
+
+#[cfg(test)]
+mod tool_image_tests {
+    use super::mcp_blocks_to_anthropic;
+    use serde_json::json;
+
+    // MCP and Anthropic name the same thing differently; the picture is lost
+    // unless something moves it across.
+    #[test]
+    fn an_mcp_image_block_becomes_an_anthropic_source_block() {
+        let out = mcp_blocks_to_anthropic(json!([
+            {"type": "text", "text": "Here is the screen:"},
+            {"type": "image", "data": "AAAA", "mimeType": "image/png"},
+        ]));
+        assert_eq!(out[0]["type"], "text");
+        assert_eq!(out[1]["source"]["type"], "base64");
+        assert_eq!(out[1]["source"]["media_type"], "image/png");
+        assert_eq!(out[1]["source"]["data"], "AAAA");
+    }
+
+    #[test]
+    fn a_plain_string_result_passes_through() {
+        let out = mcp_blocks_to_anthropic(json!("done"));
+        assert_eq!(out, json!("done"));
+    }
+
+    // Sending something Anthropic rejects with a clear message beats dropping
+    // the picture and reporting success.
+    #[test]
+    fn an_image_block_of_an_unknown_shape_is_left_alone() {
+        let out = mcp_blocks_to_anthropic(json!([{"type": "image", "url": "http://x/y.png"}]));
+        assert_eq!(out[0]["url"], "http://x/y.png");
     }
 }

@@ -119,6 +119,7 @@ fn minimal_agent(name: &str) -> AgentDef {
         description: "Test agent".to_string(),
         model: "gpt-4o-mini".to_string(),
         provider: None,
+        vision: false,
         knows_about: vec![],
         callable_by: vec![],
         mcp_servers: vec![],

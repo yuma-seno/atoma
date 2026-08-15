@@ -221,6 +221,7 @@ pub async fn run(settings: RunSettings, deps: RunDeps<'_>) -> Result<RunOutcome>
         &agent.extra_body,
         &mut runtime_tools,
         max_iterations,
+        agent.vision,
     )
     .await;
 

@@ -80,6 +80,25 @@ impl Message {
         }
     }
 
+    /// A tool result that carries pictures as well as text.
+    ///
+    /// Stored in MCP's own block shape rather than any provider's, because the
+    /// session outlives the choice of provider — a run resumed against a
+    /// different one must not find the previous one's wire format baked in.
+    /// `infra/llm/*` maps it on the way out.
+    pub fn tool_blocks(tool_call_id: &str, text: &str, images: &[Value]) -> Self {
+        let mut blocks = vec![serde_json::json!({ "type": "text", "text": text })];
+        blocks.extend(images.iter().cloned());
+        Self {
+            role: "tool".to_string(),
+            content: Some(Value::Array(blocks)),
+            tool_calls: None,
+            tool_call_id: Some(tool_call_id.to_string()),
+            name: None,
+            atoma_metadata: None,
+        }
+    }
+
     /// Return a `serde_json::Value` with `atoma_metadata` stripped, suitable
     /// for sending to the LLM API.
     pub fn to_llm_value(&self) -> Value {

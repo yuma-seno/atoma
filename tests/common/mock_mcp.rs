@@ -65,6 +65,7 @@ impl ToolPort for MockMcpRegistry {
         Ok(ToolCallResult {
             content,
             session_ends,
+            ..Default::default()
         })
     }
 }
