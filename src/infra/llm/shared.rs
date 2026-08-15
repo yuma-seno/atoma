@@ -215,6 +215,48 @@ pub(crate) async fn send_json_with_retry<T: DeserializeOwned>(
 /// Text of the assistant message bridging a tool result to its pictures.
 const IMAGE_BRIDGE: &str = "Passing along the image from that tool result.";
 
+/// A `data:` URI for an MCP image block, or `None` if it is not one.
+pub(crate) fn mcp_image_data_uri(block: &Value) -> Option<String> {
+    if block.get("type").and_then(Value::as_str) != Some("image") {
+        return None;
+    }
+    let data = block.get("data").and_then(Value::as_str)?;
+    let mime = block.get("mimeType").and_then(Value::as_str)?;
+    Some(format!("data:{};base64,{}", mime, data))
+}
+
+/// Rewrite MCP content blocks into the parts an OpenAI message takes.
+///
+/// A picture reaches a run from two directions: a tool that returns one, and a
+/// person who attached one to the issue. Only the first needs the tool-message
+/// workaround above — a `user` message carries `image_url` parts natively, which
+/// is why this is a plain rewrite rather than a reshuffle.
+///
+/// Applied after that split, and harmless there: what the split emits is already
+/// `image_url`, and only `type: "image"` is touched.
+fn mcp_blocks_to_openai(message: Value) -> Value {
+    let Some(blocks) = message.get("content").and_then(Value::as_array) else {
+        return message;
+    };
+    if !blocks.iter().any(|b| mcp_image_data_uri(b).is_some()) {
+        return message;
+    }
+
+    let parts: Vec<Value> = blocks
+        .iter()
+        .map(|block| match mcp_image_data_uri(block) {
+            Some(url) => serde_json::json!({ "type": "image_url", "image_url": { "url": url } }),
+            None => block.clone(),
+        })
+        .collect();
+
+    let mut out = message;
+    if let Some(obj) = out.as_object_mut() {
+        obj.insert("content".to_string(), Value::Array(parts));
+    }
+    out
+}
+
 /// Move a tool result's pictures into a following `user` message.
 ///
 /// A workaround, and worth naming as one. The Chat Completions schema has no
@@ -257,15 +299,12 @@ fn split_images_out_of_tool_message(message: Value) -> Vec<Value> {
                 }
             }
             Some("image") => {
-                let (Some(data), Some(mime)) = (
-                    block.get("data").and_then(Value::as_str),
-                    block.get("mimeType").and_then(Value::as_str),
-                ) else {
+                let Some(url) = mcp_image_data_uri(block) else {
                     continue;
                 };
                 images.push(serde_json::json!({
                     "type": "image_url",
-                    "image_url": { "url": format!("data:{};base64,{}", mime, data) },
+                    "image_url": { "url": url },
                 }));
             }
             _ => {}
@@ -304,6 +343,7 @@ pub async fn openai_compat_call(
     let llm_messages: Vec<Value> = messages
         .iter()
         .flat_map(|m| split_images_out_of_tool_message(m.to_llm_value()))
+        .map(mcp_blocks_to_openai)
         .collect();
     let mut body = serde_json::json!({
         "model": model,
@@ -649,5 +689,47 @@ mod tool_image_tests {
     fn other_roles_are_untouched() {
         let msg = json!({"role": "user", "content": "hello"});
         assert_eq!(split_images_out_of_tool_message(msg.clone()), vec![msg]);
+    }
+}
+
+#[cfg(test)]
+mod user_image_tests {
+    use super::mcp_blocks_to_openai;
+    use serde_json::json;
+
+    // The other direction a picture arrives from: attached to the issue, not
+    // returned by a tool. A user message takes image parts natively, so this is
+    // a rewrite rather than the reshuffle a tool result needs.
+    #[test]
+    fn a_user_message_picture_becomes_an_image_url_part() {
+        let out = mcp_blocks_to_openai(json!({
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "look at this"},
+                {"type": "image", "data": "AAAA", "mimeType": "image/png"},
+            ],
+        }));
+        assert_eq!(out["content"][0]["type"], "text");
+        assert_eq!(out["content"][1]["type"], "image_url");
+        assert_eq!(
+            out["content"][1]["image_url"]["url"],
+            "data:image/png;base64,AAAA"
+        );
+    }
+
+    #[test]
+    fn a_string_content_message_is_untouched() {
+        let msg = json!({"role": "user", "content": "hello"});
+        assert_eq!(mcp_blocks_to_openai(msg.clone()), msg);
+    }
+
+    // It runs after the tool split, whose output is already `image_url`.
+    #[test]
+    fn parts_that_are_already_openai_shaped_are_left_alone() {
+        let msg = json!({
+            "role": "user",
+            "content": [{"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}}],
+        });
+        assert_eq!(mcp_blocks_to_openai(msg.clone()), msg);
     }
 }

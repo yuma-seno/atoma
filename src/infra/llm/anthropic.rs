@@ -235,6 +235,7 @@ fn messages_to_anthropic(messages: &[Message]) -> (Option<String>, Vec<Value>) {
             }
             "user" => {
                 let content = msg.content.clone().unwrap_or(Value::String(String::new()));
+                let content = mcp_blocks_to_anthropic(content);
                 out.push(serde_json::json!({ "role": "user", "content": content }));
             }
             "assistant" => {
@@ -282,8 +283,12 @@ fn messages_to_anthropic(messages: &[Message]) -> (Option<String>, Vec<Value>) {
 ///
 /// MCP says `{"type":"image","data":...,"mimeType":...}`; Anthropic wants
 /// `{"type":"image","source":{"type":"base64","media_type":...,"data":...}}`.
-/// A tool result whose content is a plain string — every result that carries no
-/// picture — passes through untouched.
+/// Content that is a plain string — every message that carries no picture —
+/// passes through untouched.
+///
+/// Applied to user messages as well as tool results, because a picture reaches a
+/// run from two directions: a tool that returns one, and a person who attached
+/// one to the issue being worked on.
 fn mcp_blocks_to_anthropic(content: Value) -> Value {
     let Value::Array(blocks) = content else {
         return content;
@@ -535,5 +540,27 @@ mod tool_image_tests {
     fn an_image_block_of_an_unknown_shape_is_left_alone() {
         let out = mcp_blocks_to_anthropic(json!([{"type": "image", "url": "http://x/y.png"}]));
         assert_eq!(out[0]["url"], "http://x/y.png");
+    }
+}
+
+#[cfg(test)]
+mod user_image_tests {
+    use super::messages_to_anthropic;
+    use crate::domain::session::Message;
+    use serde_json::json;
+
+    // The other direction a picture arrives from: attached to the issue, not
+    // returned by a tool.
+    #[test]
+    fn a_user_message_picture_becomes_a_source_block() {
+        let mut msg = Message::user("look at this");
+        msg.content = Some(json!([
+            {"type": "text", "text": "look at this"},
+            {"type": "image", "data": "AAAA", "mimeType": "image/png"},
+        ]));
+        let (_, out) = messages_to_anthropic(&[msg]);
+        assert_eq!(out[0]["role"], "user");
+        assert_eq!(out[0]["content"][1]["source"]["media_type"], "image/png");
+        assert_eq!(out[0]["content"][1]["source"]["data"], "AAAA");
     }
 }

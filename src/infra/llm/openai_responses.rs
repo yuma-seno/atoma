@@ -200,15 +200,56 @@ fn messages_to_input(messages: &[Message]) -> Vec<Value> {
                 }
             }
             role => {
+                let content = msg.content.clone().unwrap_or(Value::String(String::new()));
                 out.push(serde_json::json!({
                     "role": role,
-                    "content": msg.content.clone().unwrap_or(Value::String(String::new())),
+                    "content": mcp_blocks_to_input_parts(content),
                 }));
             }
         }
     }
 
     out
+}
+
+/// Rewrite MCP content blocks into the input parts a Responses message takes.
+///
+/// The same parts a tool result uses — `input_text` and `input_image` — because
+/// Responses names them once for anything going in. A picture reaches a run from
+/// two directions: a tool that returns one, and a person who attached one to the
+/// issue. Content that is a plain string passes through untouched.
+fn mcp_blocks_to_input_parts(content: Value) -> Value {
+    let Value::Array(blocks) = &content else {
+        return content;
+    };
+    if !blocks
+        .iter()
+        .any(|b| b.get("type").and_then(Value::as_str) == Some("image"))
+    {
+        return content;
+    }
+    Value::Array(blocks.iter().filter_map(block_to_input_part).collect())
+}
+
+/// One MCP block as a Responses input part, or `None` for a kind it has no place
+/// for. Shared by the message path and the tool-result path, which take the same
+/// parts.
+fn block_to_input_part(block: &Value) -> Option<Value> {
+    match block.get("type").and_then(Value::as_str) {
+        Some("text") => Some(serde_json::json!({
+            "type": "input_text",
+            "text": block.get("text").cloned().unwrap_or(Value::Null),
+        })),
+        Some("image") => {
+            let data = block.get("data").and_then(Value::as_str)?;
+            let mime = block.get("mimeType").and_then(Value::as_str)?;
+            Some(serde_json::json!({
+                "type": "input_image",
+                "image_url": format!("data:{};base64,{}", mime, data),
+            }))
+        }
+        _ => None,
+    }
 }
 
 /// The `output` of a `function_call_output`.
@@ -224,26 +265,7 @@ fn tool_output(content: Option<&Value>) -> Value {
             .unwrap_or_else(|| Value::String(String::new()));
     };
 
-    let parts: Vec<Value> = blocks
-        .iter()
-        .filter_map(|block| match block.get("type").and_then(Value::as_str) {
-            Some("text") => Some(serde_json::json!({
-                "type": "input_text",
-                "text": block.get("text").cloned().unwrap_or(Value::Null),
-            })),
-            Some("image") => {
-                let data = block.get("data").and_then(Value::as_str)?;
-                let mime = block.get("mimeType").and_then(Value::as_str)?;
-                Some(serde_json::json!({
-                    "type": "input_image",
-                    "image_url": format!("data:{};base64,{}", mime, data),
-                }))
-            }
-            _ => None,
-        })
-        .collect();
-
-    Value::Array(parts)
+    Value::Array(blocks.iter().filter_map(block_to_input_part).collect())
 }
 
 // ── Response ──────────────────────────────────────────────────────────────────
@@ -400,6 +422,25 @@ mod tests {
         let input = messages_to_input(&[Message::user("hello")]);
         assert_eq!(input[0]["role"], "user");
         assert_eq!(input[0]["content"], "hello");
+    }
+
+    // The other direction a picture arrives from: attached to the issue, not
+    // returned by a tool.
+    #[test]
+    fn a_user_message_carries_its_picture_as_an_input_image() {
+        let mut msg = Message::user("look at this");
+        msg.content = Some(json!([
+            {"type": "text", "text": "look at this"},
+            {"type": "image", "data": "AAAA", "mimeType": "image/png"},
+        ]));
+        let input = messages_to_input(&[msg]);
+        assert_eq!(input[0]["role"], "user");
+        assert_eq!(input[0]["content"][0]["type"], "input_text");
+        assert_eq!(input[0]["content"][1]["type"], "input_image");
+        assert_eq!(
+            input[0]["content"][1]["image_url"],
+            "data:image/png;base64,AAAA"
+        );
     }
 
     #[test]
