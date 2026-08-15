@@ -1,6 +1,7 @@
 pub mod anthropic;
 pub mod copilot;
 pub mod openai;
+pub mod openai_responses;
 pub(crate) mod shared;
 
 use anyhow::{Context, Result};
@@ -11,6 +12,7 @@ use crate::domain::ports::LlmPort;
 pub use anthropic::AnthropicClient;
 pub use copilot::CopilotClient;
 pub use openai::OpenAIClient;
+pub use openai_responses::OpenAIResponsesClient;
 
 /// Ceiling on a single completion request, end to end.
 ///
@@ -62,10 +64,11 @@ pub async fn build_llm_client(
 
     match provider.as_str() {
         "openai" => Ok(Box::new(OpenAIClient::from_env(http)?)),
+        "openai-responses" => Ok(Box::new(OpenAIResponsesClient::from_env(http)?)),
         "github-copilot" => Ok(Box::new(CopilotClient::from_env(http).await?)),
         "anthropic" => Ok(Box::new(AnthropicClient::from_env(http)?)),
         other => anyhow::bail!(
-            "Unknown provider '{other}'. Valid values: openai, github-copilot, anthropic"
+            "Unknown provider '{other}'. Valid values: openai, openai-responses, github-copilot, anthropic"
         ),
     }
 }

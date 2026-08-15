@@ -4,7 +4,7 @@ use anyhow::{bail, Context, Result};
 use serde_json::Value;
 use std::collections::HashMap;
 
-use crate::domain::ports::{LlmPort, LlmUsage, ToolPort};
+use crate::domain::ports::{LlmPort, LlmUsage, ToolCallResult, ToolPort};
 use crate::domain::session::{Message, Session, ToolCall};
 
 const MAX_IDENTICAL_TOOL_FAILURES: u8 = 3;
@@ -84,6 +84,7 @@ async fn execute_tool_calls(
     session: &mut Session,
     tools: &mut Box<dyn ToolPort + Send>,
     failure_tracker: &mut ToolFailureTracker,
+    vision: bool,
 ) -> Result<bool> {
     session
         .messages
@@ -131,15 +132,9 @@ async fn execute_tool_calls(
                     tool_name,
                     result.content.len()
                 );
-                session.messages.push(if result.images.is_empty() {
-                    Message::tool(&tool_call.id, &result.content)
-                } else {
-                    // A text-only result stays a plain string, which is what
-                    // every session written so far holds. Only a result that
-                    // actually carries pictures takes the block form, so the
-                    // change is invisible to the runs that do not use it.
-                    Message::tool_blocks(&tool_call.id, &result.content, &result.images)
-                });
+                session
+                    .messages
+                    .push(tool_result_message(&tool_call.id, &result, vision));
                 if result.session_ends {
                     tracing::info!(
                         "Tool '{}' requested session suspension — will end after this iteration",
@@ -167,6 +162,32 @@ async fn execute_tool_calls(
     Ok(session_ends)
 }
 
+/// Text put in place of a picture the running model cannot read.
+///
+/// It names the setting rather than saying the tool failed, because the tool did
+/// not fail: it produced an image nobody asked whether this agent could see. An
+/// agent told this will report it, so the omission surfaces on the issue instead
+/// of looking like the image was never made.
+const IMAGE_WITHHELD: &str =
+    "[image withheld: this agent's model is not configured to read images. \
+     Set `vision: true` in its agent definition if the model supports them.]";
+
+/// Build the session message for a tool result, withholding pictures the running
+/// model cannot read.
+///
+/// A text-only result keeps the plain-string form every session written so far
+/// holds, so the change is invisible to the runs that do not use pictures.
+fn tool_result_message(tool_call_id: &str, result: &ToolCallResult, vision: bool) -> Message {
+    if result.images.is_empty() {
+        return Message::tool(tool_call_id, &result.content);
+    }
+    if !vision {
+        let text = format!("{}\n{}", result.content, IMAGE_WITHHELD);
+        return Message::tool(tool_call_id, &text);
+    }
+    Message::tool_blocks(tool_call_id, &result.content, &result.images)
+}
+
 /// Run the inference loop: call LLM, handle tool calls or final response.
 #[allow(clippy::too_many_arguments)]
 pub async fn inference_loop(
@@ -178,6 +199,7 @@ pub async fn inference_loop(
     extra_body: &HashMap<String, Value>,
     tools: &mut Box<dyn ToolPort + Send>,
     max_iterations: u32,
+    vision: bool,
 ) -> Result<InferenceResult> {
     let mut total_usage = LlmUsage::default();
     let mut failure_tracker = ToolFailureTracker::default();
@@ -237,8 +259,15 @@ pub async fn inference_loop(
 
             tracing::info!("LLM requested {} tool call(s)", calls.len());
             let session_ends =
-                execute_tool_calls(agent_name, &calls, session, tools, &mut failure_tracker)
-                    .await?;
+                execute_tool_calls(
+                    agent_name,
+                    &calls,
+                    session,
+                    tools,
+                    &mut failure_tracker,
+                    vision,
+                )
+                .await?;
 
             if session_ends {
                 tracing::info!("Tool requested session suspension; ending inference loop");

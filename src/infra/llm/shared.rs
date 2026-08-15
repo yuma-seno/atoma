@@ -212,17 +212,28 @@ pub(crate) async fn send_json_with_retry<T: DeserializeOwned>(
     anyhow::bail!("{} HTTP retry loop exhausted without a response", label)
 }
 
+/// Text of the assistant message bridging a tool result to its pictures.
+const IMAGE_BRIDGE: &str = "Passing along the image from that tool result.";
+
 /// Move a tool result's pictures into a following `user` message.
 ///
-/// The OpenAI schema has no way to return an image from a tool: a `tool`
-/// message's content is text. So a result that carries one becomes two
-/// messages — the tool result with its text, then a user message holding the
-/// pictures. It is the only route by which a model on this API ever sees them.
+/// A workaround, and worth naming as one. The Chat Completions schema has no
+/// way to return an image from a tool — a `tool` message's content is text — so
+/// on this API the only route to the model is a later message. The API that
+/// does it properly is OpenAI's Responses API, whose `function_call_output`
+/// carries image parts; `infra/llm/openai_responses.rs` takes that path.
 ///
-/// The synthetic message is built here and nowhere else. The session keeps the
-/// single tool message it recorded, so nothing about this reaches disk, and a
-/// run resumed against Anthropic — which can carry an image in a tool result —
-/// takes that path instead with no trace of this one.
+/// Three messages, not two: tool result, a short assistant line, then the user
+/// message with the pictures. The bridge exists because providers that enforce
+/// strict role alternation reject a `user` straight after a `tool` with
+/// `400 Unexpected role 'user' after role 'tool'` — reported against Mistral-
+/// backed endpoints, and the same fix others landed. OpenAI and Google accept
+/// either shape, so the stricter one is the one to send.
+///
+/// The synthetic messages are built here and nowhere else. The session keeps
+/// the single tool message it recorded, so nothing about this reaches disk, and
+/// a run resumed against Anthropic — which can carry an image in a tool result
+/// — takes that path instead with no trace of this one.
 ///
 /// Everything without pictures passes through as one message, unchanged.
 fn split_images_out_of_tool_message(message: Value) -> Vec<Value> {
@@ -271,6 +282,7 @@ fn split_images_out_of_tool_message(message: Value) -> Vec<Value> {
     }
     vec![
         tool_message,
+        serde_json::json!({ "role": "assistant", "content": IMAGE_BRIDGE }),
         serde_json::json!({ "role": "user", "content": images }),
     ]
 }
@@ -611,15 +623,18 @@ mod tool_image_tests {
     // route by which a model on this API ever sees one is a following user
     // message.
     #[test]
-    fn a_tool_result_with_a_picture_becomes_two_messages() {
+    fn a_tool_result_with_a_picture_becomes_three_messages() {
         let out = split_images_out_of_tool_message(tool_with_image());
-        assert_eq!(out.len(), 2);
+        assert_eq!(out.len(), 3);
         assert_eq!(out[0]["role"], "tool");
         assert_eq!(out[0]["content"], "Here is the screen:");
         assert_eq!(out[0]["tool_call_id"], "call_1");
-        assert_eq!(out[1]["role"], "user");
+        // The bridge is what keeps a strict provider from rejecting the
+        // sequence with "Unexpected role 'user' after role 'tool'".
+        assert_eq!(out[1]["role"], "assistant");
+        assert_eq!(out[2]["role"], "user");
         assert_eq!(
-            out[1]["content"][0]["image_url"]["url"],
+            out[2]["content"][0]["image_url"]["url"],
             "data:image/png;base64,AAAA"
         );
     }

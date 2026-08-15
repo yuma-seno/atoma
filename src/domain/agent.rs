@@ -12,9 +12,19 @@ pub struct AgentDef {
     pub description: String,
     pub model: String,
     /// LLM provider override. Checked before `ATOMA_PROVIDER` env var and auto-detection.
-    /// Valid values: `openai`, `github-copilot`, `anthropic`.
+    /// Valid values: `openai`, `openai-responses`, `github-copilot`, `anthropic`.
     #[serde(default)]
     pub provider: Option<String>,
+    /// Whether this agent's model can read an image.
+    ///
+    /// Off unless declared, because the cost of the two mistakes is not
+    /// symmetric: sending a picture to a text-only model is an API error that
+    /// loses the run, while withholding one from a model that could have read it
+    /// costs a tool result that says so. A tool that returns an image to an
+    /// agent without this set gets text naming the setting, so the omission
+    /// reports itself instead of looking like the image was never produced.
+    #[serde(default)]
+    pub vision: bool,
     #[serde(default)]
     pub knows_about: Vec<String>,
     /// Who may invoke this agent: `"user"` (human entry point, e.g. a slash-command

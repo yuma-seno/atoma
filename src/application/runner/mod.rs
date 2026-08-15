@@ -64,6 +64,7 @@ pub async fn run(settings: RunSettings, deps: RunDeps<'_>) -> Result<RunOutcome>
         tools_file,
         skills_dir,
         max_iterations,
+        agent.vision,
     } = settings;
 
     // 1. Parse agent definition
@@ -221,6 +222,7 @@ pub async fn run(settings: RunSettings, deps: RunDeps<'_>) -> Result<RunOutcome>
         &agent.extra_body,
         &mut runtime_tools,
         max_iterations,
+        agent.vision,
     )
     .await;
 
