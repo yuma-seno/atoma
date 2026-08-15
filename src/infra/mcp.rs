@@ -24,6 +24,43 @@ fn init_timeout() -> Duration {
         .unwrap_or(Duration::from_secs(120))
 }
 
+/// Split an MCP tool result's `content` into the text the model reads and the
+/// image blocks it should see.
+///
+/// Images used to be folded into the text, where `serde_json::to_string` turned
+/// each into a base64 blob the model could only read as characters — a picture
+/// arriving as noise, and an expensive one. They now travel separately, in MCP's
+/// own shape, for the LLM adapters to map.
+///
+/// Text keeps a `[image]` marker where each picture was, so its position in the
+/// result stays legible: "the diagram below" means nothing once the diagram has
+/// been lifted out.
+///
+/// Anything that is neither text nor image is still serialised into the text, as
+/// before. An unknown block type is not a reason to lose it.
+fn split_content(result: &Value) -> (String, Vec<Value>) {
+    let Some(items) = result.get("content").and_then(|c| c.as_array()) else {
+        return (serde_json::to_string(result).unwrap_or_default(), Vec::new());
+    };
+
+    let mut images = Vec::new();
+    let parts: Vec<String> = items
+        .iter()
+        .map(|item| {
+            if let Some(text) = item.get("text").and_then(|t| t.as_str()) {
+                return text.to_string();
+            }
+            if item.get("type").and_then(Value::as_str) == Some("image") {
+                images.push(item.clone());
+                return "[image]".to_string();
+            }
+            serde_json::to_string(item).unwrap_or_default()
+        })
+        .collect();
+
+    (parts.join("\n"), images)
+}
+
 #[derive(Debug, Clone)]
 pub struct RegisteredTool {
     pub prefixed_name: String,
@@ -206,7 +243,7 @@ impl McpConnection {
         &mut self,
         tool_name: &str,
         arguments: &Value,
-    ) -> Result<(String, bool)> {
+    ) -> Result<(String, Vec<Value>, bool)> {
         let response = tokio::time::timeout(
             request_timeout(),
             self.send_request(
@@ -250,22 +287,7 @@ impl McpConnection {
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
 
-        let content_parts = result
-            .get("content")
-            .and_then(|c| c.as_array())
-            .map(|items| {
-                items
-                    .iter()
-                    .map(|item| {
-                        item.get("text")
-                            .and_then(|t| t.as_str())
-                            .map(|s| s.to_string())
-                            .unwrap_or_else(|| serde_json::to_string(item).unwrap_or_default())
-                    })
-                    .collect::<Vec<_>>()
-                    .join("\n")
-            })
-            .unwrap_or_else(|| serde_json::to_string(result).unwrap_or_default());
+        let (content_parts, images) = split_content(result);
 
         if is_error {
             anyhow::bail!(
@@ -276,7 +298,7 @@ impl McpConnection {
             );
         }
 
-        Ok((content_parts, session_ends))
+        Ok((content_parts, images, session_ends))
     }
 
     async fn send_request(&mut self, method: &str, params: Value) -> Result<Value> {
@@ -474,7 +496,7 @@ impl McpRegistry {
             }
         }
 
-        let (content, session_ends) = self.call_tool(prefixed_name, arguments).await?;
+        let (content, images, session_ends) = self.call_tool(prefixed_name, arguments).await?;
 
         if let Some(ref h) = hooks {
             if let Some(ref script) = h.after_tool {
@@ -544,5 +566,49 @@ impl crate::domain::ports::McpFactory for McpRegistryFactory {
     ) -> anyhow::Result<Box<dyn crate::domain::ports::ToolPort + Send>> {
         let registry = McpRegistry::from_configs(tool_defs).await?;
         Ok(Box::new(registry))
+    }
+}
+
+#[cfg(test)]
+mod split_content_tests {
+    use super::split_content;
+    use serde_json::json;
+
+    // A picture used to reach the model as `serde_json::to_string` of the whole
+    // block: thousands of base64 characters it could only read as characters.
+    #[test]
+    fn an_image_leaves_the_text_and_travels_on_its_own() {
+        let result = json!({"content": [
+            {"type": "text", "text": "Here is the screen:"},
+            {"type": "image", "data": "AAAA", "mimeType": "image/png"},
+        ]});
+        let (text, images) = split_content(&result);
+        assert_eq!(text, "Here is the screen:\n[image]");
+        assert_eq!(images.len(), 1);
+        assert_eq!(images[0]["data"], "AAAA");
+        assert!(!text.contains("AAAA"), "base64 must not be left in the text");
+    }
+
+    #[test]
+    fn a_text_only_result_is_unchanged_and_carries_no_images() {
+        let result = json!({"content": [{"type": "text", "text": "done"}]});
+        assert_eq!(split_content(&result), ("done".to_string(), Vec::new()));
+    }
+
+    // An unknown block type is not a reason to lose it.
+    #[test]
+    fn an_unknown_block_is_still_serialised_into_the_text() {
+        let result = json!({"content": [{"type": "audio", "data": "BBBB"}]});
+        let (text, images) = split_content(&result);
+        assert!(text.contains("audio"));
+        assert!(images.is_empty());
+    }
+
+    #[test]
+    fn a_result_without_content_falls_back_to_the_whole_value() {
+        let result = json!({"unexpected": true});
+        let (text, images) = split_content(&result);
+        assert!(text.contains("unexpected"));
+        assert!(images.is_empty());
     }
 }

@@ -89,7 +89,7 @@ impl ToolPort for RuntimeTools {
                 .with_context(|| format!("Unknown skill: '{}'", skill_name))?;
             return Ok(ToolCallResult {
                 content: format!("# Skill: {}\n\n{}", skill.metadata.name, skill.instructions),
-                session_ends: false,
+                ..Default::default()
             });
         }
 

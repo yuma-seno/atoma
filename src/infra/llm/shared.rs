@@ -214,6 +214,69 @@ pub(crate) async fn send_json_with_retry<T: DeserializeOwned>(
 
 /// Shared OpenAI-compatible HTTP call used by OpenAI and Copilot providers.
 #[allow(clippy::too_many_arguments)]
+/// Move a tool result's pictures into a following `user` message.
+///
+/// The OpenAI schema has no way to return an image from a tool: a `tool`
+/// message's content is text. So a result that carries one becomes two
+/// messages — the tool result with its text, then a user message holding the
+/// pictures. It is the only route by which a model on this API ever sees them.
+///
+/// The synthetic message is built here and nowhere else. The session keeps the
+/// single tool message it recorded, so nothing about this reaches disk, and a
+/// run resumed against Anthropic — which can carry an image in a tool result —
+/// takes that path instead with no trace of this one.
+///
+/// Everything without pictures passes through as one message, unchanged.
+fn split_images_out_of_tool_message(message: Value) -> Vec<Value> {
+    if message.get("role").and_then(Value::as_str) != Some("tool") {
+        return vec![message];
+    }
+    let Some(blocks) = message.get("content").and_then(Value::as_array) else {
+        return vec![message];
+    };
+
+    let mut text = String::new();
+    let mut images = Vec::new();
+    for block in blocks {
+        match block.get("type").and_then(Value::as_str) {
+            Some("text") => {
+                if let Some(t) = block.get("text").and_then(Value::as_str) {
+                    if !text.is_empty() {
+                        text.push('\n');
+                    }
+                    text.push_str(t);
+                }
+            }
+            Some("image") => {
+                let (Some(data), Some(mime)) = (
+                    block.get("data").and_then(Value::as_str),
+                    block.get("mimeType").and_then(Value::as_str),
+                ) else {
+                    continue;
+                };
+                images.push(serde_json::json!({
+                    "type": "image_url",
+                    "image_url": { "url": format!("data:{};base64,{}", mime, data) },
+                }));
+            }
+            _ => {}
+        }
+    }
+
+    if images.is_empty() {
+        return vec![message];
+    }
+
+    let mut tool_message = message;
+    if let Some(obj) = tool_message.as_object_mut() {
+        obj.insert("content".to_string(), Value::String(text));
+    }
+    vec![
+        tool_message,
+        serde_json::json!({ "role": "user", "content": images }),
+    ]
+}
+
 pub async fn openai_compat_call(
     client: &reqwest::Client,
     base_url: &str,
@@ -226,7 +289,10 @@ pub async fn openai_compat_call(
 ) -> Result<ChatResponse> {
     let url = format!("{}/chat/completions", base_url.trim_end_matches('/'));
 
-    let llm_messages: Vec<Value> = messages.iter().map(|m| m.to_llm_value()).collect();
+    let llm_messages: Vec<Value> = messages
+        .iter()
+        .flat_map(|m| split_images_out_of_tool_message(m.to_llm_value()))
+        .collect();
     let mut body = serde_json::json!({
         "model": model,
         "messages": llm_messages,
@@ -522,5 +588,51 @@ mod tests {
             !is_truncated(&error),
             "wrong shape must not be treated as truncation"
         );
+    }
+}
+
+#[cfg(test)]
+mod tool_image_tests {
+    use super::split_images_out_of_tool_message;
+    use serde_json::{json, Value};
+
+    fn tool_with_image() -> Value {
+        json!({
+            "role": "tool",
+            "tool_call_id": "call_1",
+            "content": [
+                {"type": "text", "text": "Here is the screen:"},
+                {"type": "image", "data": "AAAA", "mimeType": "image/png"},
+            ],
+        })
+    }
+
+    // The OpenAI schema has no way to return an image from a tool, so the only
+    // route by which a model on this API ever sees one is a following user
+    // message.
+    #[test]
+    fn a_tool_result_with_a_picture_becomes_two_messages() {
+        let out = split_images_out_of_tool_message(tool_with_image());
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0]["role"], "tool");
+        assert_eq!(out[0]["content"], "Here is the screen:");
+        assert_eq!(out[0]["tool_call_id"], "call_1");
+        assert_eq!(out[1]["role"], "user");
+        assert_eq!(
+            out[1]["content"][0]["image_url"]["url"],
+            "data:image/png;base64,AAAA"
+        );
+    }
+
+    #[test]
+    fn a_text_only_tool_result_stays_one_message() {
+        let msg = json!({"role": "tool", "tool_call_id": "c", "content": "done"});
+        assert_eq!(split_images_out_of_tool_message(msg.clone()), vec![msg]);
+    }
+
+    #[test]
+    fn other_roles_are_untouched() {
+        let msg = json!({"role": "user", "content": "hello"});
+        assert_eq!(split_images_out_of_tool_message(msg.clone()), vec![msg]);
     }
 }

@@ -131,9 +131,15 @@ async fn execute_tool_calls(
                     tool_name,
                     result.content.len()
                 );
-                session
-                    .messages
-                    .push(Message::tool(&tool_call.id, &result.content));
+                session.messages.push(if result.images.is_empty() {
+                    Message::tool(&tool_call.id, &result.content)
+                } else {
+                    // A text-only result stays a plain string, which is what
+                    // every session written so far holds. Only a result that
+                    // actually carries pictures takes the block form, so the
+                    // change is invisible to the runs that do not use it.
+                    Message::tool_blocks(&tool_call.id, &result.content, &result.images)
+                });
                 if result.session_ends {
                     tracing::info!(
                         "Tool '{}' requested session suspension — will end after this iteration",
