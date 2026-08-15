@@ -254,7 +254,12 @@ fn reply_to_llm_response(raw: ResponsesReply) -> LlmResponse {
     for item in &raw.output {
         match item.get("type").and_then(Value::as_str) {
             Some("message") => {
-                for part in item.get("content").and_then(Value::as_array).into_iter().flatten() {
+                for part in item
+                    .get("content")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                {
                     if let Some(t) = part.get("text").and_then(Value::as_str) {
                         text.push_str(t);
                     }
@@ -423,9 +428,7 @@ mod tests {
             "incomplete_details": {"reason": "max_output_tokens"},
         }))
         .unwrap();
-        assert_eq!(
-            reply_to_llm_response(raw).choices[0].finish_reason.as_deref(),
-            Some("length")
-        );
+        let response = reply_to_llm_response(raw);
+        assert_eq!(response.choices[0].finish_reason.as_deref(), Some("length"));
     }
 }
