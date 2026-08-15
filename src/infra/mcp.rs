@@ -515,6 +515,7 @@ impl McpRegistry {
 
         Ok(crate::domain::ports::ToolCallResult {
             content,
+            images,
             session_ends,
         })
     }
@@ -523,7 +524,7 @@ impl McpRegistry {
         &mut self,
         prefixed_name: &str,
         arguments: &Value,
-    ) -> Result<(String, bool)> {
+    ) -> Result<(String, Vec<Value>, bool)> {
         let (server_name, tool_name) = prefixed_name
             .split_once("__")
             .context("Invalid tool name format (expected server__tool)")?;
