@@ -259,5 +259,4 @@ mod tests {
         let credentials = from_pairs(&[("A", "1"), ("B", "2")]);
         assert_eq!(credentials.expand("${A}-${B}-${A}"), "1-2-1");
     }
-
 }
