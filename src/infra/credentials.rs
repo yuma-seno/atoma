@@ -113,15 +113,6 @@ impl Credentials {
         self.get(name).is_some_and(|value| !value.is_empty())
     }
 
-    /// Every name this holds, for the strip set. Empty in environment mode,
-    /// which is correct: there is no declared set to derive from there.
-    pub fn names(&self) -> Vec<String> {
-        match &self.values {
-            Some(values) => values.keys().cloned().collect(),
-            None => Vec::new(),
-        }
-    }
-
     /// Replace `${NAME}` in `template` with the credential of that name.
     ///
     /// This is how a value reaches one tool server and not the others: the tools
@@ -269,11 +260,4 @@ mod tests {
         assert_eq!(credentials.expand("${A}-${B}-${A}"), "1-2-1");
     }
 
-    #[test]
-    fn names_are_empty_in_environment_mode() {
-        assert!(Credentials::from_environment().names().is_empty());
-        let mut names = from_pairs(&[("A", "1"), ("B", "2")]).names();
-        names.sort();
-        assert_eq!(names, vec!["A".to_string(), "B".to_string()]);
-    }
 }
