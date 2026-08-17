@@ -43,6 +43,16 @@ EXAMPLES:
   atoma init > atoma.toml"
 )]
 pub struct Cli {
+    /// Allow a debugger to attach to this process, at the cost of its confinement
+    ///
+    /// By default `atoma` makes itself non-dumpable, so a tool server it spawns
+    /// cannot read its environment or memory even though both run as the same
+    /// user. That also stops `gdb`, `strace` and `perf` attaching without `sudo`.
+    /// Pass this when debugging a run; the credentials this process holds are
+    /// then readable by anything running as you.
+    #[arg(long, global = true)]
+    pub no_process_protection: bool,
+
     #[command(subcommand)]
     pub command: Command,
 }

@@ -23,6 +23,17 @@ async fn main() -> Result<()> {
 
     let cli = Cli::parse();
 
+    // Before anything reads a credential, and before any tool server exists to
+    // read this process. See infra/process_protection.rs for what it closes and
+    // what it deliberately does not.
+    if cli.no_process_protection {
+        tracing::warn!(
+            "process protection disabled: a tool server running as this user can read this process's environment and memory, including the provider API key"
+        );
+    } else {
+        crate::infra::process_protection::harden_against_same_user_inspection();
+    }
+
     match cli.command {
         Command::Run {
             agent_def,

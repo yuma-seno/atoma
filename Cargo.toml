@@ -22,5 +22,12 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 toml = "0.8"
 
+# Linux only, and only for `prctl(PR_SET_DUMPABLE)` -- see
+# infra/process_protection.rs. Target-scoped so a macOS or Windows build does not
+# carry it; already in the tree transitively via tokio, so the dependency graph
+# does not grow.
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"
+
 [dev-dependencies]
 tempfile = "3"
