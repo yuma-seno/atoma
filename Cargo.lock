@@ -85,6 +85,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "clap",
+ "libc",
  "reqwest",
  "serde",
  "serde_json",
