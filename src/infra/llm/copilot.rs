@@ -5,6 +5,7 @@ use serde_json::Value;
 
 use crate::domain::ports::{LlmChoice, LlmPort, LlmResponse, LlmUsage};
 use crate::domain::session::Message;
+use crate::infra::credentials::Credentials;
 use crate::infra::llm::shared::openai_compat_call;
 
 const COPILOT_BASE_URL: &str = "https://api.githubcopilot.com";
@@ -58,10 +59,14 @@ pub struct CopilotClient {
 }
 
 impl CopilotClient {
-    pub async fn from_env(client: reqwest::Client) -> Result<Self> {
-        let github_token = std::env::var("ATOMA_COPILOT_TOKEN")
-            .or_else(|_| std::env::var("GITHUB_TOKEN"))
-            .or_else(|_| std::env::var("GH_TOKEN"))
+    pub async fn from_credentials(
+        client: reqwest::Client,
+        credentials: &Credentials,
+    ) -> Result<Self> {
+        let github_token = credentials
+            .get("ATOMA_COPILOT_TOKEN")
+            .or_else(|| credentials.get("GITHUB_TOKEN"))
+            .or_else(|| credentials.get("GH_TOKEN"))
             .context("ATOMA_COPILOT_TOKEN, GITHUB_TOKEN, or GH_TOKEN is required for the github-copilot provider")?;
         let copilot_token = exchange_copilot_token(&client, &github_token).await?;
         Ok(CopilotClient {

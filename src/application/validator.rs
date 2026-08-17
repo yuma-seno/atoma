@@ -165,7 +165,7 @@ mod tests {
     fn callable_by_rejects_unknown_values() {
         let dir = tempfile::tempdir().unwrap();
         let path = write_agent(dir.path(), "solo", "callable_by:\n  - human\n");
-        let result = validate(path, None, &FileAgentDefAdapter, &FileToolDefAdapter);
+        let result = validate(path, None, &FileAgentDefAdapter, &FileToolDefAdapter::default());
         assert!(result.is_err());
     }
 
@@ -173,7 +173,7 @@ mod tests {
     fn callable_by_accepts_known_values() {
         let dir = tempfile::tempdir().unwrap();
         let path = write_agent(dir.path(), "solo", "callable_by:\n  - user\n  - agent\n");
-        let result = validate(path, None, &FileAgentDefAdapter, &FileToolDefAdapter);
+        let result = validate(path, None, &FileAgentDefAdapter, &FileToolDefAdapter::default());
         assert!(result.is_ok());
     }
 
@@ -185,7 +185,7 @@ mod tests {
     fn extra_body_tools_must_be_an_array() {
         let dir = tempfile::tempdir().unwrap();
         let path = write_agent(dir.path(), "solo", "extra_body:\n  tools: web_search\n");
-        assert!(validate(path, None, &FileAgentDefAdapter, &FileToolDefAdapter).is_err());
+        assert!(validate(path, None, &FileAgentDefAdapter, &FileToolDefAdapter::default()).is_err());
     }
 
     #[test]
@@ -196,7 +196,7 @@ mod tests {
             "solo",
             "extra_body:\n  tools:\n    - type: openrouter:web_search\n",
         );
-        assert!(validate(path, None, &FileAgentDefAdapter, &FileToolDefAdapter).is_ok());
+        assert!(validate(path, None, &FileAgentDefAdapter, &FileToolDefAdapter::default()).is_ok());
     }
 
     #[test]
@@ -209,7 +209,7 @@ mod tests {
             "caller",
             "callable_by:\n  - user\nknows_about:\n  - helper\n",
         );
-        let result = validate(caller, None, &FileAgentDefAdapter, &FileToolDefAdapter);
+        let result = validate(caller, None, &FileAgentDefAdapter, &FileToolDefAdapter::default());
         assert!(result.is_err());
     }
 
@@ -222,7 +222,7 @@ mod tests {
             "caller",
             "callable_by:\n  - user\nknows_about:\n  - helper\n",
         );
-        let result = validate(caller, None, &FileAgentDefAdapter, &FileToolDefAdapter);
+        let result = validate(caller, None, &FileAgentDefAdapter, &FileToolDefAdapter::default());
         assert!(result.is_ok());
     }
 }

@@ -5,6 +5,7 @@ use serde_json::Value;
 
 use crate::domain::ports::{LlmChoice, LlmPort, LlmResponse, LlmUsage};
 use crate::domain::session::{Message, ToolCall, ToolCallFunction};
+use crate::infra::credentials::Credentials;
 use crate::infra::llm::shared::{send_json_with_retry, ChatChoice, ChatResponse, Usage};
 
 const ANTHROPIC_BASE_URL: &str = "https://api.anthropic.com";
@@ -19,8 +20,9 @@ pub struct AnthropicClient {
 }
 
 impl AnthropicClient {
-    pub fn from_env(client: reqwest::Client) -> Result<Self> {
-        let api_key = std::env::var("ANTHROPIC_API_KEY")
+    pub fn from_credentials(client: reqwest::Client, credentials: &Credentials) -> Result<Self> {
+        let api_key = credentials
+            .get("ANTHROPIC_API_KEY")
             .context("ANTHROPIC_API_KEY is required for the anthropic provider")?;
         let base_url =
             std::env::var("ANTHROPIC_BASE_URL").unwrap_or_else(|_| ANTHROPIC_BASE_URL.to_string());

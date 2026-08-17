@@ -22,6 +22,7 @@ use serde_json::Value;
 
 use crate::domain::ports::{LlmChoice, LlmPort, LlmResponse, LlmUsage};
 use crate::domain::session::{Message, ToolCall, ToolCallFunction};
+use crate::infra::credentials::Credentials;
 use crate::infra::llm::shared::send_json_with_retry;
 
 /// The same default as `openai.rs`, and it has to stay the same.
@@ -40,8 +41,9 @@ pub struct OpenAIResponsesClient {
 }
 
 impl OpenAIResponsesClient {
-    pub fn from_env(client: reqwest::Client) -> Result<Self> {
-        let api_key = std::env::var("OPENAI_API_KEY")
+    pub fn from_credentials(client: reqwest::Client, credentials: &Credentials) -> Result<Self> {
+        let api_key = credentials
+            .get("OPENAI_API_KEY")
             .context("OPENAI_API_KEY is required for the openai-responses provider")?;
         let base_url =
             std::env::var("OPENAI_BASE_URL").unwrap_or_else(|_| DEFAULT_BASE_URL.to_string());

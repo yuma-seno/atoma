@@ -5,6 +5,7 @@ use std::fs;
 use std::path::Path;
 
 use crate::domain::tool::{Hooks, ToolDef};
+use crate::infra::credentials::Credentials;
 
 /// YAML deserialization view — private to this module.
 #[derive(Deserialize)]
@@ -45,7 +46,7 @@ struct HooksConfig {
 ///     tool_allowlist: ["filesystem__*"]
 ///     before_tool: ./scripts/fs_guard.py
 /// ```
-pub fn load(path: &Path) -> Result<HashMap<String, ToolDef>> {
+pub fn load(path: &Path, credentials: &Credentials) -> Result<HashMap<String, ToolDef>> {
     let content = fs::read_to_string(path)
         .with_context(|| format!("Failed to read tools file: {:?}", path))?;
     let configs: HashMap<String, ToolConfig> = serde_yaml::from_str(&content)
@@ -84,7 +85,18 @@ pub fn load(path: &Path) -> Result<HashMap<String, ToolDef>> {
                 name: name.clone(),
                 command: cfg.command,
                 args: cfg.args,
-                env: cfg.env,
+                // `${NAME}` resolved here, against the run's credentials rather
+                // than the environment. This is what routes a credential to one
+                // server and not the others: a value reaches a tool only by being
+                // named in that tool's `env`.
+                //
+                // Values were literal before this, so a tools file written for an
+                // older atoma is unaffected -- there is nothing to expand in it.
+                env: cfg
+                    .env
+                    .into_iter()
+                    .map(|(key, value)| (key, credentials.expand(&value)))
+                    .collect(),
                 hooks,
             };
             Ok((name, def))
@@ -95,13 +107,35 @@ pub fn load(path: &Path) -> Result<HashMap<String, ToolDef>> {
 // ── Port adapter ──────────────────────────────────────────────────────────────
 
 /// File-system adapter implementing `ToolDefPort`.
-pub struct FileToolDefAdapter;
+///
+/// Holds the run's credentials rather than taking them per call, because the
+/// port's `load` is what the runner sees and adding a parameter there would push
+/// credentials through every caller that has no business with them.
+pub struct FileToolDefAdapter {
+    credentials: Credentials,
+}
+
+impl FileToolDefAdapter {
+    pub fn new(credentials: Credentials) -> Self {
+        Self { credentials }
+    }
+}
+
+impl Default for FileToolDefAdapter {
+    /// For `atoma validate` and for tests, which check a tools file's shape and
+    /// have no run to draw credentials from. Reading the environment is what
+    /// happened before credentials existed, and expanding a reference that is not
+    /// set yields empty, which validation does not care about.
+    fn default() -> Self {
+        Self::new(Credentials::from_environment())
+    }
+}
 
 impl crate::domain::ports::ToolDefPort for FileToolDefAdapter {
     fn load(
         &self,
         path: &std::path::Path,
     ) -> anyhow::Result<std::collections::HashMap<String, crate::domain::tool::ToolDef>> {
-        load(path)
+        load(path, &self.credentials)
     }
 }

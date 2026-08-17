@@ -4,6 +4,7 @@ use serde_json::Value;
 
 use crate::domain::ports::{LlmChoice, LlmPort, LlmResponse, LlmUsage};
 use crate::domain::session::Message;
+use crate::infra::credentials::Credentials;
 use crate::infra::llm::shared::openai_compat_call;
 
 pub(crate) const DEFAULT_OPENAI_BASE_URL: &str = "https://openrouter.ai/api/v1";
@@ -17,8 +18,8 @@ pub struct OpenAIClient {
 }
 
 impl OpenAIClient {
-    pub fn from_env(client: reqwest::Client) -> Result<Self> {
-        let api_key = std::env::var("OPENAI_API_KEY").context(
+    pub fn from_credentials(client: reqwest::Client, credentials: &Credentials) -> Result<Self> {
+        let api_key = credentials.get("OPENAI_API_KEY").context(
             "OPENAI_API_KEY is not set. Set OPENAI_API_KEY for OpenAI-compatible providers,\n\
              ANTHROPIC_API_KEY for Anthropic,\n\
              or ATOMA_COPILOT_TOKEN for GitHub Copilot.\n\

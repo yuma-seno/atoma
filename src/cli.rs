@@ -53,6 +53,21 @@ pub struct Cli {
     #[arg(long, global = true)]
     pub no_process_protection: bool,
 
+    /// Read credentials from a JSON file instead of the environment, and delete it
+    ///
+    /// The file is a flat `{"NAME": "value"}` object. When given, it is the ONLY
+    /// source of credentials — the environment is not consulted for them — and it
+    /// is removed as soon as it has been read, before any tool server starts.
+    ///
+    /// This exists because a value in an environment block cannot be taken back:
+    /// `/proc/<pid>/environ` keeps what was there at exec for the process's
+    /// lifetime, readable by anything running as the same user. A file's exposure
+    /// can be ended; an environment variable's cannot.
+    ///
+    /// Omit it to read credentials from the environment as usual.
+    #[arg(long, global = true, value_name = "FILE")]
+    pub credentials_file: Option<std::path::PathBuf>,
+
     #[command(subcommand)]
     pub command: Command,
 }

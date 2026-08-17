@@ -8,6 +8,7 @@ use anyhow::{Context, Result};
 use std::time::Duration;
 
 use crate::domain::ports::LlmPort;
+use crate::infra::credentials::Credentials;
 
 pub use anthropic::AnthropicClient;
 pub use copilot::CopilotClient;
@@ -40,6 +41,7 @@ fn resolve_timeout_secs(raw: Option<&str>) -> u64 {
 /// 3. Auto-detection based on available credentials
 pub async fn build_llm_client(
     provider_hint: Option<&str>,
+    credentials: &Credentials,
 ) -> Result<Box<dyn LlmPort + Send + Sync>> {
     let raw_timeout = std::env::var("ATOMA_LLM_TIMEOUT").ok();
     let timeout_secs = resolve_timeout_secs(raw_timeout.as_deref());
@@ -58,25 +60,41 @@ pub async fn build_llm_client(
     let provider = provider_hint
         .map(|s| s.to_string())
         .or_else(|| std::env::var("ATOMA_PROVIDER").ok())
-        .unwrap_or_else(auto_detect_provider);
+        .unwrap_or_else(|| auto_detect_provider(credentials));
 
     tracing::info!("LLM provider: {}", provider);
 
     match provider.as_str() {
-        "openai" => Ok(Box::new(OpenAIClient::from_env(http)?)),
-        "openai-responses" => Ok(Box::new(OpenAIResponsesClient::from_env(http)?)),
-        "github-copilot" => Ok(Box::new(CopilotClient::from_env(http).await?)),
-        "anthropic" => Ok(Box::new(AnthropicClient::from_env(http)?)),
+        "openai" => Ok(Box::new(OpenAIClient::from_credentials(http, credentials)?)),
+        "openai-responses" => Ok(Box::new(OpenAIResponsesClient::from_credentials(
+            http,
+            credentials,
+        )?)),
+        "github-copilot" => Ok(Box::new(
+            CopilotClient::from_credentials(http, credentials).await?,
+        )),
+        "anthropic" => Ok(Box::new(AnthropicClient::from_credentials(
+            http,
+            credentials,
+        )?)),
         other => anyhow::bail!(
             "Unknown provider '{other}'. Valid values: openai, openai-responses, github-copilot, anthropic"
         ),
     }
 }
 
-fn auto_detect_provider() -> String {
-    let has_github = std::env::var("ATOMA_COPILOT_TOKEN").is_ok();
-    let has_openai = std::env::var("OPENAI_API_KEY").is_ok();
-    let has_anthropic = std::env::var("ANTHROPIC_API_KEY").is_ok();
+/// Guess the provider from which credential the run was given.
+///
+/// Reads `credentials` rather than the environment directly, and that is the
+/// whole point of the parameter. When credentials arrive in a file the
+/// environment holds none of them, so an environment-based guess would answer
+/// "openai" for every run — and a project configured only for Anthropic would
+/// then fail with `OPENAI_API_KEY is not set`, a message about a provider it
+/// never asked for.
+fn auto_detect_provider(credentials: &Credentials) -> String {
+    let has_github = credentials.has("ATOMA_COPILOT_TOKEN");
+    let has_openai = credentials.has("OPENAI_API_KEY");
+    let has_anthropic = credentials.has("ANTHROPIC_API_KEY");
 
     if has_anthropic && !has_openai && !has_github {
         "anthropic".to_string()

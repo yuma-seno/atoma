@@ -34,6 +34,13 @@ async fn main() -> Result<()> {
         crate::infra::process_protection::harden_against_same_user_inspection();
     }
 
+    // Before the command runs, so the file is gone before anything could read it,
+    // and so a malformed one fails before any work is done.
+    let credentials = match cli.credentials_file.as_deref() {
+        Some(path) => infra::credentials::Credentials::from_file(path)?,
+        None => infra::credentials::Credentials::from_environment(),
+    };
+
     match cli.command {
         Command::Run {
             agent_def,
@@ -79,9 +86,12 @@ async fn main() -> Result<()> {
             let agent_def_port = infra::persistence::agent_def::FileAgentDefAdapter;
             let parsed_agent = AgentDefPort::parse(&agent_def_port, &resolved.agent_def)?;
             let provider_hint = parsed_agent.frontmatter.provider.as_deref();
-            let llm = infra::llm::build_llm_client(provider_hint).await?;
+            let llm = infra::llm::build_llm_client(provider_hint, &credentials).await?;
             let session_port = infra::persistence::session::FileSessionAdapter;
-            let tool_def_port = infra::persistence::tool_def::FileToolDefAdapter;
+            // Moved in after the client is built: the adapter owns the credentials
+            // from here on, and is what routes each one to the single tool server
+            // whose `env` names it.
+            let tool_def_port = infra::persistence::tool_def::FileToolDefAdapter::new(credentials);
             let skill_port = infra::persistence::skill::FileSkillAdapter;
             let mcp_factory = infra::mcp::McpRegistryFactory;
 
@@ -154,7 +164,7 @@ async fn main() -> Result<()> {
             tools_file,
         } => {
             let agent_def_port = infra::persistence::agent_def::FileAgentDefAdapter;
-            let tool_def_port = infra::persistence::tool_def::FileToolDefAdapter;
+            let tool_def_port = infra::persistence::tool_def::FileToolDefAdapter::default();
             application::validator::validate(agent_def, tools_file, &agent_def_port, &tool_def_port)
         }
         Command::Init => {
