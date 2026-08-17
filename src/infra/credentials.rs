@@ -65,12 +65,13 @@ impl Credentials {
         let content = fs::read_to_string(path)
             .with_context(|| format!("Failed to read credentials file: {:?}", path))?;
 
-        let values: HashMap<String, String> = serde_json::from_str(&content).with_context(|| {
-            format!(
-                "Credentials file is not a JSON object of name/value pairs: {:?}",
-                path
-            )
-        })?;
+        let values: HashMap<String, String> =
+            serde_json::from_str(&content).with_context(|| {
+                format!(
+                    "Credentials file is not a JSON object of name/value pairs: {:?}",
+                    path
+                )
+            })?;
 
         if let Err(error) = fs::remove_file(path) {
             tracing::warn!(
