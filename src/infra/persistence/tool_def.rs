@@ -5,7 +5,7 @@ use std::fs;
 use std::path::Path;
 
 use crate::domain::tool::{Hooks, ToolDef};
-use crate::infra::credentials::Credentials;
+use crate::infra::credentials::{expand_from_environment, Credentials};
 
 /// YAML deserialization view — private to this module.
 #[derive(Deserialize)]
@@ -84,7 +84,18 @@ pub fn load(path: &Path, credentials: &Credentials) -> Result<HashMap<String, To
             let def = ToolDef {
                 name: name.clone(),
                 command: cfg.command,
-                args: cfg.args,
+                // `${NAME}` here resolves against the ENVIRONMENT, not the
+                // credentials. These are program paths: the delivery runner uses
+                // one to point a tool server at a checkout of the default branch
+                // rather than at the pull request under review, so a path that
+                // only resolved when a credential of that name existed would be a
+                // trap. `${NAME:-default}` keeps a tools file working where the
+                // variable is unset, such as a hand-run `atoma`.
+                args: cfg
+                    .args
+                    .into_iter()
+                    .map(|arg| expand_from_environment(&arg))
+                    .collect(),
                 // `${NAME}` resolved here, against the run's credentials rather
                 // than the environment. This is what routes a credential to one
                 // server and not the others: a value reaches a tool only by being

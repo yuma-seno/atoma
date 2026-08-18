@@ -148,33 +148,66 @@ impl Credentials {
     /// server that cannot authenticate, and a log line saying why, not a run that
     /// refuses to start.
     pub fn expand(&self, template: &str) -> String {
-        let mut out = String::with_capacity(template.len());
-        let mut rest = template;
-
-        while let Some(start) = rest.find("${") {
-            out.push_str(&rest[..start]);
-            let after = &rest[start + 2..];
-            let Some(end) = after.find('}') else {
-                // No closing brace: not a reference, so it is literal text.
-                out.push_str(&rest[start..]);
-                return out;
-            };
-            let name = &after[..end];
-            match self.get(name) {
-                Some(value) => out.push_str(&value),
-                None => {
-                    tracing::warn!(
-                        name,
-                        "a tools file references a credential that is not available; the server will get an empty value"
-                    );
-                }
-            }
-            rest = &after[end + 1..];
-        }
-
-        out.push_str(rest);
-        out
+        expand_with(template, |name| self.get(name), "credential")
     }
+}
+
+/// Substitute `${NAME}` and `${NAME:-default}` from whatever `lookup` returns.
+///
+/// Shared by two callers that must NOT share a source. A credential belongs only
+/// in the environment of the server that declared it, so `env:` values resolve
+/// against the credentials; a program path is not a secret and must work when no
+/// credentials exist at all, so `args` resolve against the process environment.
+/// Keeping the substitution common and the sources separate is what stops a path
+/// from becoming a way to read a credential.
+///
+/// An unknown name expands to its default, or to empty with a warning when it has
+/// none. Failing the run instead would turn a project declaring a credential it
+/// has not added yet into a repository whose agents cannot start.
+fn expand_with(template: &str, lookup: impl Fn(&str) -> Option<String>, what: &str) -> String {
+    let mut out = String::with_capacity(template.len());
+    let mut rest = template;
+
+    while let Some(start) = rest.find("${") {
+        out.push_str(&rest[..start]);
+        let after = &rest[start + 2..];
+        let Some(end) = after.find('}') else {
+            // No closing brace: not a reference, so it is literal text.
+            out.push_str(&rest[start..]);
+            return out;
+        };
+
+        let (name, fallback) = match after[..end].split_once(":-") {
+            Some((name, fallback)) => (name, Some(fallback)),
+            None => (&after[..end], None),
+        };
+
+        match lookup(name) {
+            Some(value) => out.push_str(&value),
+            None => match fallback {
+                Some(fallback) => out.push_str(fallback),
+                None => tracing::warn!(
+                    name,
+                    what,
+                    "a tools file references something that is not available; it will be empty"
+                ),
+            },
+        }
+        rest = &after[end + 1..];
+    }
+
+    out.push_str(rest);
+    out
+}
+
+/// Substitute `${NAME}` in a tools file's `args` from the process environment.
+///
+/// Deliberately not the credentials. These are program paths -- which is how the
+/// delivery runner points a tool server at a checkout of the default branch
+/// rather than at the pull request under review -- and a path that only resolved
+/// when a credential of the same name existed would be a trap.
+pub fn expand_from_environment(template: &str) -> String {
+    expand_with(template, |name| std::env::var(name).ok(), "environment variable")
 }
 
 #[cfg(test)]
@@ -304,6 +337,26 @@ mod tests {
     fn expand_yields_empty_for_a_name_it_does_not_have() {
         let credentials = from_pairs(&[("A", "1")]);
         assert_eq!(credentials.expand("x${MISSING}y"), "xy");
+    }
+
+    /// A tools file has to keep working where the variable is unset -- a hand-run
+    /// `atoma` sets no machinery root, and a program path of `/…` would not exist.
+    #[test]
+    fn a_default_covers_an_absent_name() {
+        let credentials = from_pairs(&[("A", "1")]);
+        assert_eq!(credentials.expand("${MISSING:-fallback}"), "fallback");
+        assert_eq!(credentials.expand("${A:-fallback}"), "1");
+        assert_eq!(credentials.expand("${MISSING:-}/x"), "/x");
+    }
+
+    /// The split that keeps a program path from becoming a way to read a secret.
+    #[test]
+    fn args_expansion_reads_the_environment_and_not_the_credentials() {
+        // SAFETY: single-threaded test, and the names are unique to it.
+        unsafe { std::env::set_var("ATOMA_TEST_ARG_ROOT", "machinery") };
+        assert_eq!(expand_from_environment("${ATOMA_TEST_ARG_ROOT}/x.ts"), "machinery/x.ts");
+        assert_eq!(expand_from_environment("${ATOMA_TEST_ARG_ROOT_UNSET:-.}/x.ts"), "./x.ts");
+        unsafe { std::env::remove_var("ATOMA_TEST_ARG_ROOT") };
     }
 
     #[test]
