@@ -214,6 +214,32 @@ mod tests {
         );
     }
 
+    /// The ordering the guarantee rests on, pinned against a refactor.
+    ///
+    /// `from_file` deletes as it reads, so "the file is gone before any tool
+    /// server starts" holds only while the read happens before the command runs.
+    /// Move it after `match cli.command` and the file would sit on disk for the
+    /// whole run, readable by every server the agent spawns -- and nothing would
+    /// fail. The guarantee would simply be gone.
+    ///
+    /// Checking the source is crude, and it is the only thing that catches this:
+    /// a behavioural test would need a full agent run, and the failure it guards
+    /// against is invisible at runtime.
+    #[test]
+    fn credentials_are_read_before_the_command_runs() {
+        let main_rs = include_str!("../main.rs");
+        let read_at = main_rs
+            .find("Credentials::from_file")
+            .expect("main.rs must build credentials from a file");
+        let dispatch_at = main_rs
+            .find("match cli.command")
+            .expect("main.rs must dispatch on the subcommand");
+        assert!(
+            read_at < dispatch_at,
+            "credentials must be read (and the file deleted) before any command runs, or the file outlives the tool servers"
+        );
+    }
+
     #[test]
     fn a_malformed_file_fails_rather_than_yielding_nothing() {
         let dir = tempfile::tempdir().unwrap();
