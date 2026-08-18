@@ -207,7 +207,11 @@ fn expand_with(template: &str, lookup: impl Fn(&str) -> Option<String>, what: &s
 /// rather than at the pull request under review -- and a path that only resolved
 /// when a credential of the same name existed would be a trap.
 pub fn expand_from_environment(template: &str) -> String {
-    expand_with(template, |name| std::env::var(name).ok(), "environment variable")
+    expand_with(
+        template,
+        |name| std::env::var(name).ok(),
+        "environment variable",
+    )
 }
 
 #[cfg(test)]
@@ -354,8 +358,14 @@ mod tests {
     fn args_expansion_reads_the_environment_and_not_the_credentials() {
         // SAFETY: single-threaded test, and the names are unique to it.
         unsafe { std::env::set_var("ATOMA_TEST_ARG_ROOT", "machinery") };
-        assert_eq!(expand_from_environment("${ATOMA_TEST_ARG_ROOT}/x.ts"), "machinery/x.ts");
-        assert_eq!(expand_from_environment("${ATOMA_TEST_ARG_ROOT_UNSET:-.}/x.ts"), "./x.ts");
+        assert_eq!(
+            expand_from_environment("${ATOMA_TEST_ARG_ROOT}/x.ts"),
+            "machinery/x.ts"
+        );
+        assert_eq!(
+            expand_from_environment("${ATOMA_TEST_ARG_ROOT_UNSET:-.}/x.ts"),
+            "./x.ts"
+        );
         unsafe { std::env::remove_var("ATOMA_TEST_ARG_ROOT") };
     }
 
