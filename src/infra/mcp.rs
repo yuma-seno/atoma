@@ -95,6 +95,24 @@ impl McpConnection {
     pub async fn spawn(config: &ToolDef) -> Result<Self> {
         let mut cmd = Command::new(&config.command);
         cmd.args(&config.args);
+
+        // A tool server gets the credentials its own configuration names, and no
+        // others.
+        //
+        // Not `env_clear()`. A tool server needs PATH to find its interpreter,
+        // HOME for its package caches, LANG for its encoding, and an allowlist of
+        // that would be long, runtime-specific, and wrong the first time someone
+        // adds a Python server -- exactly the enumeration this codebase has been
+        // burned by before. Removing the credentials leaves everything a runtime
+        // needs untouched.
+        //
+        // The removal comes first and `envs` second, so a server that declares
+        // one of these gets it back. That is the whole routing mechanism: `github`
+        // says `GH_TOKEN: ${GH_TOKEN}` and receives it, `shell` says nothing and
+        // does not.
+        for name in crate::infra::credentials::CREDENTIAL_ENV_NAMES {
+            cmd.env_remove(name);
+        }
         cmd.envs(&config.env);
         cmd.stdin(std::process::Stdio::piped());
         cmd.stdout(std::process::Stdio::piped());

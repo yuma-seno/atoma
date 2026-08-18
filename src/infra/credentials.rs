@@ -42,6 +42,32 @@ use std::path::Path;
 
 use anyhow::{Context, Result};
 
+/// The environment variables this program treats as credentials.
+///
+/// Exactly the names atoma's own code reads a secret from — the provider keys in
+/// `infra/llm/*` and the GitHub tokens the tool servers authenticate with. Not an
+/// attempt to enumerate every secret a variable could hold; a list like that is
+/// wrong the moment someone invents a name nobody here thought of.
+///
+/// Used to keep them out of the environment of the tool servers this process
+/// spawns. A server that legitimately needs one names it in its own `env` in the
+/// tools file, which is applied after the removal and so puts it back — for that
+/// one server and no other.
+///
+/// In file mode this is mostly moot, because none of these are in this process's
+/// environment to begin with. It earns its place in environment mode, which is
+/// how a developer runs atoma by hand: there the provider key really is inherited
+/// by every server, and `shell` could read it out of its own environment without
+/// going anywhere near `/proc`.
+pub const CREDENTIAL_ENV_NAMES: &[&str] = &[
+    "ANTHROPIC_API_KEY",
+    "ATOMA_COPILOT_TOKEN",
+    "GH_TOKEN",
+    "GITHUB_PERSONAL_ACCESS_TOKEN",
+    "GITHUB_TOKEN",
+    "OPENAI_API_KEY",
+];
+
 /// The credential values available to this run.
 pub struct Credentials {
     /// `Some` when a file was supplied, and then the only source. `None` means
