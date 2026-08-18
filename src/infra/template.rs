@@ -21,6 +21,8 @@ Working directory: `{{WORKING_DIRECTORY}}`
 
 You interact with the environment through the Model Context Protocol (MCP). Do not guess code or environment state; always execute tools to verify facts.
 
+Each tool runs as its own process and receives only the credentials its own configuration declares. A credential you cannot see from one tool is confined, not missing: a shell that reports nothing for an API token is behaving as intended, and the tool that needs that token has it. Do not hardcode a value, hunt for it in other places, or conclude the setup is broken because a token is absent from where you looked. If a tool genuinely fails to authenticate, report which tool and what it said.
+
 {{AVAILABLE_TOOLS}}
 
 # Available Skills
