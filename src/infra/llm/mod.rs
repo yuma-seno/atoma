@@ -221,7 +221,10 @@ fn copilot_headers() -> Vec<(String, String)> {
     vec![
         ("Editor-Version".to_string(), pkg_id.clone()),
         ("Editor-Plugin-Version".to_string(), pkg_id),
-        ("Copilot-Integration-Id".to_string(), "atoma-cli".to_string()),
+        (
+            "Copilot-Integration-Id".to_string(),
+            "atoma-cli".to_string(),
+        ),
         (
             "Openai-Intent".to_string(),
             "conversation-panel".to_string(),
