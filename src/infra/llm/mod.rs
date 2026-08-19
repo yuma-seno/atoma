@@ -737,7 +737,11 @@ mod tests {
                 provider.name()
             );
             assert!(help.contains(provider.credential()), "{}", provider.name());
-            assert!(help.contains(provider.base_url_var()), "{}", provider.name());
+            assert!(
+                help.contains(provider.base_url_var()),
+                "{}",
+                provider.name()
+            );
         }
     }
 
