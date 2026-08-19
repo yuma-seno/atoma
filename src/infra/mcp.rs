@@ -8,20 +8,17 @@ use tokio::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command};
 use crate::domain::tool::{Hooks, ToolDef};
 use crate::infra::hooks;
 
+/// How long one `tools/list` or `tools/call` may take.
+const DEFAULT_REQUEST_TIMEOUT_SECS: u64 = 60;
+/// How long a server has to answer `initialize`, which includes its own startup.
+const DEFAULT_INIT_TIMEOUT_SECS: u64 = 120;
+
 fn request_timeout() -> Duration {
-    std::env::var("ATOMA_MCP_TIMEOUT")
-        .ok()
-        .and_then(|v| v.parse::<u64>().ok())
-        .map(Duration::from_secs)
-        .unwrap_or(Duration::from_secs(60))
+    crate::infra::timeouts::from_env("ATOMA_MCP_TIMEOUT", DEFAULT_REQUEST_TIMEOUT_SECS)
 }
 
 fn init_timeout() -> Duration {
-    std::env::var("ATOMA_MCP_INIT_TIMEOUT")
-        .ok()
-        .and_then(|v| v.parse::<u64>().ok())
-        .map(Duration::from_secs)
-        .unwrap_or(Duration::from_secs(120))
+    crate::infra::timeouts::from_env("ATOMA_MCP_INIT_TIMEOUT", DEFAULT_INIT_TIMEOUT_SECS)
 }
 
 /// Split an MCP tool result's `content` into the text the model reads and the

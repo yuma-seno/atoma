@@ -4,12 +4,11 @@ use std::time::Duration;
 
 use crate::domain::tool::Hooks;
 
+/// How long a `before_tool` hook may take before its tool is refused.
+const DEFAULT_HOOK_TIMEOUT_SECS: u64 = 30;
+
 fn hook_timeout() -> Duration {
-    std::env::var("ATOMA_HOOK_TIMEOUT")
-        .ok()
-        .and_then(|v| v.parse::<u64>().ok())
-        .map(Duration::from_secs)
-        .unwrap_or(Duration::from_secs(30))
+    crate::infra::timeouts::from_env("ATOMA_HOOK_TIMEOUT", DEFAULT_HOOK_TIMEOUT_SECS)
 }
 
 /// Returns `true` if `pattern` matches `value`.

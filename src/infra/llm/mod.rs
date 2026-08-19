@@ -26,12 +26,10 @@ const DEFAULT_LLM_TIMEOUT_SECS: u64 = 300;
 
 /// Resolve the request timeout from a raw `ATOMA_LLM_TIMEOUT` value.
 ///
-/// Absent, unparseable, and zero values all fall back to the default; a timeout
-/// of zero would mean "no timeout", which is never what an operator wants here.
+/// The rule lives in `infra::timeouts` now, because three other places read a timeout
+/// from the environment and only this one trimmed its input or refused zero.
 fn resolve_timeout_secs(raw: Option<&str>) -> u64 {
-    raw.and_then(|v| v.trim().parse::<u64>().ok())
-        .filter(|secs| *secs > 0)
-        .unwrap_or(DEFAULT_LLM_TIMEOUT_SECS)
+    crate::infra::timeouts::seconds_from(raw, DEFAULT_LLM_TIMEOUT_SECS)
 }
 
 /// Everything Atoma knows about one provider.

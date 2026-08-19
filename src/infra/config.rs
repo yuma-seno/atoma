@@ -40,8 +40,16 @@ pub struct DefaultsConfig {
     pub output: OutputFormat,
 }
 
+/// The iteration ceiling when nothing names one.
+///
+/// Written once because it is live in three ways: as the serde default when a config file
+/// exists without the field, as the fallback when no config file exists at all, and in the
+/// template `atoma init` writes. Two of those were separate literals, so changing one gave
+/// a run one ceiling with a config file and another without — both of them "the default".
+pub const DEFAULT_MAX_ITERATIONS: u32 = 50;
+
 fn default_max_iterations() -> u32 {
-    50
+    DEFAULT_MAX_ITERATIONS
 }
 
 /// Output format for the `atoma run` command.
@@ -201,7 +209,7 @@ pub fn resolve_run_config(
         .max_iterations
         .or_else(|| profile.as_ref().and_then(|p| p.max_iterations))
         .or_else(|| defaults.as_ref().map(|d| d.max_iterations))
-        .unwrap_or(50);
+        .unwrap_or(DEFAULT_MAX_ITERATIONS);
 
     let output = overrides
         .output
@@ -226,8 +234,13 @@ pub fn resolve_run_config(
 }
 
 /// Generate a default atoma.toml file.
+///
+/// A `format!` rather than one string, so the iteration ceiling it writes is the one the
+/// code uses. It was a third literal `50`: change the default and `atoma init` would keep
+/// writing the old one into every new configuration, which then silently held.
 pub fn generate_default_config() -> String {
-    r#"# Atoma configuration
+    format!(
+        r#"# Atoma configuration
 # See https://github.com/yuma-seno/atoma for documentation.
 
 [defaults]
@@ -235,7 +248,7 @@ pub fn generate_default_config() -> String {
 # tools_file = "tools.yaml"
 # skills_dir = "skills"
 # template = "templates/custom.md"
-max_iterations = 50
+max_iterations = {DEFAULT_MAX_ITERATIONS}
 # output = "text"   # "text" or "json"
 
 # Profile: overrides defaults when --profile is used
@@ -247,7 +260,7 @@ max_iterations = 50
 # [env]
 # OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 "#
-    .to_string()
+    )
 }
 
 #[cfg(test)]
