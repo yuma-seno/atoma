@@ -61,6 +61,7 @@ pub enum Dialect {
 ///
 /// Written out here, adding a provider is a row, and "what does this one do
 /// differently" has one place to be answered.
+#[derive(Debug)]
 pub struct Provider {
     /// The name in `ATOMA_PROVIDER`, and in an agent definition's `provider:`.
     pub name: &'static str,
