@@ -13,20 +13,36 @@ server tools in an autonomous inference loop.
 It does NOT depend on any specific platform (GitHub, etc.). It is a pure protocol \
 orchestrator: parse agent definition → call LLM → execute tools → repeat until final response.",
     after_long_help = "ENVIRONMENT VARIABLES:
-  OPENAI_API_KEY         (required*)  API key for the OpenAI-compatible endpoint
-  OPENAI_BASE_URL        (optional)   API base URL (default: https://openrouter.ai/api/v1)
-  ATOMA_COPILOT_TOKEN     (required*) GitHub PAT with `copilot` scope for GitHub Copilot mode
-                                       (fallback: GITHUB_TOKEN or GH_TOKEN)
-  ANTHROPIC_API_KEY      (required*)  API key for Anthropic (Claude) models
-  ANTHROPIC_BASE_URL     (optional)   Anthropic API base URL (default: https://api.anthropic.com)
-  ATOMA_PROVIDER         (optional)   Force provider: 'openai', 'github-copilot', or 'anthropic'
-                                       Auto-detected when unset.
+  One credential per provider, and the credential is what selects the provider
+  when ATOMA_PROVIDER is unset. Two of them set at once is an error rather than a
+  precedence: which one to use is not something the credentials decide.
+
+  OPENAI_API_KEY         (required*)  OpenAI, and any endpoint reached by pointing
+                                       OPENAI_BASE_URL somewhere else
+  OPENAI_BASE_URL        (optional)   default: https://api.openai.com/v1
+  OPENROUTER_API_KEY     (required*)  OpenRouter
+  OPENROUTER_BASE_URL    (optional)   default: https://openrouter.ai/api/v1
+  ORCAROUTER_API_KEY     (required*)  OrcaRouter
+  ORCAROUTER_BASE_URL    (optional)   default: https://api.orcarouter.ai/v1
+  ANTHROPIC_API_KEY      (required*)  Anthropic (Claude)
+  ANTHROPIC_BASE_URL     (optional)   default: https://api.anthropic.com
+  ATOMA_COPILOT_TOKEN    (required*)  GitHub PAT with `copilot` scope for GitHub Copilot
+                                       (fallback: GITHUB_TOKEN or GH_TOKEN, which do
+                                       not take part in auto-detection)
+  COPILOT_BASE_URL       (optional)   default: https://api.githubcopilot.com
+  ATOMA_PROVIDER         (optional)   Name the provider: 'openai', 'openai-responses',
+                                       'openrouter', 'orcarouter', 'anthropic', or
+                                       'github-copilot'. Auto-detected when unset.
+  ATOMA_APP_NAME         (optional)   Application name sent to routers that attribute
+                                       requests (OpenRouter). Default: atoma
+  ATOMA_APP_URL          (optional)   Application URL sent with it.
   ATOMA_LLM_TIMEOUT      (optional)   Per-request LLM timeout in seconds (default: 300)
   ATOMA_HOOK_TIMEOUT     (optional)   Hook script timeout in seconds (default: 30)
   ATOMA_MCP_TIMEOUT      (optional)   MCP tool call timeout in seconds (default: 60)
   ATOMA_MCP_INIT_TIMEOUT (optional)   MCP server init timeout in seconds (default: 120)
 
-  * One of OPENAI_API_KEY, ATOMA_COPILOT_TOKEN, or ANTHROPIC_API_KEY must be provided.
+  * Exactly one provider credential must be provided, unless ATOMA_PROVIDER or an
+    agent definition's `provider:` names which one to use.
 
 CONFIGURATION FILE:
   atoma.toml can be placed in the current directory or any ancestor directory.

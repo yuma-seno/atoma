@@ -5,10 +5,16 @@ This guide gets you from zero to a successful `atoma run` using only the current
 ## Prerequisites
 
 - Rust toolchain `1.95.0` (see `rust-toolchain.toml`).
-- One provider credential:
-  - `OPENAI_API_KEY` for `openai` provider.
-  - `ANTHROPIC_API_KEY` for `anthropic` provider.
-  - `ATOMA_COPILOT_TOKEN` for an auto-detected `github-copilot` provider.
+- One provider credential, which is also what selects the provider:
+  - `OPENAI_API_KEY` → `openai`
+  - `OPENROUTER_API_KEY` → `openrouter`
+  - `ORCAROUTER_API_KEY` → `orcarouter`
+  - `ANTHROPIC_API_KEY` → `anthropic`
+  - `ATOMA_COPILOT_TOKEN` → `github-copilot`
+
+Setting two of them is an error rather than a precedence. Name the provider with
+`ATOMA_PROVIDER` or an agent definition's `provider:` when more than one is
+available.
 
 `GITHUB_TOKEN` and `GH_TOKEN` are accepted as GitHub Copilot credentials only when you explicitly select `github-copilot` with agent frontmatter or `ATOMA_PROVIDER`.
 

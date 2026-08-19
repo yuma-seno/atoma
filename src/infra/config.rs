@@ -245,7 +245,7 @@ max_iterations = 50
 
 # Environment variables to set when running under this config
 # [env]
-# OPENAI_BASE_URL = "https://openrouter.ai/api/v1"
+# OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 "#
     .to_string()
 }

@@ -41,24 +41,38 @@ Provider resolution order:
 2. `ATOMA_PROVIDER` environment variable
 3. auto-detection
 
-Valid providers:
+One provider, one credential, one endpoint, and one variable that moves it:
 
-- `openai`
-- `github-copilot`
-- `anthropic`
+| Provider | Credential | Endpoint | Override |
+| --- | --- | --- | --- |
+| `openai` | `OPENAI_API_KEY` | `https://api.openai.com/v1` | `OPENAI_BASE_URL` |
+| `openai-responses` | `OPENAI_API_KEY` | `https://api.openai.com/v1` | `OPENAI_BASE_URL` |
+| `openrouter` | `OPENROUTER_API_KEY` | `https://openrouter.ai/api/v1` | `OPENROUTER_BASE_URL` |
+| `orcarouter` | `ORCAROUTER_API_KEY` | `https://api.orcarouter.ai/v1` | `ORCAROUTER_BASE_URL` |
+| `anthropic` | `ANTHROPIC_API_KEY` | `https://api.anthropic.com` | `ANTHROPIC_BASE_URL` |
+| `github-copilot` | `ATOMA_COPILOT_TOKEN` | `https://api.githubcopilot.com` | `COPILOT_BASE_URL` |
 
-Credential essentials:
+`openai` and `openai-responses` are one vendor reached two ways — chat completions
+and the Responses API — so they share a credential and an endpoint. That pair is also
+how to reach a provider with no row of its own: point `OPENAI_BASE_URL` at anything
+that speaks either dialect. What you give up by doing that instead of using a named
+provider is that the run's log says `openai`, so where it went is only visible in the
+environment.
 
-- `openai`: requires `OPENAI_API_KEY`
-- `github-copilot`: accepts `ATOMA_COPILOT_TOKEN`, `GITHUB_TOKEN`, or `GH_TOKEN`; only `ATOMA_COPILOT_TOKEN` participates in provider auto-detection
-- `anthropic`: requires `ANTHROPIC_API_KEY`
+**Auto-detection is by credential.** Exactly one present selects that provider; two
+present is an error naming both, because which to use is not something the
+credentials decide — name it with `ATOMA_PROVIDER` or the agent's `provider:`, or
+remove the one this run should not use. When `OPENAI_API_KEY` is the one present, the
+chat-completions row wins; `openai-responses` has to be asked for by name.
 
-When using only `GITHUB_TOKEN` or `GH_TOKEN`, select `github-copilot` explicitly in agent frontmatter or with `ATOMA_PROVIDER=github-copilot`.
+`github-copilot` also accepts `GITHUB_TOKEN` or `GH_TOKEN`, and those deliberately
+take no part in auto-detection: a run that talks to GitHub has one anyway, so
+detecting Copilot from them would make every such run ambiguous. Select
+`github-copilot` explicitly to use them.
 
-Optional provider endpoints:
-
-- `OPENAI_BASE_URL` (default: `https://openrouter.ai/api/v1`)
-- `ANTHROPIC_BASE_URL` (default: `https://api.anthropic.com`)
+`ATOMA_APP_NAME` and `ATOMA_APP_URL` are sent to routers that attribute requests to
+an application (OpenRouter reads them as `X-Title` and `HTTP-Referer`). Only the
+providers that read them receive them.
 
 ## Request timeout and retries
 
@@ -97,10 +111,10 @@ max_iterations = 30
 output = "json"
 
 [env]
-OPENAI_BASE_URL = "https://openrouter.ai/api/v1"
+ATOMA_PROVIDER = "openrouter"
 
 [profile.review.env]
-ATOMA_PROVIDER = "openai"
+ATOMA_PROVIDER = "anthropic"
 ```
 
 ## Paths and profile notes
