@@ -65,17 +65,29 @@ pub fn access_denial_reason(hooks: &Hooks, tool_name: &str) -> Option<String> {
     None
 }
 
-/// Validate hook configuration. Returns an error if both allowlist and denylist
-/// are non-empty, as the interaction between the two is ambiguous.
-/// Should be called during tool registration, not at call time.
-pub fn validate_hooks(hooks: &Hooks) -> Result<()> {
+/// Say what both lists together will do, at registration time.
+///
+/// This used to REFUSE that configuration as "ambiguous", and it is not: `check_access`
+/// above documents the precedence, `domain::tool::Hooks` documents it on the field
+/// ("Checked before the allowlist"), and a test in this file pins it. Three places
+/// describing behaviour, and a fourth calling the same configuration fatal — so a reader
+/// had no way to know which was true, and the tested behaviour was unreachable.
+///
+/// The refusal was also badly placed: `McpRegistry` spawns every server and filters its
+/// tools before reaching it, so the fatal error arrived after the subprocesses existed,
+/// and `atoma validate` never called it at all — a tools file it would have rejected
+/// passed validation clean.
+///
+/// So it warns instead. Both lists is unusual enough to mention and well-defined enough
+/// to allow.
+pub fn describe_hooks(name: &str, hooks: &Hooks) {
     if !hooks.tool_allowlist.is_empty() && !hooks.tool_denylist.is_empty() {
-        anyhow::bail!(
-            "Ambiguous hook configuration: both tool_allowlist and tool_denylist are set. \
-             Use one or the other, not both."
+        tracing::warn!(
+            "MCP server '{}' sets both tool_allowlist and tool_denylist. The denylist is \
+             checked first, so a tool matching both is blocked.",
+            name
         );
     }
-    Ok(())
 }
 
 /// Invoke the `before_tool` hook script.
@@ -249,6 +261,22 @@ mod tests {
         };
         assert!(check_access(&hooks, "read_file").is_ok());
         assert!(check_access(&hooks, "write_file").is_err());
+    }
+
+    #[test]
+    /// The behaviour `validate_hooks` used to make unreachable by refusing the very
+    /// configuration this exercises.
+    #[test]
+    fn both_lists_together_are_allowed_and_described() {
+        let hooks = Hooks {
+            tool_allowlist: vec!["a__*".to_string()],
+            tool_denylist: vec!["a__danger".to_string()],
+            ..Default::default()
+        };
+        // Nothing to assert but that it does not refuse: the warning is for a person.
+        describe_hooks("a", &hooks);
+        assert!(check_access(&hooks, "a__safe").is_ok());
+        assert!(check_access(&hooks, "a__danger").is_err());
     }
 
     #[test]

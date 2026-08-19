@@ -454,10 +454,10 @@ impl McpRegistry {
             .map(|c| (c.name.clone(), c.hooks.clone()))
             .collect();
 
-        // Validate hook configurations at registration time.
+        // Both lists together is allowed -- the denylist is checked first -- and worth
+        // saying out loud once, here, rather than refused as it used to be.
         for (name, h) in &hooks {
-            hooks::validate_hooks(h)
-                .with_context(|| format!("Invalid hooks for MCP server '{}'", name))?;
+            hooks::describe_hooks(name, h);
         }
 
         Ok(McpRegistry {

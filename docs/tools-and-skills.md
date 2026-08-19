@@ -47,7 +47,10 @@ Hook order:
 
 Hook rules:
 
-- `tool_allowlist` and `tool_denylist` are mutually exclusive. Setting both is invalid.
+- `tool_allowlist` and `tool_denylist` may both be set. The denylist is checked first,
+  so a tool matching both is blocked. Setting both logs a warning naming that order,
+  because it is unusual rather than wrong — it used to be refused as "ambiguous" while the
+  code, this document and a test all described the precedence.
 - Pattern matching supports exact match or trailing `*` wildcard.
 - `before_tool` is fail-closed:
   - non-zero exit, timeout, or invalid JSON blocks the call.
