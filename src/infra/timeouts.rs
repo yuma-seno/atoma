@@ -37,14 +37,26 @@ mod tests {
     #[test]
     fn a_usable_value_is_taken() {
         assert_eq!(seconds_from(Some("900"), 300), 900);
-        assert_eq!(seconds_from(Some("  120 "), 300), 120, "a CI value with a space");
+        assert_eq!(
+            seconds_from(Some("  120 "), 300),
+            120,
+            "a CI value with a space"
+        );
     }
 
     /// The four ways a value says nothing. Zero is the one three of the four call sites
     /// used to accept, turning a stall detector into an immediate failure.
     #[test]
     fn nothing_usable_means_the_default() {
-        for raw in [None, Some(""), Some("   "), Some("abc"), Some("-5"), Some("12.5"), Some("0")] {
+        for raw in [
+            None,
+            Some(""),
+            Some("   "),
+            Some("abc"),
+            Some("-5"),
+            Some("12.5"),
+            Some("0"),
+        ] {
             assert_eq!(seconds_from(raw, 300), 300, "{raw:?}");
         }
     }
