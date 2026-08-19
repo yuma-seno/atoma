@@ -446,7 +446,9 @@ fn detect<'a>(
     let mut found: Vec<&'a dyn Provider> = Vec::new();
     for provider in providers.iter().copied() {
         if present(provider.credential())
-            && !found.iter().any(|p| p.credential() == provider.credential())
+            && !found
+                .iter()
+                .any(|p| p.credential() == provider.credential())
         {
             found.push(provider);
         }
