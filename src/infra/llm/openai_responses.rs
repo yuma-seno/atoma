@@ -463,7 +463,7 @@ mod tests {
         let calls = choice.message.tool_calls.as_ref().unwrap();
         assert_eq!(calls[0].id, "c1");
         assert_eq!(calls[0].function.name, "shell");
-        assert_eq!(choice.finish_reason.as_deref(), Some("stop"));
+        assert_eq!(choice.finish_reason, Some(FinishReason::Stop));
         assert_eq!(response.usage.unwrap().total_tokens, 15);
     }
 
@@ -478,6 +478,6 @@ mod tests {
         }))
         .unwrap();
         let response = reply_to_llm_response(raw);
-        assert_eq!(response.choices[0].finish_reason.as_deref(), Some("length"));
+        assert_eq!(response.choices[0].finish_reason, Some(FinishReason::Length));
     }
 }
