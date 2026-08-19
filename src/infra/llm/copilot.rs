@@ -7,8 +7,6 @@ use crate::domain::ports::{LlmChoice, LlmPort, LlmResponse, LlmUsage};
 use crate::domain::session::Message;
 use crate::infra::credentials::Credentials;
 use crate::infra::llm::shared::openai_compat_call;
-
-
 /// Exchange a GitHub PAT for a short-lived GitHub Copilot API token.
 async fn exchange_copilot_token(client: &reqwest::Client, github_token: &str) -> Result<String> {
     const COPILOT_AUTH_URL: &str = "https://api.github.com/copilot_internal/v2/token";

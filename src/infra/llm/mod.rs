@@ -167,8 +167,8 @@ fn provider_names() -> String {
 fn attribution_headers() -> Vec<(String, String)> {
     let name =
         std::env::var("ATOMA_APP_NAME").unwrap_or_else(|_| env!("CARGO_PKG_NAME").to_string());
-    let url = std::env::var("ATOMA_APP_URL")
-        .unwrap_or_else(|_| env!("CARGO_PKG_REPOSITORY").to_string());
+    let url =
+        std::env::var("ATOMA_APP_URL").unwrap_or_else(|_| env!("CARGO_PKG_REPOSITORY").to_string());
     vec![
         ("X-Title".to_string(), name.clone()),
         ("X-OpenRouter-Title".to_string(), name),
@@ -201,10 +201,12 @@ fn resolve_provider(
 }
 
 fn by_name(name: &str) -> Result<&'static Provider> {
-    PROVIDERS
-        .iter()
-        .find(|p| p.name == name)
-        .with_context(|| format!("Unknown provider '{name}'. Valid values: {}", provider_names()))
+    PROVIDERS.iter().find(|p| p.name == name).with_context(|| {
+        format!(
+            "Unknown provider '{name}'. Valid values: {}",
+            provider_names()
+        )
+    })
 }
 
 /// The provider whose credential is present.
