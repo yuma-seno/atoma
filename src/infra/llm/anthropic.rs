@@ -5,7 +5,9 @@ use serde_json::Value;
 
 use crate::domain::ports::{LlmChoice, LlmPort, LlmResponse, LlmUsage};
 use crate::domain::session::{Message, ToolCall, ToolCallFunction};
-use crate::infra::llm::shared::{send_json_with_retry, ChatChoice, ChatResponse, Usage};
+use crate::infra::llm::shared::{
+    send_json_with_retry, ChatChoice, ChatResponse, Usage, RESERVED_KEYS,
+};
 
 const ANTHROPIC_API_VERSION: &str = "2023-06-01";
 const ANTHROPIC_DEFAULT_MAX_TOKENS: u64 = 8192;
@@ -165,18 +167,16 @@ fn build_request_body(
         body["tool_choice"] = serde_json::json!({ "type": "auto" });
     }
 
+    // The shared reservations plus this dialect's own, rather than a written-out list
+    // that happens to overlap. `tools` and `tool_choice` are reserved HERE and not in
+    // the shared set on purpose: Anthropic's tool shape uses `input_schema`, not
+    // `parameters`, so appending an OpenAI-shaped definition from `extra_body` would
+    // send this endpoint something it cannot read. `max_tokens` is required by this API
+    // and computed above.
+    const ALSO_RESERVED: [&str; 3] = ["max_tokens", "tools", "tool_choice"];
     if let Some(obj) = body.as_object_mut() {
         for (k, v) in extra_body {
-            if ![
-                "model",
-                "messages",
-                "max_tokens",
-                "system",
-                "tools",
-                "tool_choice",
-            ]
-            .contains(&k.as_str())
-            {
+            if !RESERVED_KEYS.contains(&k.as_str()) && !ALSO_RESERVED.contains(&k.as_str()) {
                 obj.insert(k.clone(), v.clone());
             }
         }

@@ -80,9 +80,13 @@ pub fn validate(
             }
         }
 
-        const RESERVED: &[&str] = &["model", "messages"];
-        for key in RESERVED {
-            if agent.extra_body.contains_key(*key) {
+        // The adapters' own list, not a copy of it. This was `["model", "messages"]`
+        // written out here, so `validate` passed an `extra_body.input` that the Responses
+        // adapter drops and an `extra_body.system` that Anthropic's does -- reporting a
+        // configuration as sound while two of the three dialects quietly ignored part of
+        // it.
+        for key in crate::infra::llm::shared::RESERVED_KEYS {
+            if agent.extra_body.contains_key(key) {
                 errors.push(format!(
                     "extra_body contains reserved key '{}' which would be silently ignored",
                     key
@@ -90,17 +94,10 @@ pub fn validate(
             }
         }
 
-        // `extra_body.tools` is appended to the runtime tool definitions rather
-        // than replacing them, which is only possible for an array.
-        if let Some(tools) = agent.extra_body.get("tools") {
-            if !tools.is_array() {
-                errors.push(
-                    "extra_body 'tools' must be an array so it can be merged with the \
-                     runtime tool definitions"
-                        .to_string(),
-                );
-            }
-        }
+        // No `tools` shape check here. A non-array is not fatal -- `reconcile_tools` keeps
+        // the runtime definitions and warns at run time -- and this function reports only
+        // errors, so its only way to speak was to call a tolerated configuration invalid.
+        // Being stricter than the code it describes is its own kind of wrong answer.
 
         if let Some(ref tools_path) = tools_file {
             match tool_def_port.load(tools_path) {
@@ -187,12 +184,11 @@ mod tests {
         assert!(result.is_ok());
     }
 
-    // Individual reasons are printed to stderr rather than returned (the error
-    // is a flat "Validation failed"), so these two assert as a pair: the
-    // fixtures differ only in the shape of `extra_body.tools`, which is what
-    // isolates the check being exercised.
+    // A non-array `tools` is TOLERATED: `reconcile_tools` keeps the runtime definitions
+    // and warns. This used to assert the opposite, pinning a validator that was stricter
+    // than the code it described.
     #[test]
-    fn extra_body_tools_must_be_an_array() {
+    fn a_non_array_tools_is_not_a_validation_failure() {
         let dir = tempfile::tempdir().unwrap();
         let path = write_agent(dir.path(), "solo", "extra_body:\n  tools: web_search\n");
         assert!(validate(
@@ -201,7 +197,32 @@ mod tests {
             &FileAgentDefAdapter,
             &FileToolDefAdapter::default()
         )
-        .is_err());
+        .is_ok());
+    }
+
+    /// Every key any adapter assembles itself. `input` and `system` are the two that
+    /// used to pass validation and then be silently dropped by the Responses and
+    /// Anthropic adapters respectively.
+    #[test]
+    fn a_reserved_key_fails_validation_including_the_ones_only_one_dialect_owns() {
+        for key in ["model", "messages", "input", "system", "store"] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = write_agent(
+                dir.path(),
+                "solo",
+                &format!("extra_body:\n  {key}: something\n"),
+            );
+            assert!(
+                validate(
+                    path,
+                    None,
+                    &FileAgentDefAdapter,
+                    &FileToolDefAdapter::default()
+                )
+                .is_err(),
+                "{key} should be refused"
+            );
+        }
     }
 
     #[test]

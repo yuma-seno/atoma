@@ -22,7 +22,7 @@ use serde_json::Value;
 
 use crate::domain::ports::{LlmChoice, LlmPort, LlmResponse, LlmUsage};
 use crate::domain::session::{Message, ToolCall, ToolCallFunction};
-use crate::infra::llm::shared::send_json_with_retry;
+use crate::infra::llm::shared::{merge_extra_body, send_json_with_retry};
 
 pub struct OpenAIResponsesClient {
     pub(crate) client: reqwest::Client,
@@ -122,12 +122,13 @@ fn build_request_body(
         body["tool_choice"] = Value::String("auto".to_string());
     }
 
+    // The shared policy, not a second one. This adapter's own version of this loop
+    // inserted `tools` straight over the definitions written above, so an agent
+    // carrying OpenRouter's server tools in `extra_body` sent those two and no MCP
+    // schemas at all — leaving the model to infer argument shapes from the names in
+    // the system prompt.
     if let Some(obj) = body.as_object_mut() {
-        for (key, value) in extra_body {
-            if !["model", "input", "messages"].contains(&key.as_str()) {
-                obj.insert(key.clone(), value.clone());
-            }
-        }
+        merge_extra_body(obj, extra_body);
     }
 
     body

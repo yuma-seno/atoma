@@ -44,7 +44,18 @@ async fn retry_delay(attempt: u8, reason: &str) {
 }
 
 /// Request keys Atoma owns outright; `extra_body` may not set them.
-const RESERVED_KEYS: [&str; 2] = ["model", "messages"];
+///
+/// Every name any adapter assembles itself, not only the ones this dialect uses.
+/// Each adapter used to carry its own list — `["model","messages"]` here,
+/// `["model","input","messages"]` in the Responses adapter, six names inline in the
+/// Anthropic one, and a fourth copy in `application::validator`. Four lists meant four
+/// answers to "may an agent set this", and `atoma validate` was checking against the
+/// one that did not apply.
+///
+/// `tools` is deliberately NOT here: an agent may add to it, which is what
+/// [`reconcile_tools`] is for. Reserving it would break OpenRouter's server tools;
+/// letting it through plainly would drop every MCP schema.
+pub const RESERVED_KEYS: [&str; 5] = ["model", "messages", "input", "system", "store"];
 
 /// Reconcile an `extra_body` `tools` value with the runtime tool definitions.
 ///
@@ -83,7 +94,13 @@ fn reconcile_tools(runtime: Option<&Value>, extra: &Value) -> Option<Value> {
 ///
 /// Reserved keys are dropped; `tools` is merged with what the runtime already
 /// put there; everything else overrides.
-fn merge_extra_body(
+///
+/// `pub` because it is the policy rather than this dialect's helper. The Responses
+/// adapter assembled its own version of this loop and left out the `tools`
+/// reconciliation, so on that path an agent's `extra_body.tools` REPLACED every MCP
+/// tool definition — the exact failure documented on [`reconcile_tools`], on the path
+/// this repository's own agents actually use.
+pub fn merge_extra_body(
     body: &mut serde_json::Map<String, Value>,
     extra_body: &std::collections::HashMap<String, Value>,
 ) {
