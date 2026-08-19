@@ -73,7 +73,10 @@ impl LlmPort for AnthropicClient {
                 .into_iter()
                 .map(|c| LlmChoice {
                     message: c.message,
-                    finish_reason: c.finish_reason.as_deref().and_then(FinishReason::from_openai),
+                    finish_reason: c
+                        .finish_reason
+                        .as_deref()
+                        .and_then(FinishReason::from_openai),
                 })
                 .collect(),
             usage: resp.usage.map(|u| LlmUsage {

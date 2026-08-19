@@ -65,7 +65,10 @@ impl LlmPort for OpenAIClient {
                     // The canonical spelling is this dialect's own, so a value that
                     // does not read is a provider inventing one — `None`, and the runner
                     // says so, rather than being quietly taken for `stop`.
-                    finish_reason: c.finish_reason.as_deref().and_then(FinishReason::from_openai),
+                    finish_reason: c
+                        .finish_reason
+                        .as_deref()
+                        .and_then(FinishReason::from_openai),
                 })
                 .collect(),
             usage: resp.usage.map(|u| LlmUsage {
