@@ -51,7 +51,7 @@ fn resolve_timeout_secs(raw: Option<&str>) -> u64 {
 /// row carries. Copilot overrides it: it accepts a GitHub token under three names,
 /// which is a rule of that provider rather than an exception to the design.
 #[async_trait]
-pub trait ClientFactory: Sync {
+pub trait ClientFactory: Sync + std::fmt::Debug {
     /// The wire format's name, for tests and for saying what a row selected.
     fn dialect(&self) -> &'static str;
 
@@ -70,6 +70,7 @@ pub trait ClientFactory: Sync {
 }
 
 /// `POST {base}/chat/completions`.
+#[derive(Debug)]
 struct ChatCompletions;
 
 #[async_trait]
@@ -92,6 +93,7 @@ impl ClientFactory for ChatCompletions {
 }
 
 /// `POST {base}/responses`.
+#[derive(Debug)]
 struct Responses;
 
 #[async_trait]
@@ -114,6 +116,7 @@ impl ClientFactory for Responses {
 }
 
 /// `POST {base}/v1/messages`, Anthropic's own format.
+#[derive(Debug)]
 struct AnthropicMessages;
 
 #[async_trait]
@@ -134,6 +137,7 @@ impl ClientFactory for AnthropicMessages {
 }
 
 /// Chat completions, reached with a token exchanged from a GitHub credential.
+#[derive(Debug)]
 struct CopilotChat;
 
 #[async_trait]
