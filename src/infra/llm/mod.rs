@@ -34,125 +34,242 @@ fn resolve_timeout_secs(raw: Option<&str>) -> u64 {
         .unwrap_or(DEFAULT_LLM_TIMEOUT_SECS)
 }
 
-/// How a provider's endpoint and credential become something callable.
+/// Everything Atoma knows about one provider.
 ///
-/// This was an enum and a `match` in `build_llm_client`, which meant adding a
-/// provider touched shared control flow — the thing the table was supposed to stop.
-/// An interface with one implementation per wire format leaves nothing central to
-/// edit: a row names its own.
+/// One interface, one instance per provider, the instances in `PROVIDERS`. A provider
+/// is added by adding a line there and removed by deleting one; nothing else in this
+/// file names any provider in particular.
 ///
-/// Per wire FORMAT and not per provider, because that is the axis the code varies
-/// on. What separates `openrouter` from `orcarouth` is data — a name, a credential,
-/// a host — and eight implementations differing only in data would be the
-/// copy-and-paste this file exists to remove. What separates chat completions from
-/// Responses is a URL path, a request shape and a response shape, which is code.
+/// Two arrangements preceded this. Four constructors that each read their own
+/// environment variable with their own default — which is how `github-copilot` came to
+/// have no configurable endpoint with nothing saying whether that was deliberate, and
+/// how one router's attribution headers came to be sent to every provider. Then a data
+/// table with an enum that `build_llm_client` matched on, which put "which client does
+/// this one build" back into shared control flow.
 ///
-/// `credential` has a default because for five of the six it is exactly the name the
-/// row carries. Copilot overrides it: it accepts a GitHub token under three names,
-/// which is a rule of that provider rather than an exception to the design.
+/// The defaults below are the whole of what is common: an endpoint is a default plus
+/// the variable that moves it, and a credential is a name looked up with an error that
+/// says which provider wanted it. Anything a provider does differently, it does in its
+/// own implementation.
 #[async_trait]
-pub trait ClientFactory: Sync + std::fmt::Debug {
-    /// The wire format's name, for tests and for saying what a row selected.
+pub trait Provider: Sync + std::fmt::Debug {
+    /// The name in `ATOMA_PROVIDER`, and in an agent definition's `provider:`.
+    fn name(&self) -> &'static str;
+
+    /// The credential this provider authenticates with.
+    ///
+    /// One provider, one name, which is what makes auto-detection an answer rather
+    /// than a guess. `OPENAI_API_KEY` used to authenticate anything speaking OpenAI's
+    /// dialect, OpenRouter included, so the name said nothing about where the key
+    /// would be sent.
+    fn credential(&self) -> &'static str;
+
+    /// Where its requests go, unless an operator says otherwise.
+    fn default_base_url(&self) -> &'static str;
+
+    /// What says otherwise. Every provider has one; none is a special case.
+    fn base_url_var(&self) -> &'static str;
+
+    /// The wire format, for the log line and for tests.
+    ///
+    /// An endpoint alone leaves "is this host being asked for `/chat/completions` or
+    /// `/responses`" unanswered, which is what an operator pointing a base URL at
+    /// their own gateway needs to know.
     fn dialect(&self) -> &'static str;
 
-    /// The credential to authenticate with, by default the one the row names.
-    fn credential(&self, provider: &Provider, credentials: &Credentials) -> Result<String> {
-        credential_for(provider, credentials)
-    }
-
-    async fn build(
+    /// Build the client. How this provider is reached is entirely in here.
+    async fn connect(
         &self,
         http: reqwest::Client,
-        base_url: String,
-        headers: Vec<(String, String)>,
-        credential: String,
+        credentials: &Credentials,
     ) -> Result<Box<dyn LlmPort + Send + Sync>>;
+
+    /// The endpoint in effect: the default, or what the environment replaced it with.
+    fn base_url(&self) -> String {
+        std::env::var(self.base_url_var()).unwrap_or_else(|_| self.default_base_url().to_string())
+    }
+
+    /// The credential's value, or an error naming what to set and for whom.
+    fn api_key(&self, credentials: &Credentials) -> Result<String> {
+        credentials.get(self.credential()).with_context(|| {
+            format!(
+                "{} is not set, and the {} provider authenticates with it. Set it, or choose \
+                 another provider with ATOMA_PROVIDER (one of: {}).",
+                self.credential(),
+                self.name(),
+                provider_names(),
+            )
+        })
+    }
 }
 
-/// `POST {base}/chat/completions`.
+/// A provider reached over OpenAI's chat-completions dialect.
+///
+/// Three providers are this and differ only in a name, a credential, a host and which
+/// headers they read — so they are three instances rather than three implementations.
+/// One that needed to do something differently would be its own type, the way
+/// `Anthropic` and `GitHubCopilot` are.
 #[derive(Debug)]
-struct ChatCompletions;
+struct ChatCompletions {
+    name: &'static str,
+    credential: &'static str,
+    default_base_url: &'static str,
+    base_url_var: &'static str,
+    /// Headers this provider wants that no other should receive.
+    ///
+    /// `no_headers` for most, which is an answer rather than an omission. The generic
+    /// client used to attach OpenRouter's attribution headers unconditionally, so real
+    /// OpenAI received `X-OpenRouter-Title` too.
+    headers: fn() -> Vec<(String, String)>,
+}
 
 #[async_trait]
-impl ClientFactory for ChatCompletions {
+impl Provider for ChatCompletions {
+    fn name(&self) -> &'static str {
+        self.name
+    }
+    fn credential(&self) -> &'static str {
+        self.credential
+    }
+    fn default_base_url(&self) -> &'static str {
+        self.default_base_url
+    }
+    fn base_url_var(&self) -> &'static str {
+        self.base_url_var
+    }
     fn dialect(&self) -> &'static str {
         "chat-completions"
     }
 
-    async fn build(
+    async fn connect(
         &self,
         http: reqwest::Client,
-        base_url: String,
-        headers: Vec<(String, String)>,
-        credential: String,
+        credentials: &Credentials,
     ) -> Result<Box<dyn LlmPort + Send + Sync>> {
         Ok(Box::new(OpenAIClient::new(
-            http, base_url, credential, headers,
+            http,
+            self.base_url(),
+            self.api_key(credentials)?,
+            (self.headers)(),
         )))
     }
 }
 
-/// `POST {base}/responses`.
+/// A provider reached over OpenAI's Responses API.
+///
+/// Its own type rather than a flag on the one above, because what differs is a URL
+/// path, a request shape and a response shape — code, not data.
 #[derive(Debug)]
-struct Responses;
+struct Responses {
+    name: &'static str,
+    credential: &'static str,
+    default_base_url: &'static str,
+    base_url_var: &'static str,
+}
 
 #[async_trait]
-impl ClientFactory for Responses {
+impl Provider for Responses {
+    fn name(&self) -> &'static str {
+        self.name
+    }
+    fn credential(&self) -> &'static str {
+        self.credential
+    }
+    fn default_base_url(&self) -> &'static str {
+        self.default_base_url
+    }
+    fn base_url_var(&self) -> &'static str {
+        self.base_url_var
+    }
     fn dialect(&self) -> &'static str {
         "responses"
     }
 
-    async fn build(
+    async fn connect(
         &self,
         http: reqwest::Client,
-        base_url: String,
-        _headers: Vec<(String, String)>,
-        credential: String,
+        credentials: &Credentials,
     ) -> Result<Box<dyn LlmPort + Send + Sync>> {
         Ok(Box::new(OpenAIResponsesClient::new(
-            http, base_url, credential,
+            http,
+            self.base_url(),
+            self.api_key(credentials)?,
         )))
     }
 }
 
-/// `POST {base}/v1/messages`, Anthropic's own format.
+/// Anthropic, over its own Messages format.
 #[derive(Debug)]
-struct AnthropicMessages;
+struct Anthropic;
 
 #[async_trait]
-impl ClientFactory for AnthropicMessages {
+impl Provider for Anthropic {
+    fn name(&self) -> &'static str {
+        "anthropic"
+    }
+    fn credential(&self) -> &'static str {
+        "ANTHROPIC_API_KEY"
+    }
+    fn default_base_url(&self) -> &'static str {
+        "https://api.anthropic.com"
+    }
+    fn base_url_var(&self) -> &'static str {
+        "ANTHROPIC_BASE_URL"
+    }
     fn dialect(&self) -> &'static str {
         "anthropic-messages"
     }
 
-    async fn build(
+    async fn connect(
         &self,
         http: reqwest::Client,
-        base_url: String,
-        _headers: Vec<(String, String)>,
-        credential: String,
+        credentials: &Credentials,
     ) -> Result<Box<dyn LlmPort + Send + Sync>> {
-        Ok(Box::new(AnthropicClient::new(http, base_url, credential)))
+        Ok(Box::new(AnthropicClient::new(
+            http,
+            self.base_url(),
+            self.api_key(credentials)?,
+        )))
     }
 }
 
-/// Chat completions, reached with a token exchanged from a GitHub credential.
+/// GitHub Copilot: chat completions, reached with a token exchanged from a GitHub
+/// credential.
+///
+/// Its own type because three of its rules are its own — the exchange, the four
+/// headers its endpoint requires, and accepting a GitHub token under three names. All
+/// three used to sit inside its client and its constructor, where they read as
+/// exceptions to something rather than as this provider's own behaviour.
 #[derive(Debug)]
-struct CopilotChat;
+struct GitHubCopilot;
 
 #[async_trait]
-impl ClientFactory for CopilotChat {
+impl Provider for GitHubCopilot {
+    fn name(&self) -> &'static str {
+        "github-copilot"
+    }
+
+    /// The one name auto-detection may read.
+    ///
+    /// It accepts two more in `api_key`, and deliberately does not advertise them
+    /// here: a run that talks to GitHub holds `GH_TOKEN` anyway, so detecting Copilot
+    /// from that would make every such run ambiguous.
+    fn credential(&self) -> &'static str {
+        "ATOMA_COPILOT_TOKEN"
+    }
+    fn default_base_url(&self) -> &'static str {
+        "https://api.githubcopilot.com"
+    }
+    fn base_url_var(&self) -> &'static str {
+        "COPILOT_BASE_URL"
+    }
     fn dialect(&self) -> &'static str {
         "copilot-chat"
     }
 
-    /// Three names, in order. The row names only the first, because that is the one
-    /// auto-detection may read: a run that talks to GitHub holds `GH_TOKEN` anyway,
-    /// so detecting Copilot from it would make every such run ambiguous. These work
-    /// once this provider has been asked for.
-    fn credential(&self, provider: &Provider, credentials: &Credentials) -> Result<String> {
+    fn api_key(&self, credentials: &Credentials) -> Result<String> {
         credentials
-            .get(provider.credential)
+            .get(self.credential())
             .or_else(|| credentials.get("GITHUB_TOKEN"))
             .or_else(|| credentials.get("GH_TOKEN"))
             .context(
@@ -161,58 +278,29 @@ impl ClientFactory for CopilotChat {
             )
     }
 
-    async fn build(
+    async fn connect(
         &self,
         http: reqwest::Client,
-        base_url: String,
-        headers: Vec<(String, String)>,
-        credential: String,
+        credentials: &Credentials,
     ) -> Result<Box<dyn LlmPort + Send + Sync>> {
+        let pkg_id = format!("{}/{}", env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"));
+        let headers = vec![
+            ("Editor-Version".to_string(), pkg_id.clone()),
+            ("Editor-Plugin-Version".to_string(), pkg_id),
+            (
+                "Copilot-Integration-Id".to_string(),
+                "atoma-cli".to_string(),
+            ),
+            (
+                "Openai-Intent".to_string(),
+                "conversation-panel".to_string(),
+            ),
+        ];
         Ok(Box::new(
-            CopilotClient::connect(http, base_url, headers, credential).await?,
+            CopilotClient::connect(http, self.base_url(), headers, self.api_key(credentials)?)
+                .await?,
         ))
     }
-}
-
-/// A provider, as data rather than as a `match` arm.
-///
-/// Four facts used to live inside four constructors: which credential to read,
-/// where to send the request, what overrides that, and which extra headers to
-/// attach. Every client read its own environment variable with its own default,
-/// inline — which is why `github-copilot` had no configurable endpoint at all.
-/// Nothing said each provider should have one, so the one that did not was
-/// indistinguishable from a deliberate omission.
-///
-/// Written out here, adding a provider is a row, and "what does this one do
-/// differently" has one place to be answered.
-#[derive(Debug)]
-pub struct Provider {
-    /// The name in `ATOMA_PROVIDER`, and in an agent definition's `provider:`.
-    pub name: &'static str,
-    /// The credential it authenticates with.
-    ///
-    /// One provider, one name. That is what makes auto-detection an answer rather
-    /// than a guess: `OPENAI_API_KEY` used to select a client whose default
-    /// endpoint was OpenRouter, so the key's name said nothing about where it was
-    /// going to be sent.
-    pub credential: &'static str,
-    /// Where it is, unless an operator says otherwise.
-    pub default_base_url: &'static str,
-    /// What says otherwise. Every provider has one; none is a special case.
-    pub base_url_var: &'static str,
-    /// What turns this row into a client. One per wire format, named by the row.
-    pub client: &'static dyn ClientFactory,
-    /// The headers this provider wants that no other should receive.
-    ///
-    /// A function rather than a flag, and that distinction is the point. A `bool`
-    /// named after one provider's feature works while there is one such feature and
-    /// turns into a row of unrelated booleans as soon as there are three — with the
-    /// behaviour they select living somewhere else, which is the arrangement this
-    /// whole change is undoing. Here the row carries its own.
-    ///
-    /// `no_headers` for most of them, and that is a real answer rather than a
-    /// missing one.
-    pub headers: fn() -> Vec<(String, String)>,
 }
 
 /// A provider that asks for nothing beyond the credential.
@@ -220,108 +308,10 @@ fn no_headers() -> Vec<(String, String)> {
     Vec::new()
 }
 
-/// Every provider Atoma speaks to.
-///
-/// `openai` means OpenAI. It used to default to `https://openrouter.ai/api/v1`, so
-/// the name pointed somewhere other than it said, and `openai-responses` carried a
-/// comment explaining that it had to keep the same wrong default or the two would
-/// disagree. The routers have their own names now, which puts a run's provider in
-/// the log as a fact rather than as "openai, and read `OPENAI_BASE_URL` to find out
-/// where that went".
-///
-/// `openai` and `openai-responses` still share one credential and one endpoint
-/// variable, because they are one vendor reached two ways — and that pair is also
-/// the way to reach a provider Atoma has no row for: point `OPENAI_BASE_URL` at
-/// anything that speaks either dialect.
-const PROVIDERS: &[Provider] = &[
-    Provider {
-        name: "openai",
-        credential: "OPENAI_API_KEY",
-        default_base_url: "https://api.openai.com/v1",
-        base_url_var: "OPENAI_BASE_URL",
-        client: &ChatCompletions,
-        headers: no_headers,
-    },
-    Provider {
-        name: "openai-responses",
-        credential: "OPENAI_API_KEY",
-        default_base_url: "https://api.openai.com/v1",
-        base_url_var: "OPENAI_BASE_URL",
-        client: &Responses,
-        headers: no_headers,
-    },
-    Provider {
-        name: "openrouter",
-        credential: "OPENROUTER_API_KEY",
-        default_base_url: "https://openrouter.ai/api/v1",
-        base_url_var: "OPENROUTER_BASE_URL",
-        client: &ChatCompletions,
-        headers: openrouter_attribution,
-    },
-    // The same host, reached by the other dialect. Its own name because the run's
-    // log should say where the request went, which is exactly what
-    // `openai-responses` pointed at OpenRouter did not do.
-    Provider {
-        name: "openrouter-responses",
-        credential: "OPENROUTER_API_KEY",
-        default_base_url: "https://openrouter.ai/api/v1",
-        base_url_var: "OPENROUTER_BASE_URL",
-        client: &Responses,
-        headers: openrouter_attribution,
-    },
-    Provider {
-        name: "orcarouter",
-        credential: "ORCAROUTER_API_KEY",
-        default_base_url: "https://api.orcarouter.ai/v1",
-        base_url_var: "ORCAROUTER_BASE_URL",
-        client: &ChatCompletions,
-        headers: no_headers,
-    },
-    Provider {
-        name: "orcarouter-responses",
-        credential: "ORCAROUTER_API_KEY",
-        default_base_url: "https://api.orcarouter.ai/v1",
-        base_url_var: "ORCAROUTER_BASE_URL",
-        client: &Responses,
-        headers: no_headers,
-    },
-    Provider {
-        name: "anthropic",
-        credential: "ANTHROPIC_API_KEY",
-        default_base_url: "https://api.anthropic.com",
-        base_url_var: "ANTHROPIC_BASE_URL",
-        client: &AnthropicMessages,
-        headers: no_headers,
-    },
-    Provider {
-        name: "github-copilot",
-        credential: "ATOMA_COPILOT_TOKEN",
-        default_base_url: "https://api.githubcopilot.com",
-        base_url_var: "COPILOT_BASE_URL",
-        client: &CopilotChat,
-        headers: copilot_headers,
-    },
-];
-
-/// The provider names, for a message that has to list them.
-fn provider_names() -> String {
-    PROVIDERS
-        .iter()
-        .map(|p| p.name)
-        .collect::<Vec<_>>()
-        .join(", ")
-}
-
 /// The headers OpenRouter reads to attribute a request to an application.
 ///
-/// Only the providers that read them get them. They used to be built inside the
-/// generic OpenAI-compatible client, which sent `X-OpenRouter-Title` to everybody
-/// — real OpenAI included — because the headers lived with the dialect instead of
-/// with the provider that asked for them.
-///
-/// `ATOMA_APP_*`, not `OPENAI_APP_*` as before: the value identifies this
-/// application, and naming it after one vendor is what made it look like OpenAI's
-/// business.
+/// `ATOMA_APP_*`, not `OPENAI_APP_*` as before: the value identifies this application,
+/// and naming it after one vendor is what made it look like OpenAI's business.
 fn openrouter_attribution() -> Vec<(String, String)> {
     let name =
         std::env::var("ATOMA_APP_NAME").unwrap_or_else(|_| env!("CARGO_PKG_NAME").to_string());
@@ -334,76 +324,129 @@ fn openrouter_attribution() -> Vec<(String, String)> {
     ]
 }
 
-/// What GitHub Copilot's endpoint requires beyond the token.
+/// Every provider Atoma speaks to. One line each.
 ///
-/// In its client until now, built per request. Here instead, because "which headers
-/// does this provider want" is a question that should have one place to be answered
-/// — and having two providers answer it in two different places is what let the
-/// generic client's headers leak to everyone.
-fn copilot_headers() -> Vec<(String, String)> {
-    let pkg_id = format!("{}/{}", env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"));
-    vec![
-        ("Editor-Version".to_string(), pkg_id.clone()),
-        ("Editor-Plugin-Version".to_string(), pkg_id),
-        (
-            "Copilot-Integration-Id".to_string(),
-            "atoma-cli".to_string(),
-        ),
-        (
-            "Openai-Intent".to_string(),
-            "conversation-panel".to_string(),
-        ),
-    ]
+/// `openai` means OpenAI. It used to default to `https://openrouter.ai/api/v1`, so the
+/// name pointed somewhere other than it said, and the Responses client carried a
+/// comment explaining that it had to keep the same wrong default or an OpenRouter key
+/// would reach OpenAI and come back `401 invalid_api_key`. The routers have their own
+/// names now, and each dialect they serve has one, so a run's log states where the
+/// request went rather than leaving it to be inferred from a variable.
+///
+/// The `openai` pair is also how to reach a provider with no line of its own: point
+/// `OPENAI_BASE_URL` at anything speaking either dialect.
+static PROVIDERS: &[&dyn Provider] = &[
+    &ChatCompletions {
+        name: "openai",
+        credential: "OPENAI_API_KEY",
+        default_base_url: "https://api.openai.com/v1",
+        base_url_var: "OPENAI_BASE_URL",
+        headers: no_headers,
+    },
+    &Responses {
+        name: "openai-responses",
+        credential: "OPENAI_API_KEY",
+        default_base_url: "https://api.openai.com/v1",
+        base_url_var: "OPENAI_BASE_URL",
+    },
+    &ChatCompletions {
+        name: "openrouter",
+        credential: "OPENROUTER_API_KEY",
+        default_base_url: "https://openrouter.ai/api/v1",
+        base_url_var: "OPENROUTER_BASE_URL",
+        headers: openrouter_attribution,
+    },
+    &Responses {
+        name: "openrouter-responses",
+        credential: "OPENROUTER_API_KEY",
+        default_base_url: "https://openrouter.ai/api/v1",
+        base_url_var: "OPENROUTER_BASE_URL",
+    },
+    &ChatCompletions {
+        name: "orcarouter",
+        credential: "ORCAROUTER_API_KEY",
+        default_base_url: "https://api.orcarouter.ai/v1",
+        base_url_var: "ORCAROUTER_BASE_URL",
+        headers: no_headers,
+    },
+    &Responses {
+        name: "orcarouter-responses",
+        credential: "ORCAROUTER_API_KEY",
+        default_base_url: "https://api.orcarouter.ai/v1",
+        base_url_var: "ORCAROUTER_BASE_URL",
+    },
+    &Anthropic,
+    &GitHubCopilot,
+];
+
+/// The provider names, for a message that has to list them.
+fn provider_names() -> String {
+    PROVIDERS
+        .iter()
+        .map(|p| p.name())
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// Which provider this run is for.
 ///
-/// Takes "is this credential present" as a function rather than the credentials
-/// themselves, because that is all the decision needs — and it makes the decision
-/// testable without a credential source.
+/// Takes the list, so a caller supplies it rather than this function reaching for a
+/// global — and takes "is this credential present" as a function, because that is all
+/// the decision needs.
 ///
 /// Priority: the agent definition's `provider:`, then `ATOMA_PROVIDER`, then the
 /// credential that is present.
-fn resolve_provider(
+fn resolve_provider<'a>(
+    providers: &'a [&'a dyn Provider],
     provider_hint: Option<&str>,
     present: impl Fn(&str) -> bool,
-) -> Result<&'static Provider> {
+) -> Result<&'a dyn Provider> {
     if let Some(name) = provider_hint {
-        return by_name(name);
+        return by_name(providers, name);
     }
     if let Ok(name) = std::env::var("ATOMA_PROVIDER") {
         let name = name.trim();
         if !name.is_empty() {
-            return by_name(name);
+            return by_name(providers, name);
         }
     }
-    detect(present)
+    detect(providers, present)
 }
 
-fn by_name(name: &str) -> Result<&'static Provider> {
-    PROVIDERS.iter().find(|p| p.name == name).with_context(|| {
-        format!(
-            "Unknown provider '{name}'. Valid values: {}",
-            provider_names()
-        )
-    })
+fn by_name<'a>(providers: &'a [&'a dyn Provider], name: &str) -> Result<&'a dyn Provider> {
+    providers
+        .iter()
+        .copied()
+        .find(|p| p.name() == name)
+        .with_context(|| {
+            format!(
+                "Unknown provider '{name}'. Valid values: {}",
+                providers
+                    .iter()
+                    .map(|p| p.name())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        })
 }
 
 /// The provider whose credential is present.
 ///
-/// Ambiguity is an error rather than a precedence, and that is deliberate. The
-/// cascade this replaces answered "openai" whenever `OPENAI_API_KEY` was set, no
-/// matter what else was, so a repository that had added a second provider's key got
-/// the first one silently and found out from a bill or a 401. Naming both is worse
-/// than nothing to guess from.
+/// Ambiguity is an error rather than a precedence, deliberately. The cascade this
+/// replaces answered "openai" whenever `OPENAI_API_KEY` was set, no matter what else
+/// was, so a repository that added a second provider's key got the first one silently
+/// and found out from a 401 or a bill.
 ///
-/// Two rows share `OPENAI_API_KEY` — the chat and Responses dialects of one vendor
-/// — and the earlier row wins: Responses has to be asked for by name.
-fn detect(present: impl Fn(&str) -> bool) -> Result<&'static Provider> {
-    let mut found: Vec<&'static Provider> = Vec::new();
-    for provider in PROVIDERS {
-        if present(provider.credential)
-            && !found.iter().any(|p| p.credential == provider.credential)
+/// Two providers can share a credential — one vendor reached by two dialects — and
+/// then the earlier line wins: the Responses one has to be asked for by name.
+fn detect<'a>(
+    providers: &'a [&'a dyn Provider],
+    present: impl Fn(&str) -> bool,
+) -> Result<&'a dyn Provider> {
+    let mut found: Vec<&'a dyn Provider> = Vec::new();
+    for provider in providers.iter().copied() {
+        if present(provider.credential())
+            && !found.iter().any(|p| p.credential() == provider.credential())
         {
             found.push(provider);
         }
@@ -411,41 +454,33 @@ fn detect(present: impl Fn(&str) -> bool) -> Result<&'static Provider> {
 
     match found.as_slice() {
         [] => anyhow::bail!(
-            "No provider credential is set. Set one of {}, or name a provider with ATOMA_PROVIDER (one of: {}).",
-            PROVIDERS
+            "No provider credential is set. Set one of {}, or name a provider with ATOMA_PROVIDER \
+             (one of: {}).",
+            providers
                 .iter()
-                .map(|p| p.credential)
+                .map(|p| p.credential())
                 .collect::<std::collections::BTreeSet<_>>()
                 .into_iter()
                 .collect::<Vec<_>>()
                 .join(", "),
-            provider_names(),
+            providers
+                .iter()
+                .map(|p| p.name())
+                .collect::<Vec<_>>()
+                .join(", "),
         ),
-        [only] => Ok(only),
+        [only] => Ok(*only),
         several => anyhow::bail!(
             "More than one provider credential is set ({}), so which one to use is not decided by \
              the credentials. Name the provider with ATOMA_PROVIDER or the agent definition's \
              `provider:` field, or remove the credentials this run should not use.",
             several
                 .iter()
-                .map(|p| p.credential)
+                .map(|p| p.credential())
                 .collect::<Vec<_>>()
                 .join(", "),
         ),
     }
-}
-
-/// The credential a provider needs, or an error naming it.
-fn credential_for(provider: &Provider, credentials: &Credentials) -> Result<String> {
-    credentials.get(provider.credential).with_context(|| {
-        format!(
-            "{} is not set, and the {} provider authenticates with it. Set it, or choose another \
-             provider with ATOMA_PROVIDER (one of: {}).",
-            provider.credential,
-            provider.name,
-            provider_names(),
-        )
-    })
 }
 
 /// Build an `LlmPort` implementation for this run.
@@ -467,28 +502,20 @@ pub async fn build_llm_client(
         .build()
         .context("Failed to create HTTP client")?;
 
-    let provider = resolve_provider(provider_hint, |name| credentials.has(name))?;
-    let base_url = std::env::var(provider.base_url_var)
-        .unwrap_or_else(|_| provider.default_base_url.to_string());
-    let headers = (provider.headers)();
+    let provider = resolve_provider(PROVIDERS, provider_hint, |name| credentials.has(name))?;
 
     // All three together, because any one of them alone leaves the question the old
     // default made unanswerable. The name without the host is what hid an `openai`
     // that meant OpenRouter. The host without the dialect leaves "does this endpoint
-    // serve /responses" to be guessed at, which is exactly what an operator pointing
-    // `OPENAI_BASE_URL` at their own gateway needs to know.
+    // serve /responses" to be guessed at.
     tracing::info!(
         "LLM provider: {} ({}) at {}",
-        provider.name,
-        provider.client.dialect(),
-        base_url
+        provider.name(),
+        provider.dialect(),
+        provider.base_url()
     );
 
-    let credential = provider.client.credential(provider, credentials)?;
-    provider
-        .client
-        .build(http, base_url, headers, credential)
-        .await
+    provider.connect(http, credentials).await
 }
 
 #[cfg(test)]
@@ -517,141 +544,126 @@ mod tests {
         }
     }
 
-    /// A row per provider is only an improvement if the rows cannot contradict each
-    /// other, so the table's own invariants are checked rather than assumed.
+    /// A line per provider is only an improvement if the lines cannot contradict each
+    /// other, so what every provider must answer the same way is checked here.
     #[test]
-    fn the_table_holds_together() {
+    fn every_provider_answers_the_same_questions() {
         for provider in PROVIDERS {
-            assert!(!provider.name.is_empty());
-            assert!(!provider.credential.is_empty());
+            assert!(!provider.name().is_empty());
+            assert!(!provider.credential().is_empty());
             assert!(
-                provider.default_base_url.starts_with("https://"),
+                provider.default_base_url().starts_with("https://"),
                 "{} points at {}",
-                provider.name,
-                provider.default_base_url
+                provider.name(),
+                provider.default_base_url()
             );
             assert!(
-                provider.base_url_var.ends_with("_BASE_URL"),
-                "{} overrides its endpoint with {}",
-                provider.name,
-                provider.base_url_var
+                provider.base_url_var().ends_with("_BASE_URL"),
+                "{} moves its endpoint with {}",
+                provider.name(),
+                provider.base_url_var()
             );
+            assert!(!provider.dialect().is_empty());
         }
 
-        let names: std::collections::BTreeSet<_> = PROVIDERS.iter().map(|p| p.name).collect();
-        assert_eq!(names.len(), PROVIDERS.len(), "two rows share a name");
+        let names: std::collections::BTreeSet<_> = PROVIDERS.iter().map(|p| p.name()).collect();
+        assert_eq!(names.len(), PROVIDERS.len(), "two lines share a name");
     }
 
     /// One vendor reached two ways has to be reached at one place. When the two
-    /// clients' defaults drifted apart, an OpenRouter key went to OpenAI and came
-    /// back `401 invalid_api_key` — which reads like a bad secret and was a bad
-    /// default. Rows, not constants in two files, but the same invariant.
+    /// clients' defaults drifted apart, an OpenRouter key went to OpenAI and came back
+    /// `401 invalid_api_key` — which reads like a bad secret and was a bad default.
     #[test]
-    fn rows_sharing_a_credential_agree_on_where_it_is_sent() {
+    fn providers_sharing_a_credential_agree_on_where_it_is_sent() {
         for a in PROVIDERS {
             for b in PROVIDERS {
-                if a.credential == b.credential {
+                if a.credential() == b.credential() {
                     assert_eq!(
-                        a.default_base_url, b.default_base_url,
+                        a.default_base_url(),
+                        b.default_base_url(),
                         "{} and {} share {} but not an endpoint",
-                        a.name, b.name, a.credential
+                        a.name(),
+                        b.name(),
+                        a.credential()
                     );
                     assert_eq!(
-                        a.base_url_var, b.base_url_var,
+                        a.base_url_var(),
+                        b.base_url_var(),
                         "{} and {} share {} but not the variable that moves it",
-                        a.name, b.name, a.credential
+                        a.name(),
+                        b.name(),
+                        a.credential()
                     );
                 }
             }
         }
     }
 
-    /// The bug this whole change is about: `openai` pointed at OpenRouter.
+    /// The bug this whole arrangement is about: `openai` pointed at OpenRouter.
     #[test]
     fn openai_means_openai_and_the_routers_have_their_own_names() {
         assert_eq!(
-            by_name("openai").unwrap().default_base_url,
+            by_name(PROVIDERS, "openai").unwrap().default_base_url(),
             "https://api.openai.com/v1"
         );
         assert_eq!(
-            by_name("openrouter").unwrap().default_base_url,
+            by_name(PROVIDERS, "openrouter").unwrap().default_base_url(),
             "https://openrouter.ai/api/v1"
         );
         assert_eq!(
-            by_name("orcarouter").unwrap().default_base_url,
+            by_name(PROVIDERS, "orcarouter").unwrap().default_base_url(),
             "https://api.orcarouter.ai/v1"
         );
     }
 
-    /// Extra headers belong to the provider that reads them, not to the dialect it
-    /// happens to share with everyone else. The generic OpenAI-compatible client used
-    /// to send `X-OpenRouter-Title` to real OpenAI for exactly that reason.
-    #[test]
-    fn extra_headers_reach_only_the_providers_that_asked() {
-        for provider in PROVIDERS {
-            let headers = (provider.headers)();
-            let names: Vec<&str> = headers.iter().map(|(name, _)| name.as_str()).collect();
-            let wants_attribution = provider.name.starts_with("openrouter");
-            assert_eq!(
-                names.contains(&"X-OpenRouter-Title"),
-                wants_attribution,
-                "{} disagrees about attribution headers",
-                provider.name
-            );
-            assert_eq!(
-                names.contains(&"Copilot-Integration-Id"),
-                provider.name == "github-copilot",
-                "{} disagrees about Copilot's headers",
-                provider.name
-            );
-        }
-    }
-
-    /// Both routers serve both dialects, and each combination is its own name rather
-    /// than a base URL somebody has to know about. This is the claim the table makes
-    /// — that adding one is adding a row — held to.
+    /// Both routers serve both dialects, and each combination is its own line rather
+    /// than a base URL somebody has to know about.
     #[test]
     fn each_router_offers_both_dialects_under_its_own_name() {
         for (chat, responses) in [
             ("openrouter", "openrouter-responses"),
             ("orcarouter", "orcarouter-responses"),
         ] {
-            let a = by_name(chat).unwrap();
-            let b = by_name(responses).unwrap();
-            assert_eq!(a.client.dialect(), "chat-completions");
-            assert_eq!(b.client.dialect(), "responses");
-            assert_eq!(a.credential, b.credential);
-            assert_eq!(a.default_base_url, b.default_base_url);
+            let a = by_name(PROVIDERS, chat).unwrap();
+            let b = by_name(PROVIDERS, responses).unwrap();
+            assert_eq!(a.dialect(), "chat-completions");
+            assert_eq!(b.dialect(), "responses");
+            assert_eq!(a.credential(), b.credential());
+            assert_eq!(a.default_base_url(), b.default_base_url());
         }
     }
 
     #[test]
     fn an_unknown_name_lists_the_known_ones() {
-        let error = by_name("openai-compatible").unwrap_err().to_string();
+        let error = by_name(PROVIDERS, "openai-compatible")
+            .unwrap_err()
+            .to_string();
         assert!(error.contains("openrouter"), "{error}");
         assert!(error.contains("orcarouter"), "{error}");
     }
 
     #[test]
     fn one_credential_decides() {
-        let provider = detect(|name| name == "ORCAROUTER_API_KEY").unwrap();
-        assert_eq!(provider.name, "orcarouter");
+        let provider = detect(PROVIDERS, |name| name == "ORCAROUTER_API_KEY").unwrap();
+        assert_eq!(provider.name(), "orcarouter");
     }
 
-    /// Two rows share `OPENAI_API_KEY`; the chat dialect is the one you get without
-    /// asking, and `openai-responses` has to be named.
+    /// Two providers share `OPENAI_API_KEY`; the chat dialect is the one you get
+    /// without asking, and `openai-responses` has to be named.
     #[test]
     fn the_shared_credential_resolves_to_the_chat_dialect() {
-        let provider = detect(|name| name == "OPENAI_API_KEY").unwrap();
-        assert_eq!(provider.name, "openai");
-        assert_eq!(provider.client.dialect(), "chat-completions");
+        let provider = detect(PROVIDERS, |name| name == "OPENAI_API_KEY").unwrap();
+        assert_eq!(provider.name(), "openai");
+        assert_eq!(provider.dialect(), "chat-completions");
     }
 
     #[test]
     fn two_credentials_are_an_error_rather_than_a_precedence() {
-        let error = detect(|name| matches!(name, "OPENAI_API_KEY" | "ANTHROPIC_API_KEY"))
-            .unwrap_err()
-            .to_string();
+        let error = detect(PROVIDERS, |name| {
+            matches!(name, "OPENAI_API_KEY" | "ANTHROPIC_API_KEY")
+        })
+        .unwrap_err()
+        .to_string();
         assert!(error.contains("OPENAI_API_KEY"), "{error}");
         assert!(error.contains("ANTHROPIC_API_KEY"), "{error}");
         assert!(error.contains("ATOMA_PROVIDER"), "{error}");
@@ -659,7 +671,7 @@ mod tests {
 
     #[test]
     fn no_credential_says_what_to_set() {
-        let error = detect(|_| false).unwrap_err().to_string();
+        let error = detect(PROVIDERS, |_| false).unwrap_err().to_string();
         assert!(error.contains("OPENROUTER_API_KEY"), "{error}");
         assert!(error.contains("ANTHROPIC_API_KEY"), "{error}");
     }
@@ -668,7 +680,41 @@ mod tests {
     /// the agent definition: an agent that names its provider means it.
     #[test]
     fn a_hint_wins() {
-        let provider = resolve_provider(Some("anthropic"), |_| true).unwrap();
-        assert_eq!(provider.name, "anthropic");
+        let provider = resolve_provider(PROVIDERS, Some("anthropic"), |_| true).unwrap();
+        assert_eq!(provider.name(), "anthropic");
+    }
+
+    /// The list is a parameter, so a caller can supply its own. Nothing in the
+    /// resolution logic knows which providers exist.
+    #[test]
+    fn the_provider_list_is_supplied_not_reached_for() {
+        static ONLY_ONE: &[&dyn Provider] = &[&Anthropic];
+
+        assert_eq!(
+            detect(ONLY_ONE, |name| name == "ANTHROPIC_API_KEY")
+                .unwrap()
+                .name(),
+            "anthropic"
+        );
+        let error = by_name(ONLY_ONE, "openrouter").unwrap_err().to_string();
+        assert!(error.contains("Valid values: anthropic"), "{error}");
+    }
+
+    /// Extra headers belong to the provider that reads them, not to the dialect it
+    /// shares with everyone else. The generic client used to send
+    /// `X-OpenRouter-Title` to real OpenAI for exactly that reason.
+    #[test]
+    fn attribution_headers_reach_only_the_providers_that_asked() {
+        assert!(no_headers().is_empty());
+
+        let names: Vec<String> = openrouter_attribution()
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect();
+        assert!(
+            names.contains(&"X-OpenRouter-Title".to_string()),
+            "{names:?}"
+        );
+        assert!(names.contains(&"HTTP-Referer".to_string()), "{names:?}");
     }
 }
