@@ -401,6 +401,21 @@ pub fn describe_providers() -> String {
     out
 }
 
+/// Every name a provider authenticates with.
+///
+/// Published because something else has to know it: the names a tool server must not
+/// inherit are these plus the GitHub tokens, and that union used to be a second
+/// hand-written list. It was already wrong -- `OPENROUTER_API_KEY` and
+/// `ORCAROUTER_API_KEY` were added here and not there, so in environment mode a tool
+/// server inherited them and could read a provider key straight out of its own
+/// environment.
+pub fn provider_credential_names() -> Vec<&'static str> {
+    let mut names: Vec<&'static str> = PROVIDERS.iter().map(|p| p.credential()).collect();
+    names.sort_unstable();
+    names.dedup();
+    names
+}
+
 /// The provider names, for a message that has to list them.
 fn provider_names() -> String {
     PROVIDERS
@@ -743,6 +758,23 @@ mod tests {
                 provider.name()
             );
         }
+    }
+
+    /// The union that keeps provider keys out of tool servers is built from this, so
+    /// a provider added above is covered without anyone remembering a second list.
+    #[test]
+    fn every_provider_credential_is_published() {
+        let names = provider_credential_names();
+        for provider in PROVIDERS {
+            assert!(
+                names.contains(&provider.credential()),
+                "{} authenticates with {}, which nothing would strip",
+                provider.name(),
+                provider.credential()
+            );
+        }
+        assert!(names.contains(&"OPENROUTER_API_KEY"), "{names:?}");
+        assert!(names.contains(&"ORCAROUTER_API_KEY"), "{names:?}");
     }
 
     /// Extra headers belong to the provider that reads them, not to the dialect it

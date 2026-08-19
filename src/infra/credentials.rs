@@ -59,14 +59,31 @@ use anyhow::{Context, Result};
 /// how a developer runs atoma by hand: there the provider key really is inherited
 /// by every server, and `shell` could read it out of its own environment without
 /// going anywhere near `/proc`.
-pub const CREDENTIAL_ENV_NAMES: &[&str] = &[
-    "ANTHROPIC_API_KEY",
-    "ATOMA_COPILOT_TOKEN",
+/// The GitHub tokens. The provider keys come from the provider list itself, via
+/// [`credential_env_names`] below.
+///
+/// Half of this list used to be provider keys, written out a second time. They drifted
+/// the day two providers were added: `OPENROUTER_API_KEY` and `ORCAROUTER_API_KEY`
+/// were declared in `infra::llm` and missing here, so in environment mode a tool
+/// server inherited them -- and `shell` could read a provider key out of its own
+/// environment without going near `/proc`.
+const GITHUB_ENV_NAMES: &[&str] = &[
     "GH_TOKEN",
     "GITHUB_PERSONAL_ACCESS_TOKEN",
     "GITHUB_TOKEN",
-    "OPENAI_API_KEY",
 ];
+
+/// Every name a tool server must not inherit.
+///
+/// A union rather than a list: the provider half is whatever `infra::llm` declares, so
+/// adding a provider covers it here with nothing to remember.
+pub fn credential_env_names() -> Vec<&'static str> {
+    let mut names = crate::infra::llm::provider_credential_names();
+    names.extend_from_slice(GITHUB_ENV_NAMES);
+    names.sort_unstable();
+    names.dedup();
+    names
+}
 
 /// The credential values available to this run.
 pub struct Credentials {

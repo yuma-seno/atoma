@@ -110,7 +110,7 @@ impl McpConnection {
         // one of these gets it back. That is the whole routing mechanism: `github`
         // says `GH_TOKEN: ${GH_TOKEN}` and receives it, `shell` says nothing and
         // does not.
-        for name in crate::infra::credentials::CREDENTIAL_ENV_NAMES {
+        for name in crate::infra::credentials::credential_env_names() {
             cmd.env_remove(name);
         }
         cmd.envs(&config.env);
