@@ -2,6 +2,7 @@
 
 use anyhow::{bail, Context, Result};
 use serde_json::Value;
+use std::borrow::Cow;
 use std::collections::HashMap;
 
 use crate::domain::ports::{LlmPort, LlmUsage, ToolCallResult, ToolPort};
@@ -188,6 +189,74 @@ fn tool_result_message(tool_call_id: &str, result: &ToolCallResult, vision: bool
     Message::tool_blocks(tool_call_id, &result.content, &result.images)
 }
 
+/// The messages to send, with pictures withheld from a model that cannot read them.
+///
+/// `tool_result_message` above withholds the ones a TOOL returned, at the moment
+/// they enter the session. That covers one of the two ways a picture arrives. The
+/// other is a caller putting one into the session itself — a person pastes a
+/// screenshot on an issue and the runner embeds it — and those never pass through
+/// that function, so a `vision: false` agent sent them to the provider and a
+/// text-only model answered with an API error that lost the run.
+///
+/// So the decision belongs where every message LEAVES, not where some of them
+/// arrive. This is the only call site of `chat_completion`, which is what makes it
+/// that place: a new way of getting a picture into a session cannot miss it, and
+/// neither can a new adapter.
+///
+/// The session itself is left alone. What is stored is the record of what happened;
+/// this is only what this provider is asked to read.
+fn messages_for_provider(messages: &[Message], vision: bool) -> Cow<'_, [Message]> {
+    if vision || !messages.iter().any(carries_image) {
+        return Cow::Borrowed(messages);
+    }
+    Cow::Owned(messages.iter().map(withhold_images).collect())
+}
+
+/// The content blocks of a message, if it has blocks rather than plain text.
+fn content_blocks(message: &Message) -> Option<&[Value]> {
+    message
+        .content
+        .as_ref()
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+}
+
+/// Whether a block is a picture, in either dialect's spelling.
+///
+/// `image_url` is what an OpenAI-compatible body calls one and `image` is what
+/// Anthropic calls it. Both are checked here rather than per adapter, because the
+/// session holds whichever the caller wrote and the gate runs before the adapter
+/// sees it.
+fn is_image_block(block: &Value) -> bool {
+    matches!(
+        block.get("type").and_then(Value::as_str),
+        Some("image_url" | "image")
+    )
+}
+
+fn carries_image(message: &Message) -> bool {
+    content_blocks(message).is_some_and(|blocks| blocks.iter().any(is_image_block))
+}
+
+/// One message with each picture replaced by the text that explains its absence.
+fn withhold_images(message: &Message) -> Message {
+    let mut out = message.clone();
+    if let Some(blocks) = content_blocks(message) {
+        let rewritten: Vec<Value> = blocks
+            .iter()
+            .map(|block| {
+                if is_image_block(block) {
+                    serde_json::json!({ "type": "text", "text": IMAGE_WITHHELD })
+                } else {
+                    block.clone()
+                }
+            })
+            .collect();
+        out.content = Some(Value::Array(rewritten));
+    }
+    out
+}
+
 /// Run the inference loop: call LLM, handle tool calls or final response.
 #[allow(clippy::too_many_arguments)]
 pub async fn inference_loop(
@@ -213,8 +282,9 @@ pub async fn inference_loop(
             session.messages.len()
         );
 
+        let outgoing = messages_for_provider(&session.messages, vision);
         let response = llm_client
-            .chat_completion(model, &session.messages, tool_definitions, extra_body)
+            .chat_completion(model, &outgoing, tool_definitions, extra_body)
             .await?;
 
         if let Some(u) = response.usage {
@@ -355,5 +425,75 @@ mod tests {
         assert_eq!(tracker.record_failure("tool:{\"x\":2}".into()), 1);
         tracker.record_success();
         assert_eq!(tracker.record_failure("tool:{\"x\":2}".into()), 1);
+    }
+
+    fn user_with_image(url: &str) -> Message {
+        Message {
+            role: "user".to_string(),
+            content: Some(serde_json::json!([
+                { "type": "text", "text": "look at this" },
+                { "type": "image_url", "image_url": { "url": url } },
+            ])),
+            tool_calls: None,
+            tool_call_id: None,
+            name: None,
+            atoma_metadata: None,
+        }
+    }
+
+    /// The hole this closes: a picture that a CALLER put in the session, which
+    /// `tool_result_message` never sees. A text-only model answered one of these
+    /// with an API error and the run was lost.
+    #[test]
+    fn a_pasted_image_does_not_reach_a_model_that_cannot_read_it() {
+        let messages = vec![user_with_image("https://example.com/x.png")];
+        let sent = messages_for_provider(&messages, false);
+
+        let blocks = content_blocks(&sent[0]).expect("blocks");
+        assert_eq!(blocks.len(), 2, "the text block stays");
+        assert_eq!(blocks[0]["text"], "look at this");
+        assert_eq!(blocks[1]["type"], "text");
+        assert_eq!(blocks[1]["text"], IMAGE_WITHHELD);
+    }
+
+    #[test]
+    fn the_session_itself_is_left_alone() {
+        let messages = vec![user_with_image("https://example.com/x.png")];
+        let _ = messages_for_provider(&messages, false);
+        let blocks = content_blocks(&messages[0]).expect("blocks");
+        assert_eq!(blocks[1]["type"], "image_url", "what happened is still recorded");
+    }
+
+    #[test]
+    fn a_model_that_can_read_images_gets_them() {
+        let messages = vec![user_with_image("https://example.com/x.png")];
+        let sent = messages_for_provider(&messages, true);
+        assert!(matches!(sent, Cow::Borrowed(_)), "nothing to rewrite, nothing copied");
+        assert_eq!(content_blocks(&sent[0]).expect("blocks")[1]["type"], "image_url");
+    }
+
+    #[test]
+    fn a_run_without_pictures_copies_nothing() {
+        let messages = vec![Message::user("plain text")];
+        let sent = messages_for_provider(&messages, false);
+        assert!(matches!(sent, Cow::Borrowed(_)));
+    }
+
+    /// Anthropic spells it `image`, an OpenAI-compatible body spells it
+    /// `image_url`, and the session holds whichever the caller wrote.
+    #[test]
+    fn both_dialects_of_picture_are_recognised() {
+        let anthropic = Message {
+            role: "user".to_string(),
+            content: Some(serde_json::json!([
+                { "type": "image", "source": { "type": "base64", "data": "..." } },
+            ])),
+            tool_calls: None,
+            tool_call_id: None,
+            name: None,
+            atoma_metadata: None,
+        };
+        let sent = messages_for_provider(&[anthropic], false);
+        assert_eq!(content_blocks(&sent[0]).expect("blocks")[0]["text"], IMAGE_WITHHELD);
     }
 }
