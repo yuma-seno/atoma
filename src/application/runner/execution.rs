@@ -461,15 +461,24 @@ mod tests {
         let messages = vec![user_with_image("https://example.com/x.png")];
         let _ = messages_for_provider(&messages, false);
         let blocks = content_blocks(&messages[0]).expect("blocks");
-        assert_eq!(blocks[1]["type"], "image_url", "what happened is still recorded");
+        assert_eq!(
+            blocks[1]["type"], "image_url",
+            "what happened is still recorded"
+        );
     }
 
     #[test]
     fn a_model_that_can_read_images_gets_them() {
         let messages = vec![user_with_image("https://example.com/x.png")];
         let sent = messages_for_provider(&messages, true);
-        assert!(matches!(sent, Cow::Borrowed(_)), "nothing to rewrite, nothing copied");
-        assert_eq!(content_blocks(&sent[0]).expect("blocks")[1]["type"], "image_url");
+        assert!(
+            matches!(sent, Cow::Borrowed(_)),
+            "nothing to rewrite, nothing copied"
+        );
+        assert_eq!(
+            content_blocks(&sent[0]).expect("blocks")[1]["type"],
+            "image_url"
+        );
     }
 
     #[test]
@@ -494,6 +503,9 @@ mod tests {
             atoma_metadata: None,
         };
         let sent = messages_for_provider(&[anthropic], false);
-        assert_eq!(content_blocks(&sent[0]).expect("blocks")[0]["text"], IMAGE_WITHHELD);
+        assert_eq!(
+            content_blocks(&sent[0]).expect("blocks")[0]["text"],
+            IMAGE_WITHHELD
+        );
     }
 }
