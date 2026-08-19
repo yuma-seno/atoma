@@ -485,7 +485,8 @@ mod tests {
         );
 
         // And the agent that cannot read it still does not receive it.
-        let sent = messages_for_provider(&[stored], false);
+        let stored_messages = [stored];
+        let sent = messages_for_provider(&stored_messages, false);
         assert_eq!(
             content_blocks(&sent[0]).expect("blocks")[1]["text"],
             IMAGE_WITHHELD
