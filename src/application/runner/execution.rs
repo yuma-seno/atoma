@@ -502,7 +502,8 @@ mod tests {
             name: None,
             atoma_metadata: None,
         };
-        let sent = messages_for_provider(&[anthropic], false);
+        let messages = [anthropic];
+        let sent = messages_for_provider(&messages, false);
         assert_eq!(
             content_blocks(&sent[0]).expect("blocks")[0]["text"],
             IMAGE_WITHHELD
