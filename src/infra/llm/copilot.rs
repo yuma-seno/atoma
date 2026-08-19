@@ -5,7 +5,6 @@ use serde_json::Value;
 
 use crate::domain::ports::{LlmChoice, LlmPort, LlmResponse, LlmUsage};
 use crate::domain::session::Message;
-use crate::infra::credentials::Credentials;
 use crate::infra::llm::shared::openai_compat_call;
 /// Exchange a GitHub PAT for a short-lived GitHub Copilot API token.
 async fn exchange_copilot_token(client: &reqwest::Client, github_token: &str) -> Result<String> {
@@ -72,13 +71,8 @@ impl CopilotClient {
         client: reqwest::Client,
         base_url: String,
         headers: Vec<(String, String)>,
-        credentials: &Credentials,
+        github_token: String,
     ) -> Result<Self> {
-        let github_token = credentials
-            .get("ATOMA_COPILOT_TOKEN")
-            .or_else(|| credentials.get("GITHUB_TOKEN"))
-            .or_else(|| credentials.get("GH_TOKEN"))
-            .context("ATOMA_COPILOT_TOKEN, GITHUB_TOKEN, or GH_TOKEN is required for the github-copilot provider")?;
         let copilot_token = exchange_copilot_token(&client, &github_token).await?;
         Ok(CopilotClient {
             client,

@@ -5,6 +5,7 @@ pub mod openai_responses;
 pub(crate) mod shared;
 
 use anyhow::{Context, Result};
+use async_trait::async_trait;
 use std::time::Duration;
 
 use crate::domain::ports::LlmPort;
@@ -33,21 +34,140 @@ fn resolve_timeout_secs(raw: Option<&str>) -> u64 {
         .unwrap_or(DEFAULT_LLM_TIMEOUT_SECS)
 }
 
-/// The wire format a provider's endpoint speaks.
+/// How a provider's endpoint and credential become something callable.
 ///
-/// A separate axis from the provider itself, because the two vary independently:
-/// three providers speak `OpenAiChat`, and one host can offer two dialects. All
-/// this decides is which client to build.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Dialect {
-    /// `POST {base}/chat/completions`.
-    OpenAiChat,
-    /// `POST {base}/responses`.
-    OpenAiResponses,
-    /// `POST {base}/v1/messages`, Anthropic's own format.
-    AnthropicMessages,
-    /// `OpenAiChat`, reached with a token exchanged from a GitHub credential.
-    CopilotChat,
+/// This was an enum and a `match` in `build_llm_client`, which meant adding a
+/// provider touched shared control flow — the thing the table was supposed to stop.
+/// An interface with one implementation per wire format leaves nothing central to
+/// edit: a row names its own.
+///
+/// Per wire FORMAT and not per provider, because that is the axis the code varies
+/// on. What separates `openrouter` from `orcarouth` is data — a name, a credential,
+/// a host — and eight implementations differing only in data would be the
+/// copy-and-paste this file exists to remove. What separates chat completions from
+/// Responses is a URL path, a request shape and a response shape, which is code.
+///
+/// `credential` has a default because for five of the six it is exactly the name the
+/// row carries. Copilot overrides it: it accepts a GitHub token under three names,
+/// which is a rule of that provider rather than an exception to the design.
+#[async_trait]
+pub trait ClientFactory: Sync {
+    /// The wire format's name, for tests and for saying what a row selected.
+    fn dialect(&self) -> &'static str;
+
+    /// The credential to authenticate with, by default the one the row names.
+    fn credential(&self, provider: &Provider, credentials: &Credentials) -> Result<String> {
+        credential_for(provider, credentials)
+    }
+
+    async fn build(
+        &self,
+        http: reqwest::Client,
+        base_url: String,
+        headers: Vec<(String, String)>,
+        credential: String,
+    ) -> Result<Box<dyn LlmPort + Send + Sync>>;
+}
+
+/// `POST {base}/chat/completions`.
+struct ChatCompletions;
+
+#[async_trait]
+impl ClientFactory for ChatCompletions {
+    fn dialect(&self) -> &'static str {
+        "chat-completions"
+    }
+
+    async fn build(
+        &self,
+        http: reqwest::Client,
+        base_url: String,
+        headers: Vec<(String, String)>,
+        credential: String,
+    ) -> Result<Box<dyn LlmPort + Send + Sync>> {
+        Ok(Box::new(OpenAIClient::new(
+            http, base_url, credential, headers,
+        )))
+    }
+}
+
+/// `POST {base}/responses`.
+struct Responses;
+
+#[async_trait]
+impl ClientFactory for Responses {
+    fn dialect(&self) -> &'static str {
+        "responses"
+    }
+
+    async fn build(
+        &self,
+        http: reqwest::Client,
+        base_url: String,
+        _headers: Vec<(String, String)>,
+        credential: String,
+    ) -> Result<Box<dyn LlmPort + Send + Sync>> {
+        Ok(Box::new(OpenAIResponsesClient::new(
+            http, base_url, credential,
+        )))
+    }
+}
+
+/// `POST {base}/v1/messages`, Anthropic's own format.
+struct AnthropicMessages;
+
+#[async_trait]
+impl ClientFactory for AnthropicMessages {
+    fn dialect(&self) -> &'static str {
+        "anthropic-messages"
+    }
+
+    async fn build(
+        &self,
+        http: reqwest::Client,
+        base_url: String,
+        _headers: Vec<(String, String)>,
+        credential: String,
+    ) -> Result<Box<dyn LlmPort + Send + Sync>> {
+        Ok(Box::new(AnthropicClient::new(http, base_url, credential)))
+    }
+}
+
+/// Chat completions, reached with a token exchanged from a GitHub credential.
+struct CopilotChat;
+
+#[async_trait]
+impl ClientFactory for CopilotChat {
+    fn dialect(&self) -> &'static str {
+        "copilot-chat"
+    }
+
+    /// Three names, in order. The row names only the first, because that is the one
+    /// auto-detection may read: a run that talks to GitHub holds `GH_TOKEN` anyway,
+    /// so detecting Copilot from it would make every such run ambiguous. These work
+    /// once this provider has been asked for.
+    fn credential(&self, provider: &Provider, credentials: &Credentials) -> Result<String> {
+        credentials
+            .get(provider.credential)
+            .or_else(|| credentials.get("GITHUB_TOKEN"))
+            .or_else(|| credentials.get("GH_TOKEN"))
+            .context(
+                "ATOMA_COPILOT_TOKEN, GITHUB_TOKEN, or GH_TOKEN is required for the \
+                 github-copilot provider",
+            )
+    }
+
+    async fn build(
+        &self,
+        http: reqwest::Client,
+        base_url: String,
+        headers: Vec<(String, String)>,
+        credential: String,
+    ) -> Result<Box<dyn LlmPort + Send + Sync>> {
+        Ok(Box::new(
+            CopilotClient::connect(http, base_url, headers, credential).await?,
+        ))
+    }
 }
 
 /// A provider, as data rather than as a `match` arm.
@@ -76,8 +196,8 @@ pub struct Provider {
     pub default_base_url: &'static str,
     /// What says otherwise. Every provider has one; none is a special case.
     pub base_url_var: &'static str,
-    /// Which wire format its endpoint speaks.
-    pub dialect: Dialect,
+    /// What turns this row into a client. One per wire format, named by the row.
+    pub client: &'static dyn ClientFactory,
     /// The headers this provider wants that no other should receive.
     ///
     /// A function rather than a flag, and that distinction is the point. A `bool`
@@ -115,7 +235,7 @@ const PROVIDERS: &[Provider] = &[
         credential: "OPENAI_API_KEY",
         default_base_url: "https://api.openai.com/v1",
         base_url_var: "OPENAI_BASE_URL",
-        dialect: Dialect::OpenAiChat,
+        client: &ChatCompletions,
         headers: no_headers,
     },
     Provider {
@@ -123,7 +243,7 @@ const PROVIDERS: &[Provider] = &[
         credential: "OPENAI_API_KEY",
         default_base_url: "https://api.openai.com/v1",
         base_url_var: "OPENAI_BASE_URL",
-        dialect: Dialect::OpenAiResponses,
+        client: &Responses,
         headers: no_headers,
     },
     Provider {
@@ -131,7 +251,7 @@ const PROVIDERS: &[Provider] = &[
         credential: "OPENROUTER_API_KEY",
         default_base_url: "https://openrouter.ai/api/v1",
         base_url_var: "OPENROUTER_BASE_URL",
-        dialect: Dialect::OpenAiChat,
+        client: &ChatCompletions,
         headers: openrouter_attribution,
     },
     // The same host, reached by the other dialect. Its own name because the run's
@@ -142,7 +262,7 @@ const PROVIDERS: &[Provider] = &[
         credential: "OPENROUTER_API_KEY",
         default_base_url: "https://openrouter.ai/api/v1",
         base_url_var: "OPENROUTER_BASE_URL",
-        dialect: Dialect::OpenAiResponses,
+        client: &Responses,
         headers: openrouter_attribution,
     },
     Provider {
@@ -150,7 +270,7 @@ const PROVIDERS: &[Provider] = &[
         credential: "ORCAROUTER_API_KEY",
         default_base_url: "https://api.orcarouter.ai/v1",
         base_url_var: "ORCAROUTER_BASE_URL",
-        dialect: Dialect::OpenAiChat,
+        client: &ChatCompletions,
         headers: no_headers,
     },
     Provider {
@@ -158,7 +278,7 @@ const PROVIDERS: &[Provider] = &[
         credential: "ORCAROUTER_API_KEY",
         default_base_url: "https://api.orcarouter.ai/v1",
         base_url_var: "ORCAROUTER_BASE_URL",
-        dialect: Dialect::OpenAiResponses,
+        client: &Responses,
         headers: no_headers,
     },
     Provider {
@@ -166,7 +286,7 @@ const PROVIDERS: &[Provider] = &[
         credential: "ANTHROPIC_API_KEY",
         default_base_url: "https://api.anthropic.com",
         base_url_var: "ANTHROPIC_BASE_URL",
-        dialect: Dialect::AnthropicMessages,
+        client: &AnthropicMessages,
         headers: no_headers,
     },
     Provider {
@@ -174,7 +294,7 @@ const PROVIDERS: &[Provider] = &[
         credential: "ATOMA_COPILOT_TOKEN",
         default_base_url: "https://api.githubcopilot.com",
         base_url_var: "COPILOT_BASE_URL",
-        dialect: Dialect::CopilotChat,
+        client: &CopilotChat,
         headers: copilot_headers,
     },
 ];
@@ -353,27 +473,11 @@ pub async fn build_llm_client(
     // openrouter.ai.
     tracing::info!("LLM provider: {} at {}", provider.name, base_url);
 
-    match provider.dialect {
-        Dialect::OpenAiChat => Ok(Box::new(OpenAIClient::new(
-            http,
-            base_url,
-            credential_for(provider, credentials)?,
-            headers,
-        ))),
-        Dialect::OpenAiResponses => Ok(Box::new(OpenAIResponsesClient::new(
-            http,
-            base_url,
-            credential_for(provider, credentials)?,
-        ))),
-        Dialect::AnthropicMessages => Ok(Box::new(AnthropicClient::new(
-            http,
-            base_url,
-            credential_for(provider, credentials)?,
-        ))),
-        Dialect::CopilotChat => Ok(Box::new(
-            CopilotClient::connect(http, base_url, headers, credentials).await?,
-        )),
-    }
+    let credential = provider.client.credential(provider, credentials)?;
+    provider
+        .client
+        .build(http, base_url, headers, credential)
+        .await
 }
 
 #[cfg(test)]
@@ -503,8 +607,8 @@ mod tests {
         ] {
             let a = by_name(chat).unwrap();
             let b = by_name(responses).unwrap();
-            assert_eq!(a.dialect, Dialect::OpenAiChat);
-            assert_eq!(b.dialect, Dialect::OpenAiResponses);
+            assert_eq!(a.client.dialect(), "chat-completions");
+            assert_eq!(b.client.dialect(), "responses");
             assert_eq!(a.credential, b.credential);
             assert_eq!(a.default_base_url, b.default_base_url);
         }
@@ -529,7 +633,7 @@ mod tests {
     fn the_shared_credential_resolves_to_the_chat_dialect() {
         let provider = detect(|name| name == "OPENAI_API_KEY").unwrap();
         assert_eq!(provider.name, "openai");
-        assert_eq!(provider.dialect, Dialect::OpenAiChat);
+        assert_eq!(provider.client.dialect(), "chat-completions");
     }
 
     #[test]
