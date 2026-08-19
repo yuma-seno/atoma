@@ -472,10 +472,17 @@ pub async fn build_llm_client(
         .unwrap_or_else(|_| provider.default_base_url.to_string());
     let headers = (provider.headers)();
 
-    // Logged together, because "which provider" without "reached where" is what
-    // made the old default hard to see: every run said `openai` and none said
-    // openrouter.ai.
-    tracing::info!("LLM provider: {} at {}", provider.name, base_url);
+    // All three together, because any one of them alone leaves the question the old
+    // default made unanswerable. The name without the host is what hid an `openai`
+    // that meant OpenRouter. The host without the dialect leaves "does this endpoint
+    // serve /responses" to be guessed at, which is exactly what an operator pointing
+    // `OPENAI_BASE_URL` at their own gateway needs to know.
+    tracing::info!(
+        "LLM provider: {} ({}) at {}",
+        provider.name,
+        provider.client.dialect(),
+        base_url
+    );
 
     let credential = provider.client.credential(provider, credentials)?;
     provider
