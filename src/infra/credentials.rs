@@ -67,11 +67,7 @@ use anyhow::{Context, Result};
 /// were declared in `infra::llm` and missing here, so in environment mode a tool
 /// server inherited them -- and `shell` could read a provider key out of its own
 /// environment without going near `/proc`.
-const GITHUB_ENV_NAMES: &[&str] = &[
-    "GH_TOKEN",
-    "GITHUB_PERSONAL_ACCESS_TOKEN",
-    "GITHUB_TOKEN",
-];
+const GITHUB_ENV_NAMES: &[&str] = &["GH_TOKEN", "GITHUB_PERSONAL_ACCESS_TOKEN", "GITHUB_TOKEN"];
 
 /// Every name a tool server must not inherit.
 ///
