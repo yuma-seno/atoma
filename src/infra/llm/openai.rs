@@ -1,15 +1,17 @@
-use anyhow::{Context, Result};
+use anyhow::Result;
 use async_trait::async_trait;
 use serde_json::Value;
 
 use crate::domain::ports::{LlmChoice, LlmPort, LlmResponse, LlmUsage};
 use crate::domain::session::Message;
-use crate::infra::credentials::Credentials;
 use crate::infra::llm::shared::openai_compat_call;
 
-pub(crate) const DEFAULT_OPENAI_BASE_URL: &str = "https://openrouter.ai/api/v1";
-
-/// Client for OpenAI and OpenAI-compatible endpoints (e.g. OpenRouter).
+/// Client for any endpoint speaking OpenAI's chat-completions dialect.
+///
+/// Which endpoint, which credential and which extra headers all come from the
+/// caller. They used to be read here — an environment variable with a default,
+/// inline in the constructor — which is how one provider's attribution headers came
+/// to be sent to every provider. See `Provider` in `mod.rs`.
 pub struct OpenAIClient {
     pub(crate) client: reqwest::Client,
     pub(crate) base_url: String,
@@ -18,30 +20,18 @@ pub struct OpenAIClient {
 }
 
 impl OpenAIClient {
-    pub fn from_credentials(client: reqwest::Client, credentials: &Credentials) -> Result<Self> {
-        let api_key = credentials.get("OPENAI_API_KEY").context(
-            "OPENAI_API_KEY is not set. Set OPENAI_API_KEY for OpenAI-compatible providers,\n\
-             ANTHROPIC_API_KEY for Anthropic,\n\
-             or ATOMA_COPILOT_TOKEN for GitHub Copilot.\n\
-             Use ATOMA_PROVIDER to select explicitly.",
-        )?;
-        let base_url = std::env::var("OPENAI_BASE_URL")
-            .unwrap_or_else(|_| DEFAULT_OPENAI_BASE_URL.to_string());
-        let app_name =
-            std::env::var("OPENAI_APP_NAME").unwrap_or_else(|_| env!("CARGO_PKG_NAME").to_string());
-        let app_url = std::env::var("OPENAI_APP_URL")
-            .unwrap_or_else(|_| env!("CARGO_PKG_REPOSITORY").to_string());
-
-        Ok(OpenAIClient {
+    pub fn new(
+        client: reqwest::Client,
+        base_url: String,
+        api_key: String,
+        extra_headers: Vec<(String, String)>,
+    ) -> Self {
+        OpenAIClient {
             client,
             base_url,
             api_key,
-            extra_headers: vec![
-                ("X-Title".to_string(), app_name.clone()),
-                ("X-OpenRouter-Title".to_string(), app_name),
-                ("HTTP-Referer".to_string(), app_url),
-            ],
-        })
+            extra_headers,
+        }
     }
 }
 

@@ -15,24 +15,14 @@
 //! ecosystem speaks — vLLM, Ollama, LM Studio, Azure, and every gateway built
 //! to that shape — and dropping it to gain one content type would cost far more
 //! than it bought.
-use anyhow::{Context, Result};
+use anyhow::Result;
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::Value;
 
 use crate::domain::ports::{LlmChoice, LlmPort, LlmResponse, LlmUsage};
 use crate::domain::session::{Message, ToolCall, ToolCallFunction};
-use crate::infra::credentials::Credentials;
 use crate::infra::llm::shared::send_json_with_retry;
-
-/// The same default as `openai.rs`, and it has to stay the same.
-///
-/// Both clients read one `OPENAI_API_KEY` and one `OPENAI_BASE_URL`, so a
-/// deployment that sets neither must reach the same host either way. Pointing
-/// this one at OpenAI while the other went to OpenRouter sent an OpenRouter key
-/// to `platform.openai.com`, which answers `401 invalid_api_key` — a message
-/// that reads like a bad secret and is really a bad default.
-const DEFAULT_BASE_URL: &str = "https://openrouter.ai/api/v1";
 
 pub struct OpenAIResponsesClient {
     pub(crate) client: reqwest::Client,
@@ -41,17 +31,14 @@ pub struct OpenAIResponsesClient {
 }
 
 impl OpenAIResponsesClient {
-    pub fn from_credentials(client: reqwest::Client, credentials: &Credentials) -> Result<Self> {
-        let api_key = credentials
-            .get("OPENAI_API_KEY")
-            .context("OPENAI_API_KEY is required for the openai-responses provider")?;
-        let base_url =
-            std::env::var("OPENAI_BASE_URL").unwrap_or_else(|_| DEFAULT_BASE_URL.to_string());
-        Ok(OpenAIResponsesClient {
+    /// Endpoint and credential come from the caller: the vendor is one row of the
+    /// provider table, and this dialect is another row of the same one.
+    pub fn new(client: reqwest::Client, base_url: String, api_key: String) -> Self {
+        OpenAIResponsesClient {
             client,
             base_url,
             api_key,
-        })
+        }
     }
 }
 
@@ -352,19 +339,6 @@ fn reply_to_llm_response(raw: ResponsesReply) -> LlmResponse {
 mod tests {
     use super::*;
     use serde_json::json;
-
-    // The two OpenAI clients read one key and one base URL between them, so a
-    // deployment that sets neither has to reach the same host either way. When
-    // these drifted apart, an OpenRouter key went to `platform.openai.com` and
-    // came back `401 invalid_api_key` — which reads like a bad secret and was a
-    // bad default.
-    #[test]
-    fn both_openai_clients_default_to_the_same_host() {
-        assert_eq!(
-            DEFAULT_BASE_URL,
-            crate::infra::llm::openai::DEFAULT_OPENAI_BASE_URL
-        );
-    }
 
     fn tool_message_with_image() -> Message {
         Message::tool_blocks(

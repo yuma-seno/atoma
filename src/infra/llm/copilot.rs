@@ -8,7 +8,6 @@ use crate::domain::session::Message;
 use crate::infra::credentials::Credentials;
 use crate::infra::llm::shared::openai_compat_call;
 
-const COPILOT_BASE_URL: &str = "https://api.githubcopilot.com";
 
 /// Exchange a GitHub PAT for a short-lived GitHub Copilot API token.
 async fn exchange_copilot_token(client: &reqwest::Client, github_token: &str) -> Result<String> {
@@ -55,12 +54,24 @@ async fn exchange_copilot_token(client: &reqwest::Client, github_token: &str) ->
 /// Client for GitHub Copilot (OpenAI-compatible wire protocol with Copilot auth).
 pub struct CopilotClient {
     pub(crate) client: reqwest::Client,
+    pub(crate) base_url: String,
     pub(crate) copilot_token: String,
 }
 
 impl CopilotClient {
-    pub async fn from_credentials(
+    /// Exchange a GitHub credential for a Copilot token, then hold both it and the
+    /// endpoint.
+    ///
+    /// The endpoint is a parameter now. It was a `const` — the only provider whose
+    /// address could not be changed, for no reason anyone had written down.
+    ///
+    /// The fallback to `GITHUB_TOKEN`/`GH_TOKEN` stays, and deliberately does not
+    /// take part in provider detection: a run that talks to GitHub has one of those
+    /// anyway, so detecting Copilot from them would make every run ambiguous. They
+    /// work when this provider was asked for by name.
+    pub async fn connect(
         client: reqwest::Client,
+        base_url: String,
         credentials: &Credentials,
     ) -> Result<Self> {
         let github_token = credentials
@@ -71,6 +82,7 @@ impl CopilotClient {
         let copilot_token = exchange_copilot_token(&client, &github_token).await?;
         Ok(CopilotClient {
             client,
+            base_url,
             copilot_token,
         })
     }
@@ -100,7 +112,7 @@ impl LlmPort for CopilotClient {
         ];
         let resp = openai_compat_call(
             &self.client,
-            COPILOT_BASE_URL,
+            &self.base_url,
             &self.copilot_token,
             &headers,
             model,

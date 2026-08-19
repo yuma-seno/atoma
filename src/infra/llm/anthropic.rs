@@ -1,14 +1,12 @@
-use anyhow::{Context, Result};
+use anyhow::Result;
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::Value;
 
 use crate::domain::ports::{LlmChoice, LlmPort, LlmResponse, LlmUsage};
 use crate::domain::session::{Message, ToolCall, ToolCallFunction};
-use crate::infra::credentials::Credentials;
 use crate::infra::llm::shared::{send_json_with_retry, ChatChoice, ChatResponse, Usage};
 
-const ANTHROPIC_BASE_URL: &str = "https://api.anthropic.com";
 const ANTHROPIC_API_VERSION: &str = "2023-06-01";
 const ANTHROPIC_DEFAULT_MAX_TOKENS: u64 = 8192;
 
@@ -20,17 +18,12 @@ pub struct AnthropicClient {
 }
 
 impl AnthropicClient {
-    pub fn from_credentials(client: reqwest::Client, credentials: &Credentials) -> Result<Self> {
-        let api_key = credentials
-            .get("ANTHROPIC_API_KEY")
-            .context("ANTHROPIC_API_KEY is required for the anthropic provider")?;
-        let base_url =
-            std::env::var("ANTHROPIC_BASE_URL").unwrap_or_else(|_| ANTHROPIC_BASE_URL.to_string());
-        Ok(AnthropicClient {
+    pub fn new(client: reqwest::Client, base_url: String, api_key: String) -> Self {
+        AnthropicClient {
             client,
             base_url,
             api_key,
-        })
+        }
     }
 
     async fn call_anthropic(
