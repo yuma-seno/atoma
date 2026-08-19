@@ -1,42 +1,24 @@
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
+use std::sync::LazyLock;
 
-#[derive(Parser)]
-#[command(
-    name = "atoma",
-    version,
-    about = "Stateless MCP orchestrator CLI",
-    long_about = "Atoma is a lightweight, stateless CLI that orchestrates AI agents \
-via Model Context Protocol (MCP). It connects LLMs (OpenAI-compatible) with MCP \
-server tools in an autonomous inference loop.
-
-It does NOT depend on any specific platform (GitHub, etc.). It is a pure protocol \
-orchestrator: parse agent definition → call LLM → execute tools → repeat until final response.",
-    after_long_help = "ENVIRONMENT VARIABLES:
-  One credential per provider, and the credential is what selects the provider
-  when ATOMA_PROVIDER is unset. Two of them set at once is an error rather than a
+/// `--help`'s trailing section, with the providers rendered from the list itself.
+///
+/// Those lines used to be written out here as well as declared in `infra::llm`: the
+/// same facts twice, in one crate, with nothing keeping them in step. Adding a provider
+/// left it undocumented; renaming one left this text naming something that no longer
+/// existed. Everything else here is prose about behaviour, which is not a second copy
+/// of anything.
+static ENVIRONMENT_HELP: LazyLock<String> = LazyLock::new(|| {
+    format!(
+        "ENVIRONMENT VARIABLES:
+  One credential per provider, and the credential is what selects the provider when
+  ATOMA_PROVIDER is unset. Two of them set at once is an error rather than a
   precedence: which one to use is not something the credentials decide.
 
-  OPENAI_API_KEY         (required*)  OpenAI, and any endpoint reached by pointing
-                                       OPENAI_BASE_URL somewhere else
-  OPENAI_BASE_URL        (optional)   default: https://api.openai.com/v1
-  OPENROUTER_API_KEY     (required*)  OpenRouter
-  OPENROUTER_BASE_URL    (optional)   default: https://openrouter.ai/api/v1
-  ORCAROUTER_API_KEY     (required*)  OrcaRouter
-  ORCAROUTER_BASE_URL    (optional)   default: https://api.orcarouter.ai/v1
-  ANTHROPIC_API_KEY      (required*)  Anthropic (Claude)
-  ANTHROPIC_BASE_URL     (optional)   default: https://api.anthropic.com
-  ATOMA_COPILOT_TOKEN    (required*)  GitHub PAT with `copilot` scope for GitHub Copilot
-                                       (fallback: GITHUB_TOKEN or GH_TOKEN, which do
-                                       not take part in auto-detection)
-  COPILOT_BASE_URL       (optional)   default: https://api.githubcopilot.com
-  ATOMA_PROVIDER         (optional)   Name the provider. Each router serves both
-                                       dialects under its own name:
-                                         openai, openai-responses,
-                                         openrouter, openrouter-responses,
-                                         orcarouter, orcarouter-responses,
-                                         anthropic, github-copilot
-                                       Auto-detected from the credential when unset.
+{providers}
+  ATOMA_PROVIDER         (optional)   Name one of the providers above instead of
+                                       letting the credential decide.
   ATOMA_APP_NAME         (optional)   Application name sent to routers that attribute
                                        requests (OpenRouter). Default: atoma
   ATOMA_APP_URL          (optional)   Application URL sent with it.
@@ -45,8 +27,11 @@ orchestrator: parse agent definition → call LLM → execute tools → repeat u
   ATOMA_MCP_TIMEOUT      (optional)   MCP tool call timeout in seconds (default: 60)
   ATOMA_MCP_INIT_TIMEOUT (optional)   MCP server init timeout in seconds (default: 120)
 
-  * Exactly one provider credential must be provided, unless ATOMA_PROVIDER or an
-    agent definition's `provider:` names which one to use.
+  GitHub Copilot also accepts GITHUB_TOKEN or GH_TOKEN, which deliberately take no
+  part in auto-detection: a run that talks to GitHub holds one anyway.
+
+  Exactly one provider credential must be set, unless ATOMA_PROVIDER or an agent
+  definition's `provider:` names which one to use.
 
 CONFIGURATION FILE:
   atoma.toml can be placed in the current directory or any ancestor directory.
@@ -60,7 +45,23 @@ EXAMPLES:
   atoma run --agent-def ./agent.md --prompt-file ./prompt.txt
   atoma run --profile review --in-session ./sess.json
   atoma run --agent-def ./agent.md --output json --prompt-file ./task.txt
-  atoma init > atoma.toml"
+  atoma init > atoma.toml",
+        providers = crate::infra::llm::describe_providers(),
+    )
+});
+
+#[derive(Parser)]
+#[command(
+    name = "atoma",
+    version,
+    about = "Stateless MCP orchestrator CLI",
+    long_about = "Atoma is a lightweight, stateless CLI that orchestrates AI agents \
+via Model Context Protocol (MCP). It connects LLMs (OpenAI-compatible) with MCP \
+server tools in an autonomous inference loop.
+
+It does NOT depend on any specific platform (GitHub, etc.). It is a pure protocol \
+orchestrator: parse agent definition → call LLM → execute tools → repeat until final response.",
+    after_long_help = ENVIRONMENT_HELP.as_str()
 )]
 pub struct Cli {
     /// Allow a debugger to attach to this process, at the cost of its confinement

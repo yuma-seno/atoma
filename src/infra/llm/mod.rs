@@ -379,6 +379,28 @@ static PROVIDERS: &[&dyn Provider] = &[
     &GitHubCopilot,
 ];
 
+/// The providers, as the CLI's help text describes them.
+///
+/// Rendered from the list rather than written a second time. `cli.rs` used to carry
+/// its own copy of every provider's name, credential and endpoint variable — the same
+/// facts, in the same crate, with nothing keeping them in step. A provider added here
+/// silently went undocumented, and one renamed left the help naming something that no
+/// longer existed.
+pub fn describe_providers() -> String {
+    let mut out = String::new();
+    for provider in PROVIDERS {
+        out.push_str(&format!(
+            "  {:<22} {} ({}), at {} unless {} says otherwise\n",
+            provider.credential(),
+            provider.name(),
+            provider.dialect(),
+            provider.default_base_url(),
+            provider.base_url_var(),
+        ));
+    }
+    out
+}
+
 /// The provider names, for a message that has to list them.
 fn provider_names() -> String {
     PROVIDERS
@@ -700,6 +722,23 @@ mod tests {
         );
         let error = by_name(ONLY_ONE, "openrouter").unwrap_err().to_string();
         assert!(error.contains("Valid values: anthropic"), "{error}");
+    }
+
+    /// The help text is generated, so this checks the rendering rather than a second
+    /// copy of the facts: every provider has to appear in it, with the two names an
+    /// operator has to type.
+    #[test]
+    fn the_help_text_describes_every_provider() {
+        let help = describe_providers();
+        for provider in PROVIDERS {
+            assert!(
+                help.contains(provider.name()),
+                "{} is missing from the help",
+                provider.name()
+            );
+            assert!(help.contains(provider.credential()), "{}", provider.name());
+            assert!(help.contains(provider.base_url_var()), "{}", provider.name());
+        }
     }
 
     /// Extra headers belong to the provider that reads them, not to the dialect it
