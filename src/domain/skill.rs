@@ -1,6 +1,16 @@
 use serde::Deserialize;
 use std::collections::BTreeMap;
 
+/// The name of the built-in tool that loads a skill.
+///
+/// Here rather than in `application`, because the system prompt names it too and
+/// `infra::template` cannot reach an application constant without inverting the
+/// dependency. It was a literal in that template, so renaming this would have told every
+/// model, in every prompt, to call a tool that no longer exists -- and it would have
+/// called it, received "Unknown tool", and loaded no skill, with nothing failing at
+/// build time.
+pub const LOAD_SKILL_TOOL: &str = "atoma_builtin__load_skill";
+
 /// Metadata exposed in the system prompt before a skill is loaded.
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 pub struct SkillMetadata {

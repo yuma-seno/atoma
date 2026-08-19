@@ -61,6 +61,27 @@ pub enum OutputFormat {
     Json,
 }
 
+impl OutputFormat {
+    /// Read the `--output` flag's value.
+    ///
+    /// Exists so the flag and the `output =` key cannot disagree about what the words
+    /// mean. `main.rs` matched the two strings itself, in parallel with the
+    /// `rename_all = "lowercase"` derive above, so adding a variant would have been
+    /// accepted in a config file and refused on the command line -- one rule, expressed
+    /// twice, in a parser and in its consumer.
+    pub fn from_arg(raw: &str) -> anyhow::Result<Self> {
+        serde_json::from_value(serde_json::Value::String(raw.to_string())).map_err(|_| {
+            anyhow::anyhow!(
+                "Unsupported output format: {raw}. Valid values: {}",
+                Self::NAMES.join(", ")
+            )
+        })
+    }
+
+    /// The accepted spellings, for the message above.
+    const NAMES: [&'static str; 2] = ["text", "json"];
+}
+
 /// Named profile overrides.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ProfileConfig {

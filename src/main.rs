@@ -56,12 +56,7 @@ async fn main() -> Result<()> {
         } => {
             let config = config_module::discover_and_load()?.1;
 
-            let output_override = match output.as_deref() {
-                Some("json") => Some(OutputFormat::Json),
-                Some("text") => Some(OutputFormat::Text),
-                Some(other) => anyhow::bail!("Unsupported output format: {}", other),
-                None => None,
-            };
+            let output_override = output.as_deref().map(OutputFormat::from_arg).transpose()?;
 
             let resolved = config_module::resolve_run_config(
                 CliOverrides {

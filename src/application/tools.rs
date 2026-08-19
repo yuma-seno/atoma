@@ -5,7 +5,7 @@ use serde_json::Value;
 use crate::domain::ports::{ToolCallResult, ToolPort};
 use crate::domain::skill::SkillCatalog;
 
-pub const LOAD_SKILL_TOOL: &str = "atoma_builtin__load_skill";
+pub use crate::domain::skill::LOAD_SKILL_TOOL;
 const BUILTIN_PREFIX: &str = "atoma_builtin__";
 
 /// Combines Atoma's unconfigurable built-in tools with configured MCP tools.

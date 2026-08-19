@@ -11,8 +11,14 @@ pub struct AgentDef {
     pub name: String,
     pub description: String,
     pub model: String,
-    /// LLM provider override. Checked before `ATOMA_PROVIDER` env var and auto-detection.
-    /// Valid values: `openai`, `openai-responses`, `github-copilot`, `anthropic`.
+    /// LLM provider override. Checked before the `ATOMA_PROVIDER` variable and before
+    /// auto-detection from the credential.
+    ///
+    /// The valid names are the providers `infra::llm` declares, and are deliberately not
+    /// repeated here: this comment listed four of them for long enough to be wrong,
+    /// missing every router provider, while sitting on the field a user fills in.
+    /// `atoma --help` prints the real list, and naming one that does not exist fails with
+    /// it too.
     #[serde(default)]
     pub provider: Option<String>,
     /// Whether this agent's model can read an image.

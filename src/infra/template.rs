@@ -26,7 +26,7 @@ Each tool runs as its own process and receives only the credentials its own conf
 {{AVAILABLE_TOOLS}}
 
 # Available Skills
-Skills are reusable instructions loaded on demand. Call `atoma_builtin__load_skill` before work covered by a relevant skill.
+Skills are reusable instructions loaded on demand. Call `{{LOAD_SKILL_TOOL}}` before work covered by a relevant skill.
 
 {{AVAILABLE_SKILLS}}
 
@@ -54,6 +54,7 @@ Before taking action or generating final output, always use the `<thought>` tag 
 /// - `{{COLLEAGUES_LIST}}` — formatted list of known colleagues
 /// - `{{AVAILABLE_TOOLS}}` — formatted list of tool descriptions
 /// - `{{AVAILABLE_SKILLS}}` — skill names and descriptions (not full instructions)
+/// - `{{LOAD_SKILL_TOOL}}` — the name of the tool that loads one, from `domain::skill`
 /// - `{{WORKING_DIRECTORY}}` — current working directory
 ///
 /// Pass `custom_template` to override the built-in template entirely.
@@ -95,6 +96,11 @@ pub fn build_system_prompt(
     } else {
         prompt = prompt.replace("{{AVAILABLE_TOOLS}}", &tool_descriptions.join("\n"));
     }
+
+    // The one place the tool's name enters the prompt. A custom template written before
+    // this placeholder existed simply keeps whatever it says, which is the same tolerance
+    // every other placeholder here has.
+    prompt = prompt.replace("{{LOAD_SKILL_TOOL}}", crate::domain::skill::LOAD_SKILL_TOOL);
 
     if skills.is_empty() {
         prompt = prompt.replace("{{AVAILABLE_SKILLS}}", "No skills currently available.");
