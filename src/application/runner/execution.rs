@@ -85,7 +85,6 @@ async fn execute_tool_calls(
     session: &mut Session,
     tools: &mut Box<dyn ToolPort + Send>,
     failure_tracker: &mut ToolFailureTracker,
-    vision: bool,
 ) -> Result<bool> {
     session
         .messages
@@ -135,7 +134,7 @@ async fn execute_tool_calls(
                 );
                 session
                     .messages
-                    .push(tool_result_message(&tool_call.id, &result, vision));
+                    .push(tool_result_message(&tool_call.id, &result));
                 if result.session_ends {
                     tracing::info!(
                         "Tool '{}' requested session suspension — will end after this iteration",
@@ -173,38 +172,39 @@ const IMAGE_WITHHELD: &str =
     "[image withheld: this agent's model is not configured to read images. \
      Set `vision: true` in its agent definition if the model supports them.]";
 
-/// Build the session message for a tool result, withholding pictures the running
-/// model cannot read.
+/// Build the session message for a tool result.
 ///
-/// A text-only result keeps the plain-string form every session written so far
-/// holds, so the change is invisible to the runs that do not use pictures.
-fn tool_result_message(tool_call_id: &str, result: &ToolCallResult, vision: bool) -> Message {
+/// A text-only result keeps the plain-string form every session written so far holds,
+/// so this is invisible to the runs that do not use pictures.
+///
+/// It does NOT consult `vision`, and that is the fix rather than an omission. It used
+/// to: a `vision: false` agent had the picture replaced by `IMAGE_WITHHELD` *before the
+/// message entered the session*, so what was written to `atoma-data` was not what
+/// happened. Turn `vision: true` and resume that session and the picture is gone for
+/// good, while the model reads a line asserting it cannot see images.
+///
+/// Withholding belongs where messages LEAVE — see `messages_for_provider` — and having
+/// it in both places meant the earlier one only had side effects on disk.
+fn tool_result_message(tool_call_id: &str, result: &ToolCallResult) -> Message {
     if result.images.is_empty() {
         return Message::tool(tool_call_id, &result.content);
-    }
-    if !vision {
-        let text = format!("{}\n{}", result.content, IMAGE_WITHHELD);
-        return Message::tool(tool_call_id, &text);
     }
     Message::tool_blocks(tool_call_id, &result.content, &result.images)
 }
 
 /// The messages to send, with pictures withheld from a model that cannot read them.
 ///
-/// `tool_result_message` above withholds the ones a TOOL returned, at the moment
-/// they enter the session. That covers one of the two ways a picture arrives. The
-/// other is a caller putting one into the session itself — a person pastes a
-/// screenshot on an issue and the runner embeds it — and those never pass through
-/// that function, so a `vision: false` agent sent them to the provider and a
-/// text-only model answered with an API error that lost the run.
+/// The only place this decision is made. A picture reaches a session two ways — a tool
+/// returned it, or a caller embedded one it was given, such as a screenshot a person
+/// pasted on an issue — and the gate used to sit on the first path only, so the second
+/// went to the provider unchanged and a text-only model answered with an API error that
+/// lost the run.
 ///
-/// So the decision belongs where every message LEAVES, not where some of them
-/// arrive. This is the only call site of `chat_completion`, which is what makes it
-/// that place: a new way of getting a picture into a session cannot miss it, and
-/// neither can a new adapter.
+/// Here it cannot be missed by either: this is the only call site of `chat_completion`,
+/// so a new way of getting a picture in, and a new adapter, are both covered.
 ///
-/// The session itself is left alone. What is stored is the record of what happened;
-/// this is only what this provider is asked to read.
+/// The session is left alone, and now genuinely is. What is stored is the record of what
+/// happened; this is only what one provider is asked to read.
 fn messages_for_provider(messages: &[Message], vision: bool) -> Cow<'_, [Message]> {
     if vision || !messages.iter().any(carries_image) {
         return Cow::Borrowed(messages);
@@ -334,7 +334,6 @@ pub async fn inference_loop(
                 session,
                 tools,
                 &mut failure_tracker,
-                vision,
             )
             .await?;
 
@@ -464,6 +463,32 @@ mod tests {
         assert_eq!(
             blocks[1]["type"], "image_url",
             "what happened is still recorded"
+        );
+    }
+
+    /// The half this test used to leave out, and where the claim was false.
+    ///
+    /// A tool result went through a second gate that replaced the picture BEFORE the
+    /// message entered the session, so the record on `atoma-data` said an image was
+    /// withheld where an image had been. Resuming that session with `vision: true` could
+    /// never get it back.
+    #[test]
+    fn a_tool_result_is_stored_as_it_arrived_whatever_the_agent_can_read() {
+        let result = ToolCallResult {
+            content: "Here is the screen:".to_string(),
+            images: vec![serde_json::json!({"type": "image", "data": "AAAA", "mimeType": "image/png"})],
+            ..Default::default()
+        };
+
+        let stored = tool_result_message("call_1", &result);
+        let blocks = content_blocks(&stored).expect("the images are still blocks");
+        assert_eq!(blocks[1]["type"], "image", "the session records the picture");
+
+        // And the agent that cannot read it still does not receive it.
+        let sent = messages_for_provider(&[stored], false);
+        assert_eq!(
+            content_blocks(&sent[0]).expect("blocks")[1]["text"],
+            IMAGE_WITHHELD
         );
     }
 

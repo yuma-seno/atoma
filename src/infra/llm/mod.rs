@@ -84,6 +84,17 @@ pub trait Provider: Sync + std::fmt::Debug {
         credentials: &Credentials,
     ) -> Result<Box<dyn LlmPort + Send + Sync>>;
 
+    /// Every credential name this provider might read, not only the one it advertises.
+    ///
+    /// The two differ for exactly one reason and it matters: `credential` is what
+    /// auto-detection keys on, and this is what has to be kept out of a tool server's
+    /// environment. Copilot reads three names and advertises one, so a list built from
+    /// `credential` alone would leave the other two inheritable — the failure just fixed
+    /// for the router keys, one level down.
+    fn credential_names(&self) -> Vec<&'static str> {
+        vec![self.credential()]
+    }
+
     /// The endpoint in effect: the default, or what the environment replaced it with.
     fn base_url(&self) -> String {
         std::env::var(self.base_url_var()).unwrap_or_else(|_| self.default_base_url().to_string())
@@ -267,6 +278,11 @@ impl Provider for GitHubCopilot {
         "copilot-chat"
     }
 
+    /// All three, so the union that keeps credentials out of tool servers covers them.
+    fn credential_names(&self) -> Vec<&'static str> {
+        vec![self.credential(), "GITHUB_TOKEN", "GH_TOKEN"]
+    }
+
     fn api_key(&self, credentials: &Credentials) -> Result<String> {
         credentials
             .get(self.credential())
@@ -410,7 +426,10 @@ pub fn describe_providers() -> String {
 /// server inherited them and could read a provider key straight out of its own
 /// environment.
 pub fn provider_credential_names() -> Vec<&'static str> {
-    let mut names: Vec<&'static str> = PROVIDERS.iter().map(|p| p.credential()).collect();
+    let mut names: Vec<&'static str> = PROVIDERS
+        .iter()
+        .flat_map(|p| p.credential_names())
+        .collect();
     names.sort_unstable();
     names.dedup();
     names
@@ -775,6 +794,17 @@ mod tests {
         }
         assert!(names.contains(&"OPENROUTER_API_KEY"), "{names:?}");
         assert!(names.contains(&"ORCAROUTER_API_KEY"), "{names:?}");
+    }
+
+    /// A provider that READS a name it does not advertise has to publish it anyway, or
+    /// the union that strips credentials from tool servers leaves it inheritable.
+    /// Copilot is the one that does this, and it did.
+    #[test]
+    fn a_credential_a_provider_only_falls_back_to_is_still_published() {
+        let names = provider_credential_names();
+        for name in ["ATOMA_COPILOT_TOKEN", "GITHUB_TOKEN", "GH_TOKEN"] {
+            assert!(names.contains(&name), "{name} is missing from {names:?}");
+        }
     }
 
     /// Extra headers belong to the provider that reads them, not to the dialect it
