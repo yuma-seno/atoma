@@ -7,8 +7,8 @@ This guide gets you from zero to a successful `atoma run` using only the current
 - Rust toolchain `1.95.0` (see `rust-toolchain.toml`).
 - One provider credential, which is also what selects the provider:
   - `OPENAI_API_KEY` → `openai`
-  - `OPENROUTER_API_KEY` → `openrouter`
-  - `ORCAROUTER_API_KEY` → `orcarouter`
+  - `OPENROUTER_API_KEY` → `openrouter` (or `openrouter-responses`, by name)
+  - `ORCAROUTER_API_KEY` → `orcarouter` (or `orcarouter-responses`, by name)
   - `ANTHROPIC_API_KEY` → `anthropic`
   - `ATOMA_COPILOT_TOKEN` → `github-copilot`
 

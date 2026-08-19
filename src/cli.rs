@@ -30,9 +30,13 @@ orchestrator: parse agent definition → call LLM → execute tools → repeat u
                                        (fallback: GITHUB_TOKEN or GH_TOKEN, which do
                                        not take part in auto-detection)
   COPILOT_BASE_URL       (optional)   default: https://api.githubcopilot.com
-  ATOMA_PROVIDER         (optional)   Name the provider: 'openai', 'openai-responses',
-                                       'openrouter', 'orcarouter', 'anthropic', or
-                                       'github-copilot'. Auto-detected when unset.
+  ATOMA_PROVIDER         (optional)   Name the provider. Each router serves both
+                                       dialects under its own name:
+                                         openai, openai-responses,
+                                         openrouter, openrouter-responses,
+                                         orcarouter, orcarouter-responses,
+                                         anthropic, github-copilot
+                                       Auto-detected from the credential when unset.
   ATOMA_APP_NAME         (optional)   Application name sent to routers that attribute
                                        requests (OpenRouter). Default: atoma
   ATOMA_APP_URL          (optional)   Application URL sent with it.
