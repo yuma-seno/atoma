@@ -6,7 +6,7 @@ use std::path::Path;
 
 use crate::domain::agent::ParsedAgentDef;
 use crate::domain::session::{Message, Session};
-use crate::domain::skill::SkillCatalog;
+use crate::domain::skill::{SkillCatalog, SkillMetadata};
 use crate::domain::tool::ToolDef;
 
 // ── LLM port ──────────────────────────────────────────────────────────────────
@@ -162,6 +162,33 @@ pub trait ToolDefPort: Send + Sync {
 /// Port for loading and validating a skill catalog.
 pub trait SkillPort: Send + Sync {
     fn load(&self, root: &Path) -> Result<SkillCatalog>;
+}
+
+// ── Template port ─────────────────────────────────────────────────────────────
+
+/// Port for rendering the system prompt.
+///
+/// Every other dependency the runner has arrives through `RunDeps`; this one was reached
+/// for directly as `crate::infra::template`, the only `infra` import in `application`
+/// outside tests. That is not a crash waiting to happen, it is a hole in the arrangement
+/// the rest of the file keeps: with a port, a test can render its own prompt, and nothing
+/// in `application` knows how the built-in template is stored.
+pub trait TemplatePort: Send + Sync {
+    fn build_system_prompt(&self, context: &PromptContext<'_>) -> String;
+}
+
+/// Everything the prompt is built from.
+///
+/// A struct because it was six positional parameters, four of them strings or slices of
+/// strings — an order a caller can get wrong silently.
+pub struct PromptContext<'a> {
+    pub agent: &'a ParsedAgentDef,
+    pub tool_descriptions: &'a [String],
+    /// Overrides the built-in template entirely when present.
+    pub custom_template: Option<&'a str>,
+    pub working_dir: &'a str,
+    pub colleagues: &'a [(String, String)],
+    pub skills: &'a [SkillMetadata],
 }
 
 // ── MCP factory port ──────────────────────────────────────────────────────────

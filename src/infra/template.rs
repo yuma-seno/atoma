@@ -1,3 +1,22 @@
+/// The built-in template, as a port implementation.
+///
+/// A unit struct with no state: what it renders is this module's own constant, and the
+/// point of the port is that `application` does not need to know that.
+pub struct FileTemplateAdapter;
+
+impl crate::domain::ports::TemplatePort for FileTemplateAdapter {
+    fn build_system_prompt(&self, context: &crate::domain::ports::PromptContext<'_>) -> String {
+        build_system_prompt(
+            context.agent,
+            context.tool_descriptions,
+            context.custom_template,
+            context.working_dir,
+            context.colleagues,
+            context.skills,
+        )
+    }
+}
+
 #[cfg(test)]
 use crate::domain::agent::AgentDef;
 use crate::domain::agent::ParsedAgentDef;

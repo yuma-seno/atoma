@@ -9,11 +9,11 @@ use std::path::PathBuf;
 
 use crate::application::tools::RuntimeTools;
 use crate::domain::ports::{
-    AgentDefPort, LlmPort, LlmUsage, McpFactory, SessionPort, SkillPort, ToolDefPort, ToolPort,
+    AgentDefPort, LlmPort, LlmUsage, McpFactory, PromptContext, SessionPort, SkillPort,
+    TemplatePort, ToolDefPort, ToolPort,
 };
 use crate::domain::session::{Message, Session};
 use crate::domain::skill::SkillCatalog;
-use crate::infra::template;
 
 pub use execution::{inference_loop, CompletionReason, InferenceResult, MaxIterationsReached};
 
@@ -51,6 +51,7 @@ pub struct RunDeps<'a> {
     pub tool_def: &'a dyn ToolDefPort,
     pub skill: &'a dyn SkillPort,
     pub mcp_factory: &'a dyn McpFactory,
+    pub template: &'a dyn TemplatePort,
 }
 
 /// Run the agent: parse agent def, load session, connect MCP, run inference loop, save session.
@@ -162,14 +163,14 @@ pub async fn run(settings: RunSettings, deps: RunDeps<'_>) -> Result<RunOutcome>
         })
         .collect::<Result<Vec<_>>>()?;
 
-    let system_prompt = template::build_system_prompt(
-        &parsed_agent,
-        &tool_descriptions,
-        custom_template.as_deref(),
-        &working_dir,
-        &colleagues,
-        &skill_metadata,
-    );
+    let system_prompt = deps.template.build_system_prompt(&PromptContext {
+        agent: &parsed_agent,
+        tool_descriptions: &tool_descriptions,
+        custom_template: custom_template.as_deref(),
+        working_dir: &working_dir,
+        colleagues: &colleagues,
+        skills: &skill_metadata,
+    });
     tracing::debug!("System prompt:\n{}", system_prompt);
 
     // 5. Replace system message

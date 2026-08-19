@@ -103,6 +103,7 @@ async fn main() -> Result<()> {
                 },
                 RunDeps {
                     llm: llm.as_ref(),
+                    template: &infra::template::FileTemplateAdapter,
                     agent_def: &agent_def_port,
                     session: &session_port,
                     tool_def: &tool_def_port,
