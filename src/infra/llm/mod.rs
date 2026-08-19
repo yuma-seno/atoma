@@ -78,8 +78,22 @@ pub struct Provider {
     pub base_url_var: &'static str,
     /// Which wire format its endpoint speaks.
     pub dialect: Dialect,
-    /// Whether it reads the attribution headers below.
-    pub attribution: bool,
+    /// The headers this provider wants that no other should receive.
+    ///
+    /// A function rather than a flag, and that distinction is the point. A `bool`
+    /// named after one provider's feature works while there is one such feature and
+    /// turns into a row of unrelated booleans as soon as there are three — with the
+    /// behaviour they select living somewhere else, which is the arrangement this
+    /// whole change is undoing. Here the row carries its own.
+    ///
+    /// `no_headers` for most of them, and that is a real answer rather than a
+    /// missing one.
+    pub headers: fn() -> Vec<(String, String)>,
+}
+
+/// A provider that asks for nothing beyond the credential.
+fn no_headers() -> Vec<(String, String)> {
+    Vec::new()
 }
 
 /// Every provider Atoma speaks to.
@@ -102,7 +116,7 @@ const PROVIDERS: &[Provider] = &[
         default_base_url: "https://api.openai.com/v1",
         base_url_var: "OPENAI_BASE_URL",
         dialect: Dialect::OpenAiChat,
-        attribution: false,
+        headers: no_headers,
     },
     Provider {
         name: "openai-responses",
@@ -110,7 +124,7 @@ const PROVIDERS: &[Provider] = &[
         default_base_url: "https://api.openai.com/v1",
         base_url_var: "OPENAI_BASE_URL",
         dialect: Dialect::OpenAiResponses,
-        attribution: false,
+        headers: no_headers,
     },
     Provider {
         name: "openrouter",
@@ -118,7 +132,18 @@ const PROVIDERS: &[Provider] = &[
         default_base_url: "https://openrouter.ai/api/v1",
         base_url_var: "OPENROUTER_BASE_URL",
         dialect: Dialect::OpenAiChat,
-        attribution: true,
+        headers: openrouter_attribution,
+    },
+    // The same host, reached by the other dialect. Its own name because the run's
+    // log should say where the request went, which is exactly what
+    // `openai-responses` pointed at OpenRouter did not do.
+    Provider {
+        name: "openrouter-responses",
+        credential: "OPENROUTER_API_KEY",
+        default_base_url: "https://openrouter.ai/api/v1",
+        base_url_var: "OPENROUTER_BASE_URL",
+        dialect: Dialect::OpenAiResponses,
+        headers: openrouter_attribution,
     },
     Provider {
         name: "orcarouter",
@@ -126,7 +151,15 @@ const PROVIDERS: &[Provider] = &[
         default_base_url: "https://api.orcarouter.ai/v1",
         base_url_var: "ORCAROUTER_BASE_URL",
         dialect: Dialect::OpenAiChat,
-        attribution: false,
+        headers: no_headers,
+    },
+    Provider {
+        name: "orcarouter-responses",
+        credential: "ORCAROUTER_API_KEY",
+        default_base_url: "https://api.orcarouter.ai/v1",
+        base_url_var: "ORCAROUTER_BASE_URL",
+        dialect: Dialect::OpenAiResponses,
+        headers: no_headers,
     },
     Provider {
         name: "anthropic",
@@ -134,7 +167,7 @@ const PROVIDERS: &[Provider] = &[
         default_base_url: "https://api.anthropic.com",
         base_url_var: "ANTHROPIC_BASE_URL",
         dialect: Dialect::AnthropicMessages,
-        attribution: false,
+        headers: no_headers,
     },
     Provider {
         name: "github-copilot",
@@ -142,7 +175,7 @@ const PROVIDERS: &[Provider] = &[
         default_base_url: "https://api.githubcopilot.com",
         base_url_var: "COPILOT_BASE_URL",
         dialect: Dialect::CopilotChat,
-        attribution: false,
+        headers: copilot_headers,
     },
 ];
 
@@ -165,7 +198,7 @@ fn provider_names() -> String {
 /// `ATOMA_APP_*`, not `OPENAI_APP_*` as before: the value identifies this
 /// application, and naming it after one vendor is what made it look like OpenAI's
 /// business.
-fn attribution_headers() -> Vec<(String, String)> {
+fn openrouter_attribution() -> Vec<(String, String)> {
     let name =
         std::env::var("ATOMA_APP_NAME").unwrap_or_else(|_| env!("CARGO_PKG_NAME").to_string());
     let url =
@@ -174,6 +207,25 @@ fn attribution_headers() -> Vec<(String, String)> {
         ("X-Title".to_string(), name.clone()),
         ("X-OpenRouter-Title".to_string(), name),
         ("HTTP-Referer".to_string(), url),
+    ]
+}
+
+/// What GitHub Copilot's endpoint requires beyond the token.
+///
+/// In its client until now, built per request. Here instead, because "which headers
+/// does this provider want" is a question that should have one place to be answered
+/// — and having two providers answer it in two different places is what let the
+/// generic client's headers leak to everyone.
+fn copilot_headers() -> Vec<(String, String)> {
+    let pkg_id = format!("{}/{}", env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"));
+    vec![
+        ("Editor-Version".to_string(), pkg_id.clone()),
+        ("Editor-Plugin-Version".to_string(), pkg_id),
+        ("Copilot-Integration-Id".to_string(), "atoma-cli".to_string()),
+        (
+            "Openai-Intent".to_string(),
+            "conversation-panel".to_string(),
+        ),
     ]
 }
 
@@ -291,11 +343,7 @@ pub async fn build_llm_client(
     let provider = resolve_provider(provider_hint, |name| credentials.has(name))?;
     let base_url = std::env::var(provider.base_url_var)
         .unwrap_or_else(|_| provider.default_base_url.to_string());
-    let headers = if provider.attribution {
-        attribution_headers()
-    } else {
-        Vec::new()
-    };
+    let headers = (provider.headers)();
 
     // Logged together, because "which provider" without "reached where" is what
     // made the old default hard to see: every run said `openai` and none said
@@ -320,7 +368,7 @@ pub async fn build_llm_client(
             credential_for(provider, credentials)?,
         ))),
         Dialect::CopilotChat => Ok(Box::new(
-            CopilotClient::connect(http, base_url, credentials).await?,
+            CopilotClient::connect(http, base_url, headers, credentials).await?,
         )),
     }
 }
@@ -417,17 +465,49 @@ mod tests {
         );
     }
 
-    /// The attribution headers belong to the providers that read them, not to the
-    /// dialect they happen to share with everyone else.
+    /// Extra headers belong to the provider that reads them, not to the dialect it
+    /// happens to share with everyone else. The generic OpenAI-compatible client used
+    /// to send `X-OpenRouter-Title` to real OpenAI for exactly that reason.
     #[test]
-    fn only_openrouter_asks_for_attribution() {
+    fn extra_headers_reach_only_the_providers_that_asked() {
         for provider in PROVIDERS {
+            let names: Vec<&str> = (provider.headers)()
+                .iter()
+                .map(|(name, _)| name.as_str())
+                .collect::<Vec<_>>()
+                .iter()
+                .map(|s| *s)
+                .collect();
+            let wants_attribution = provider.name.starts_with("openrouter");
             assert_eq!(
-                provider.attribution,
-                provider.name == "openrouter",
+                names.contains(&"X-OpenRouter-Title"),
+                wants_attribution,
                 "{} disagrees about attribution headers",
                 provider.name
             );
+            if provider.name == "github-copilot" {
+                assert!(names.contains(&"Copilot-Integration-Id"), "{names:?}");
+            } else {
+                assert!(!names.contains(&"Copilot-Integration-Id"), "{names:?}");
+            }
+        }
+    }
+
+    /// Both routers serve both dialects, and each combination is its own name rather
+    /// than a base URL somebody has to know about. This is the claim the table makes
+    /// — that adding one is adding a row — held to.
+    #[test]
+    fn each_router_offers_both_dialects_under_its_own_name() {
+        for (chat, responses) in [
+            ("openrouter", "openrouter-responses"),
+            ("orcarouter", "orcarouter-responses"),
+        ] {
+            let a = by_name(chat).unwrap();
+            let b = by_name(responses).unwrap();
+            assert_eq!(a.dialect, Dialect::OpenAiChat);
+            assert_eq!(b.dialect, Dialect::OpenAiResponses);
+            assert_eq!(a.credential, b.credential);
+            assert_eq!(a.default_base_url, b.default_base_url);
         }
     }
 

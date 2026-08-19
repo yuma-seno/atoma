@@ -53,6 +53,7 @@ async fn exchange_copilot_token(client: &reqwest::Client, github_token: &str) ->
 pub struct CopilotClient {
     pub(crate) client: reqwest::Client,
     pub(crate) base_url: String,
+    pub(crate) headers: Vec<(String, String)>,
     pub(crate) copilot_token: String,
 }
 
@@ -70,6 +71,7 @@ impl CopilotClient {
     pub async fn connect(
         client: reqwest::Client,
         base_url: String,
+        headers: Vec<(String, String)>,
         credentials: &Credentials,
     ) -> Result<Self> {
         let github_token = credentials
@@ -81,6 +83,7 @@ impl CopilotClient {
         Ok(CopilotClient {
             client,
             base_url,
+            headers,
             copilot_token,
         })
     }
@@ -95,24 +98,11 @@ impl LlmPort for CopilotClient {
         tools: Option<&[Value]>,
         extra_body: &std::collections::HashMap<String, Value>,
     ) -> Result<LlmResponse> {
-        let pkg_id = format!("{}/{}", env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"));
-        let headers = vec![
-            ("Editor-Version".to_string(), pkg_id.clone()),
-            ("Editor-Plugin-Version".to_string(), pkg_id),
-            (
-                "Copilot-Integration-Id".to_string(),
-                "atoma-cli".to_string(),
-            ),
-            (
-                "Openai-Intent".to_string(),
-                "conversation-panel".to_string(),
-            ),
-        ];
         let resp = openai_compat_call(
             &self.client,
             &self.base_url,
             &self.copilot_token,
-            &headers,
+            &self.headers,
             model,
             messages,
             tools,
