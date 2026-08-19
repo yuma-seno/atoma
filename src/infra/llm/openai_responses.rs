@@ -478,6 +478,9 @@ mod tests {
         }))
         .unwrap();
         let response = reply_to_llm_response(raw);
-        assert_eq!(response.choices[0].finish_reason, Some(FinishReason::Length));
+        assert_eq!(
+            response.choices[0].finish_reason,
+            Some(FinishReason::Length)
+        );
     }
 }
