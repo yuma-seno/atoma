@@ -4,7 +4,7 @@ use serde_json::Value;
 use std::collections::{HashMap, VecDeque};
 use std::sync::Mutex;
 
-use atoma::domain::ports::{LlmChoice, LlmPort, LlmResponse, LlmUsage};
+use atoma::domain::ports::{FinishReason,LlmChoice, LlmPort, LlmResponse, LlmUsage};
 use atoma::domain::session::{Message, ToolCall, ToolCallFunction};
 
 /// A mock LLM client that returns pre-queued responses in order.
@@ -25,7 +25,7 @@ impl MockLlmClient {
         let response = LlmResponse {
             choices: vec![LlmChoice {
                 message: msg,
-                finish_reason: Some("stop".to_string()),
+                finish_reason: Some(FinishReason::Stop),
             }],
             usage: Some(LlmUsage {
                 prompt_tokens: 10,
@@ -50,7 +50,7 @@ impl MockLlmClient {
         let response = LlmResponse {
             choices: vec![LlmChoice {
                 message: msg,
-                finish_reason: Some("tool_calls".to_string()),
+                finish_reason: Some(FinishReason::ToolCalls),
             }],
             usage: None,
         };

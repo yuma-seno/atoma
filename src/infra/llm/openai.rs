@@ -2,7 +2,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use serde_json::Value;
 
-use crate::domain::ports::{LlmChoice, LlmPort, LlmResponse, LlmUsage};
+use crate::domain::ports::{FinishReason, LlmChoice, LlmPort, LlmResponse, LlmUsage};
 use crate::domain::session::Message;
 use crate::infra::llm::shared::openai_compat_call;
 
@@ -62,7 +62,10 @@ impl LlmPort for OpenAIClient {
                 .into_iter()
                 .map(|c| LlmChoice {
                     message: c.message,
-                    finish_reason: c.finish_reason,
+                    // The canonical spelling is this dialect's own, so a value that
+                    // does not read is a provider inventing one — `None`, and the runner
+                    // says so, rather than being quietly taken for `stop`.
+                    finish_reason: c.finish_reason.as_deref().and_then(FinishReason::from_openai),
                 })
                 .collect(),
             usage: resp.usage.map(|u| LlmUsage {

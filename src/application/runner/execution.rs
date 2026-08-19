@@ -5,7 +5,7 @@ use serde_json::Value;
 use std::borrow::Cow;
 use std::collections::HashMap;
 
-use crate::domain::ports::{LlmPort, LlmUsage, ToolCallResult, ToolPort};
+use crate::domain::ports::{FinishReason, LlmPort, LlmUsage, ToolCallResult, ToolPort};
 use crate::domain::session::{Message, Session, ToolCall};
 
 const MAX_IDENTICAL_TOOL_FAILURES: u8 = 3;
@@ -299,7 +299,11 @@ pub async fn inference_loop(
             .next()
             .context("No choices returned from LLM")?;
 
-        let finish_reason = choice.finish_reason.as_deref().unwrap_or("stop").to_owned();
+        // A provider that stated no reason is taken as a normal finish, as before. What
+        // changed is that a reason it DID state and no adapter recognised no longer
+        // arrives here as an unknown string: each adapter maps its own dialect, so this
+        // is either one of four values or absent.
+        let finish_reason = choice.finish_reason.unwrap_or(FinishReason::Stop);
         let tool_calls = choice.message.tool_calls;
         let content = choice.message.content;
 
@@ -320,7 +324,7 @@ pub async fn inference_loop(
                 continue;
             }
             consecutive_empty = 0;
-            if finish_reason != "tool_calls" {
+            if finish_reason != FinishReason::ToolCalls {
                 tracing::warn!(
                     "LLM returned finish_reason '{}' with tool_calls — processing anyway",
                     finish_reason
@@ -337,8 +341,10 @@ pub async fn inference_loop(
                 return Ok(InferenceResult::SessionEnded);
             }
         } else {
-            match finish_reason.as_str() {
-                "stop" | "end_turn" => {
+            match finish_reason {
+                // `end_turn` used to be an arm here and was dead: the Anthropic adapter
+                // has always translated it before this point.
+                FinishReason::Stop => {
                     let text = content
                         .as_ref()
                         .and_then(|c| c.as_str())
@@ -371,7 +377,7 @@ pub async fn inference_loop(
                         reason: CompletionReason::Stop,
                     });
                 }
-                "length" => {
+                FinishReason::Length => {
                     let text = content
                         .as_ref()
                         .and_then(|c| c.as_str())
@@ -388,11 +394,12 @@ pub async fn inference_loop(
                         reason: CompletionReason::Length,
                     });
                 }
-                "content_filter" => bail!("LLM response was blocked by content filter"),
-                "tool_calls" => {
+                FinishReason::ContentFilter => {
+                    bail!("LLM response was blocked by content filter")
+                }
+                FinishReason::ToolCalls => {
                     bail!("LLM returned finish_reason 'tool_calls' but no tool_calls in message")
                 }
-                other => bail!("LLM returned unexpected finish_reason: {}", other),
             }
         }
     }

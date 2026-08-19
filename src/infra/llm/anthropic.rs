@@ -3,7 +3,7 @@ use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::Value;
 
-use crate::domain::ports::{LlmChoice, LlmPort, LlmResponse, LlmUsage};
+use crate::domain::ports::{FinishReason, LlmChoice, LlmPort, LlmResponse, LlmUsage};
 use crate::domain::session::{Message, ToolCall, ToolCallFunction};
 use crate::infra::llm::shared::{
     send_json_with_retry, ChatChoice, ChatResponse, Usage, RESERVED_KEYS,
@@ -73,7 +73,7 @@ impl LlmPort for AnthropicClient {
                 .into_iter()
                 .map(|c| LlmChoice {
                     message: c.message,
-                    finish_reason: c.finish_reason,
+                    finish_reason: c.finish_reason.as_deref().and_then(FinishReason::from_openai),
                 })
                 .collect(),
             usage: resp.usage.map(|u| LlmUsage {
@@ -367,11 +367,28 @@ fn anthropic_to_chat_response(raw: AnthropicResponse) -> ChatResponse {
         Some(tool_calls)
     };
 
+    // Every stop reason this API documents, translated here because this is the only
+    // place that knows Anthropic's vocabulary. The last arm used to pass anything
+    // unrecognised through as-is, which turned a successful completion into "unexpected
+    // finish_reason: stop_sequence" in the runner -- reachable from an agent's
+    // `extra_body: stop_sequences`, since this adapter does not reserve that key.
     let finish_reason = match raw.stop_reason.as_deref() {
-        Some("end_turn") => Some("stop".to_string()),
+        // A stop sequence firing is the model finishing, as asked.
+        Some("end_turn" | "stop_sequence") => Some("stop".to_string()),
         Some("tool_use") => Some("tool_calls".to_string()),
         Some("max_tokens") => Some("length".to_string()),
-        other => other.map(|s| s.to_string()),
+        // `refusal` is this API's name for what the canonical vocabulary calls a content
+        // filter, and the runner reports that as its own outcome.
+        Some("refusal") => Some("content_filter".to_string()),
+        Some(other) => {
+            tracing::warn!(
+                "Anthropic returned stop_reason '{}', which this adapter does not map; \
+                 treating it as a normal finish",
+                other
+            );
+            Some("stop".to_string())
+        }
+        None => None,
     };
 
     ChatResponse {

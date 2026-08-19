@@ -20,7 +20,7 @@ use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::Value;
 
-use crate::domain::ports::{LlmChoice, LlmPort, LlmResponse, LlmUsage};
+use crate::domain::ports::{FinishReason, LlmChoice, LlmPort, LlmResponse, LlmUsage};
 use crate::domain::session::{Message, ToolCall, ToolCallFunction};
 use crate::infra::llm::shared::{merge_extra_body, send_json_with_retry};
 
@@ -310,14 +310,25 @@ fn reply_to_llm_response(raw: ResponsesReply) -> LlmResponse {
         }
     }
 
-    // `incomplete` with reason `max_output_tokens` is what Chat Completions
-    // calls a `length` finish, and the runner already knows how to report that.
+    // This API's `incomplete` reasons, mapped to the canonical vocabulary. Collapsing
+    // everything but `max_output_tokens` to `stop` is what made filtered output arrive as
+    // an empty normal finish, reported as "LLM returned empty response … 3 times in a
+    // row" after two paid retries -- an error naming the wrong cause.
     let finish_reason = match raw.status.as_deref() {
         Some("incomplete") => match raw.incomplete_details.and_then(|d| d.reason).as_deref() {
-            Some("max_output_tokens") => "length",
-            _ => "stop",
+            Some("max_output_tokens") => FinishReason::Length,
+            Some("content_filter") => FinishReason::ContentFilter,
+            Some(other) => {
+                tracing::warn!(
+                    "Responses API returned incomplete reason '{}', which this adapter does \
+                     not map; treating it as a normal finish",
+                    other
+                );
+                FinishReason::Stop
+            }
+            None => FinishReason::Stop,
         },
-        _ => "stop",
+        _ => FinishReason::Stop,
     };
 
     LlmResponse {
@@ -326,7 +337,7 @@ fn reply_to_llm_response(raw: ResponsesReply) -> LlmResponse {
                 (!text.is_empty()).then_some(text.as_str()),
                 (!tool_calls.is_empty()).then_some(tool_calls),
             ),
-            finish_reason: Some(finish_reason.to_string()),
+            finish_reason: Some(finish_reason),
         }],
         usage: raw.usage.map(|u| LlmUsage {
             prompt_tokens: u.input_tokens,

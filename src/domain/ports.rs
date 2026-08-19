@@ -20,7 +20,7 @@ pub struct LlmResponse {
 /// A single choice returned by the LLM.
 pub struct LlmChoice {
     pub message: Message,
-    pub finish_reason: Option<String>,
+    pub finish_reason: Option<FinishReason>,
 }
 
 /// Token usage statistics.
@@ -44,6 +44,68 @@ pub trait LlmPort: Send + Sync {
         tools: Option<&[Value]>,
         extra_body: &HashMap<String, Value>,
     ) -> Result<LlmResponse>;
+}
+
+/// Why a completion stopped.
+///
+/// The vocabulary used to exist only as the arms of a `match` in the runner, with each
+/// adapter expected to produce one of those strings and nothing checking that it had.
+/// Two consequences, both reachable:
+///
+/// - the Anthropic adapter passed unmapped stop reasons through as-is, so an agent with
+///   `extra_body: stop_sequences: [...]` — which that adapter does not reserve — got a
+///   perfectly good completion turned into "LLM returned unexpected finish_reason:
+///   stop_sequence", and the text was discarded;
+/// - the Responses adapter collapsed every `incomplete` reason except
+///   `max_output_tokens` to `stop`, so filtered output arrived as an empty `stop` and was
+///   reported as "LLM returned empty response … 3 times in a row" after two paid retries,
+///   naming the wrong cause.
+///
+/// As an enum, an adapter cannot invent a fifth value and the runner's match is checked
+/// by the compiler. What each dialect calls these stays in that dialect's adapter, which
+/// is the only place that knows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FinishReason {
+    /// The model finished of its own accord.
+    Stop,
+    /// The output hit a token ceiling.
+    Length,
+    /// The provider refused to return what the model produced.
+    ContentFilter,
+    /// The model asked for tools.
+    ToolCalls,
+}
+
+impl FinishReason {
+    /// Read the OpenAI chat-completions spelling, which is the canonical one.
+    ///
+    /// `None` for anything else, so a provider inventing a value is visible rather than
+    /// silently becoming `Stop`.
+    pub fn from_openai(raw: &str) -> Option<Self> {
+        match raw {
+            "stop" => Some(Self::Stop),
+            "length" => Some(Self::Length),
+            "content_filter" => Some(Self::ContentFilter),
+            "tool_calls" => Some(Self::ToolCalls),
+            _ => None,
+        }
+    }
+
+    /// The name to put in a message a person reads.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Stop => "stop",
+            Self::Length => "length",
+            Self::ContentFilter => "content_filter",
+            Self::ToolCalls => "tool_calls",
+        }
+    }
+}
+
+impl std::fmt::Display for FinishReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
 }
 
 // ── Tool port ─────────────────────────────────────────────────────────────────

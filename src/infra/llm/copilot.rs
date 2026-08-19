@@ -3,7 +3,7 @@ use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::Value;
 
-use crate::domain::ports::{LlmChoice, LlmPort, LlmResponse, LlmUsage};
+use crate::domain::ports::{FinishReason, LlmChoice, LlmPort, LlmResponse, LlmUsage};
 use crate::domain::session::Message;
 use crate::infra::llm::shared::openai_compat_call;
 /// Exchange a GitHub PAT for a short-lived GitHub Copilot API token.
@@ -110,7 +110,7 @@ impl LlmPort for CopilotClient {
                 .into_iter()
                 .map(|c| LlmChoice {
                     message: c.message,
-                    finish_reason: c.finish_reason,
+                    finish_reason: c.finish_reason.as_deref().and_then(FinishReason::from_openai),
                 })
                 .collect(),
             usage: resp.usage.map(|u| LlmUsage {

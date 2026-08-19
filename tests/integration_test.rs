@@ -11,7 +11,8 @@ use tempfile::tempdir;
 use atoma::application::runner::{run, CompletionReason, RunDeps, RunOutcome, RunSettings};
 use atoma::domain::agent::{AgentDef, ParsedAgentDef};
 use atoma::domain::ports::{
-    AgentDefPort, LlmChoice, LlmResponse, McpFactory, SessionPort, ToolDefPort, ToolPort,
+    AgentDefPort, FinishReason, LlmChoice, LlmResponse, McpFactory, SessionPort, ToolDefPort,
+    ToolPort,
 };
 use atoma::domain::session::{Message, Session};
 use atoma::domain::tool::ToolDef;
@@ -532,7 +533,7 @@ async fn test_repeated_empty_completions_abort() {
 /// content_filter finish_reason returns an error.
 #[tokio::test]
 async fn test_content_filter_returns_error() {
-    use atoma::domain::ports::{LlmChoice, LlmResponse};
+    use atoma::domain::ports::{FinishReason, LlmChoice, LlmResponse};
     use atoma::domain::session::Message;
 
     struct ContentFilterLlm;
@@ -548,7 +549,7 @@ async fn test_content_filter_returns_error() {
             Ok(LlmResponse {
                 choices: vec![LlmChoice {
                     message: Message::assistant(Some("filtered"), None),
-                    finish_reason: Some("content_filter".to_string()),
+                    finish_reason: Some(FinishReason::ContentFilter),
                 }],
                 usage: None,
             })
@@ -613,7 +614,7 @@ async fn test_truncated_response_reports_length_reason() {
             Ok(LlmResponse {
                 choices: vec![LlmChoice {
                     message: Message::assistant(Some("partial"), None),
-                    finish_reason: Some("length".to_string()),
+                    finish_reason: Some(FinishReason::Length),
                 }],
                 usage: None,
             })
@@ -682,7 +683,7 @@ async fn test_prompt_file_is_appended_and_persisted() {
             Ok(LlmResponse {
                 choices: vec![LlmChoice {
                     message: Message::assistant(Some("Done!"), None),
-                    finish_reason: Some("stop".to_string()),
+                    finish_reason: Some(FinishReason::Stop),
                 }],
                 usage: None,
             })
