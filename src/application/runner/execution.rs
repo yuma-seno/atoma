@@ -328,14 +328,9 @@ pub async fn inference_loop(
             }
 
             tracing::info!("LLM requested {} tool call(s)", calls.len());
-            let session_ends = execute_tool_calls(
-                agent_name,
-                &calls,
-                session,
-                tools,
-                &mut failure_tracker,
-            )
-            .await?;
+            let session_ends =
+                execute_tool_calls(agent_name, &calls, session, tools, &mut failure_tracker)
+                    .await?;
 
             if session_ends {
                 tracing::info!("Tool requested session suspension; ending inference loop");
@@ -476,13 +471,18 @@ mod tests {
     fn a_tool_result_is_stored_as_it_arrived_whatever_the_agent_can_read() {
         let result = ToolCallResult {
             content: "Here is the screen:".to_string(),
-            images: vec![serde_json::json!({"type": "image", "data": "AAAA", "mimeType": "image/png"})],
+            images: vec![
+                serde_json::json!({"type": "image", "data": "AAAA", "mimeType": "image/png"}),
+            ],
             ..Default::default()
         };
 
         let stored = tool_result_message("call_1", &result);
         let blocks = content_blocks(&stored).expect("the images are still blocks");
-        assert_eq!(blocks[1]["type"], "image", "the session records the picture");
+        assert_eq!(
+            blocks[1]["type"], "image",
+            "the session records the picture"
+        );
 
         // And the agent that cannot read it still does not receive it.
         let sent = messages_for_provider(&[stored], false);
