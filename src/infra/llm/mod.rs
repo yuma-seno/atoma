@@ -474,13 +474,8 @@ mod tests {
     #[test]
     fn extra_headers_reach_only_the_providers_that_asked() {
         for provider in PROVIDERS {
-            let names: Vec<&str> = (provider.headers)()
-                .iter()
-                .map(|(name, _)| name.as_str())
-                .collect::<Vec<_>>()
-                .iter()
-                .map(|s| *s)
-                .collect();
+            let headers = (provider.headers)();
+            let names: Vec<&str> = headers.iter().map(|(name, _)| name.as_str()).collect();
             let wants_attribution = provider.name.starts_with("openrouter");
             assert_eq!(
                 names.contains(&"X-OpenRouter-Title"),
@@ -488,11 +483,12 @@ mod tests {
                 "{} disagrees about attribution headers",
                 provider.name
             );
-            if provider.name == "github-copilot" {
-                assert!(names.contains(&"Copilot-Integration-Id"), "{names:?}");
-            } else {
-                assert!(!names.contains(&"Copilot-Integration-Id"), "{names:?}");
-            }
+            assert_eq!(
+                names.contains(&"Copilot-Integration-Id"),
+                provider.name == "github-copilot",
+                "{} disagrees about Copilot's headers",
+                provider.name
+            );
         }
     }
 
