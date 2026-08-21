@@ -813,10 +813,16 @@ mod classify_tests {
     /// queued: two consecutive timeouts leave two answers in the pipe.
     #[test]
     fn several_stale_responses_are_all_read_past() {
-        let queued = [json!({"id": 5, "result": {}}), json!({"id": 6, "result": {}})];
+        let queued = [
+            json!({"id": 5, "result": {}}),
+            json!({"id": 6, "result": {}}),
+        ];
         for value in &queued {
             assert!(matches!(classify(value, 7), Incoming::Abandoned(_)));
         }
-        assert_eq!(classify(&json!({"id": 7, "result": {}}), 7), Incoming::TheAnswer);
+        assert_eq!(
+            classify(&json!({"id": 7, "result": {}}), 7),
+            Incoming::TheAnswer
+        );
     }
 }
