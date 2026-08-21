@@ -8,12 +8,33 @@ use tokio::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command};
 use crate::domain::tool::{Hooks, ToolDef};
 use crate::infra::hooks;
 
-/// How long one `tools/list` or `tools/call` may take.
+/// How long one `tools/list` or `tools/call` may take, for a server that does not
+/// say otherwise.
+///
+/// Sixty seconds is right for a server that answers from memory or from one HTTP
+/// call, which is most of them. It is wrong for two kinds that exist:
+///
+///   - a shell server, whose whole job is running a build or a test suite. Its
+///     own `shell_execute` accepts `timeout_seconds` up to 3600 and defaults to
+///     300 -- and every value above 60 was a lie, because this constant killed
+///     the call first. The error named the tool, so it read as "the shell server
+///     is broken" rather than "the client gave up".
+///   - a server that loads a model on its first call. A 544MB reranker took 63.9s
+///     to load, measured; this gave up at 60.0s and the answer arrived 15s later.
+///
+/// So the value belongs to the server, not to this file. `request_timeout_secs`
+/// in the tools file is how a server says what it needs; this is what applies
+/// when it says nothing.
 const DEFAULT_REQUEST_TIMEOUT_SECS: u64 = 60;
 /// How long a server has to answer `initialize`, which includes its own startup.
 const DEFAULT_INIT_TIMEOUT_SECS: u64 = 120;
 
-fn request_timeout() -> Duration {
+/// The default, overridable by `ATOMA_MCP_TIMEOUT` for a whole run.
+///
+/// Kept as the fallback rather than removed: an operator debugging a slow runner
+/// wants one lever, not an edit to every entry in a tools file. A server that
+/// declares its own value wins over both.
+fn default_request_timeout() -> Duration {
     crate::infra::timeouts::from_env("ATOMA_MCP_TIMEOUT", DEFAULT_REQUEST_TIMEOUT_SECS)
 }
 
@@ -73,6 +94,10 @@ pub struct McpConnection {
     stdout: BufReader<ChildStdout>,
     process: Option<Child>,
     next_id: u64,
+    /// How long this server's `tools/list` and `tools/call` may take. Per server,
+    /// because 60 seconds means "stalled" for `github` and "still compiling" for
+    /// `shell`.
+    request_timeout: Duration,
 }
 
 impl Drop for McpConnection {
@@ -135,6 +160,10 @@ impl McpConnection {
             stdout: BufReader::new(stdout),
             process: Some(process),
             next_id: 1,
+            request_timeout: config
+                .request_timeout_secs
+                .map(Duration::from_secs)
+                .unwrap_or_else(default_request_timeout),
         };
 
         let init = tokio::time::timeout(
@@ -225,7 +254,7 @@ impl McpConnection {
 
     pub async fn list_tools(&mut self) -> Result<Vec<RegisteredTool>> {
         let response = tokio::time::timeout(
-            request_timeout(),
+            self.request_timeout,
             self.send_request("tools/list", serde_json::json!({})),
         )
         .await
@@ -263,7 +292,7 @@ impl McpConnection {
         arguments: &Value,
     ) -> Result<(String, Vec<Value>, bool)> {
         let response = tokio::time::timeout(
-            request_timeout(),
+            self.request_timeout,
             self.send_request(
                 "tools/call",
                 serde_json::json!({
@@ -338,7 +367,7 @@ impl McpConnection {
             .await?;
         self.stdin.flush().await?;
 
-        let response = self.read_response().await?;
+        let response = self.read_response(id).await?;
         tracing::debug!(
             "[MCP:{}] Received: {}",
             self.name,
@@ -356,7 +385,63 @@ impl McpConnection {
         Ok(response)
     }
 
-    async fn read_response(&mut self) -> Result<Value> {
+    /// The response to request `expected_id`, discarding anything else on the way.
+    ///
+    /// ## Why this checks the id
+    ///
+    /// It used to return the first thing it could parse, and the id it had just
+    /// written was never read back. That is correct exactly as long as no request
+    /// is ever abandoned -- and `tools/call` abandons one every time it times out.
+    /// The dropped future stops reading; the server, which knows nothing about the
+    /// timeout, finishes its work and writes the response anyway. It sits in the
+    /// pipe. The next call reads it.
+    ///
+    /// From then on every answer belongs to the previous question, for the life of
+    /// the run, and nothing detects it: the shape is valid, the content is
+    /// plausible, and the id that would have given it away was not being looked
+    /// at. Measured in a real run (2026-08-21, run 32436740948):
+    ///
+    /// ```text
+    /// 01:35:11  search_issues called
+    /// 01:36:11  ERROR Timed out calling tool 'search_issues'  <- client gives up
+    /// 01:36:34  query "..." -> #461, #464, #408               <- server answers anyway
+    /// 01:37:06  query "..." -> #408, #403, #464               <- the RETRY's answer,
+    ///                                                            read by the call after it
+    /// ```
+    ///
+    /// The agent got issues for a question it had already replaced. A wrong answer
+    /// that looks like an answer is worse than the timeout that caused it.
+    ///
+    /// Discarding rather than resynchronising: a late response is the answer to a
+    /// question nobody is waiting for any more. There is no caller to give it to.
+    /// It is logged at `warn` because it means a timeout fired, which is worth
+    /// seeing next to the tool that caused it.
+    async fn read_response(&mut self, expected_id: u64) -> Result<Value> {
+        loop {
+            let value = self.read_json_value().await?;
+            match classify(&value, expected_id) {
+                Incoming::TheAnswer => return Ok(value),
+                Incoming::Abandoned(id) => tracing::warn!(
+                    "[MCP:{}] discarding a late response to request {} while waiting for {} -- an earlier call timed out and the server answered it afterwards",
+                    self.name,
+                    id,
+                    expected_id,
+                ),
+                Incoming::NotAResponse => tracing::debug!(
+                    "[MCP:{}] not a response to {}, reading past it: {}",
+                    self.name,
+                    expected_id,
+                    value.get("method").and_then(Value::as_str).unwrap_or("?"),
+                ),
+            }
+        }
+    }
+
+    /// One complete JSON value from the server's stdout.
+    ///
+    /// Accumulates lines because a server may pretty-print, which puts one value
+    /// across many lines; `is_eof` is how serde says "valid so far, incomplete".
+    async fn read_json_value(&mut self) -> Result<Value> {
         let mut buf = String::new();
         loop {
             let mut line = String::new();
@@ -396,6 +481,47 @@ impl McpConnection {
             .await?;
         self.stdin.flush().await?;
         Ok(())
+    }
+}
+
+/// What a value read from a server is, relative to the request being awaited.
+#[derive(Debug, PartialEq)]
+enum Incoming {
+    /// The response to the request in flight.
+    TheAnswer,
+    /// A response to a request that timed out, carrying the id it answers.
+    Abandoned(u64),
+    /// Nothing this client asked for: a notification, or an id it could not have
+    /// issued. Read past either way.
+    NotAResponse,
+}
+
+/// Whether a value read from the server answers request `expected_id`.
+///
+/// A function rather than a `match` inside the read loop because this is the
+/// judgement that was missing, and a missing judgement is best kept somewhere a
+/// test can reach. See `read_response`.
+fn classify(value: &Value, expected_id: u64) -> Incoming {
+    match value.get("id") {
+        Some(Value::Number(n)) => match n.as_u64() {
+            Some(id) if id == expected_id => Incoming::TheAnswer,
+            // Includes an id this client never issued -- a negative or fractional
+            // one, or a number beyond u64. It is not the answer being waited for,
+            // which is the only thing that matters here.
+            Some(id) => Incoming::Abandoned(id),
+            // A negative, fractional, or oversized id. A server sending one is
+            // broken, but it is still not the answer being waited for, and that is
+            // the only question here.
+            None => Incoming::NotAResponse,
+        },
+        // `id: null` is what a server sends when it could not parse the request
+        // well enough to echo an id back. Only one request is ever in flight from
+        // this client, so it is about that one: hand it to the caller, which turns
+        // the `error` field into a message naming the tool.
+        Some(Value::Null) => Incoming::TheAnswer,
+        // A JSON-RPC notification -- `notifications/progress` and the like. Servers
+        // may send these unprompted, so this is normal traffic, not a fault.
+        _ => Incoming::NotAResponse,
     }
 }
 
@@ -632,5 +758,65 @@ mod split_content_tests {
         let (text, images) = split_content(&result);
         assert!(text.contains("unexpected"));
         assert!(images.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod classify_tests {
+    use super::{classify, Incoming};
+    use serde_json::json;
+
+    /// The case that was broken. A `tools/call` timed out, the server finished and
+    /// wrote its answer anyway, and the next call read it -- so every answer from
+    /// then on belonged to the previous question. Nothing detected it, because the
+    /// id was written and never read back.
+    #[test]
+    fn a_late_response_to_an_abandoned_request_is_not_the_answer() {
+        let stale = json!({"jsonrpc": "2.0", "id": 7, "result": {"content": []}});
+        assert_eq!(classify(&stale, 8), Incoming::Abandoned(7));
+    }
+
+    #[test]
+    fn the_response_with_the_matching_id_is_the_answer() {
+        let fresh = json!({"jsonrpc": "2.0", "id": 8, "result": {"content": []}});
+        assert_eq!(classify(&fresh, 8), Incoming::TheAnswer);
+    }
+
+    /// A server may send these at any time, so they are read past rather than
+    /// treated as an answer or as a fault.
+    #[test]
+    fn a_notification_has_no_id_and_answers_nothing() {
+        let progress = json!({"jsonrpc": "2.0", "method": "notifications/progress"});
+        assert_eq!(classify(&progress, 8), Incoming::NotAResponse);
+    }
+
+    /// The one case where a mismatched id must still be delivered: the server
+    /// could not parse the request well enough to echo an id, so it sent `null`.
+    /// Skipping it would wait out the whole timeout for a reply already received.
+    #[test]
+    fn a_null_id_carries_an_error_about_the_request_in_flight() {
+        let parse_error = json!({"jsonrpc": "2.0", "id": null, "error": {"code": -32700}});
+        assert_eq!(classify(&parse_error, 8), Incoming::TheAnswer);
+    }
+
+    /// An id this client cannot have issued. Not the answer being waited for,
+    /// which is all this needs to decide.
+    #[test]
+    fn an_id_that_is_not_a_u64_is_never_the_answer() {
+        for id in [json!(-1), json!(1.5)] {
+            let value = json!({"jsonrpc": "2.0", "id": id, "result": {}});
+            assert_ne!(classify(&value, 8), Incoming::TheAnswer, "{id}");
+        }
+    }
+
+    /// Reading past a stale response has to reach the real one, however many are
+    /// queued: two consecutive timeouts leave two answers in the pipe.
+    #[test]
+    fn several_stale_responses_are_all_read_past() {
+        let queued = [json!({"id": 5, "result": {}}), json!({"id": 6, "result": {}})];
+        for value in &queued {
+            assert!(matches!(classify(value, 7), Incoming::Abandoned(_)));
+        }
+        assert_eq!(classify(&json!({"id": 7, "result": {}}), 7), Incoming::TheAnswer);
     }
 }

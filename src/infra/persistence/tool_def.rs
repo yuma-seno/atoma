@@ -17,6 +17,10 @@ struct ToolConfig {
     pub env: HashMap<String, String>,
     #[serde(default)]
     pub hooks: HooksConfig,
+    /// Seconds one `tools/list` or `tools/call` on this server may take. Absent
+    /// means the client's default, which is what nearly every server wants.
+    #[serde(default)]
+    pub request_timeout_secs: Option<u64>,
 }
 
 #[derive(Deserialize, Default)]
@@ -45,6 +49,13 @@ struct HooksConfig {
 ///   hooks:
 ///     tool_allowlist: ["filesystem__*"]
 ///     before_tool: ./scripts/fs_guard.py
+///
+/// shell:
+///   command: bun
+///   args: ["run", "./scripts/shell.ts"]
+///   # A build is not a stall. Only set this for a server whose work genuinely
+///   # takes minutes -- it is also the only thing that notices a hung server.
+///   request_timeout_secs: 3600
 /// ```
 pub fn load(path: &Path, credentials: &Credentials) -> Result<HashMap<String, ToolDef>> {
     let content = fs::read_to_string(path)
@@ -109,6 +120,13 @@ pub fn load(path: &Path, credentials: &Credentials) -> Result<HashMap<String, To
                     .map(|(key, value)| (key, credentials.expand(&value)))
                     .collect(),
                 hooks,
+                // Zero means the default, the same as absent. `infra::timeouts`
+                // made that the rule for every timeout read from the environment
+                // after three of the four call sites took `0` literally and turned
+                // a stall detector into an immediate failure. A tools file is a
+                // different source, but the reader is the same person, and a rule
+                // that holds in one place and not the other is worse than either.
+                request_timeout_secs: cfg.request_timeout_secs.filter(|secs| *secs > 0),
             };
             Ok((name, def))
         })
@@ -148,5 +166,40 @@ impl crate::domain::ports::ToolDefPort for FileToolDefAdapter {
         path: &std::path::Path,
     ) -> anyhow::Result<std::collections::HashMap<String, crate::domain::tool::ToolDef>> {
         load(path, &self.credentials)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    fn load_yaml(body: &str) -> HashMap<String, ToolDef> {
+        let mut file = tempfile::NamedTempFile::new().expect("temp file");
+        file.write_all(body.as_bytes()).expect("write");
+        load(file.path(), &Credentials::from_environment()).expect("load")
+    }
+
+    #[test]
+    fn a_server_that_says_nothing_gets_the_client_default() {
+        let tools = load_yaml("github:\n  command: bun\n  args: [\"run\", \"github.ts\"]\n");
+        assert_eq!(tools["github"].request_timeout_secs, None);
+    }
+
+    /// The value `shell` needs: `shell_execute` advertises `timeout_seconds` up to
+    /// 3600, and every value above the client's 60-second default was unreachable.
+    #[test]
+    fn a_declared_timeout_is_carried_through() {
+        let tools = load_yaml("shell:\n  command: bun\n  args: []\n  request_timeout_secs: 3600\n");
+        assert_eq!(tools["shell"].request_timeout_secs, Some(3600));
+    }
+
+    /// Same rule as `infra::timeouts`: zero means the default, not "fail every call
+    /// immediately". One rule for every timeout in this codebase, because the
+    /// person reading them is the same person.
+    #[test]
+    fn zero_means_the_default_the_same_as_absent() {
+        let tools = load_yaml("web:\n  command: bun\n  args: []\n  request_timeout_secs: 0\n");
+        assert_eq!(tools["web"].request_timeout_secs, None);
     }
 }
