@@ -427,12 +427,21 @@ impl McpConnection {
                     id,
                     expected_id,
                 ),
-                Incoming::NotAResponse => tracing::debug!(
-                    "[MCP:{}] not a response to {}, reading past it: {}",
-                    self.name,
-                    expected_id,
-                    value.get("method").and_then(Value::as_str).unwrap_or("?"),
-                ),
+                Incoming::NotAResponse => {
+                    // Bound outside the macro: `tracing`s expansion has its own
+                    // `Value` trait in scope, so `Value::as_str` inside the call
+                    // resolves to that one and does not compile.
+                    let method = value
+                        .get("method")
+                        .and_then(Value::as_str)
+                        .unwrap_or("?");
+                    tracing::debug!(
+                        "[MCP:{}] not a response to {}, reading past it: {}",
+                        self.name,
+                        expected_id,
+                        method,
+                    );
+                }
             }
         }
     }
