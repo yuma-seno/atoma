@@ -73,6 +73,7 @@ impl SingleEntryToolDefPort {
                 args: vec![],
                 env: HashMap::new(),
                 hooks: atoma::domain::tool::Hooks::default(),
+                request_timeout_secs: None,
             },
         }
     }

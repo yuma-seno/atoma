@@ -33,4 +33,19 @@ pub struct ToolDef {
     pub args: Vec<String>,
     pub env: HashMap<String, String>,
     pub hooks: Hooks,
+    /// How long one `tools/list` or `tools/call` on this server may take, in
+    /// seconds. `None` means the client's default.
+    ///
+    /// Per server because the right value is a property of what the server does,
+    /// and a single number cannot be right for all of them. A `github` server that
+    /// has not answered in a minute has stopped answering. A `shell` server that
+    /// has not answered in a minute is compiling -- and its own `shell_execute`
+    /// advertises `timeout_seconds` up to 3600, which was unreachable while one
+    /// constant capped every server at 60.
+    ///
+    /// Raising it is not free: this is the only thing that notices a server which
+    /// has stopped responding, so a large value means a long wait before a stuck
+    /// run says so. Which is why it is opt-in per server rather than a bigger
+    /// default, and why a server that answers quickly should not set it.
+    pub request_timeout_secs: Option<u64>,
 }

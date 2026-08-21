@@ -30,6 +30,31 @@ At runtime:
 - Calls MCP `tools/list` and registers each tool as `server__tool`.
 - Converts MCP `inputSchema` to OpenAI-compatible `function.parameters`.
 
+### How long a server has to answer
+
+`request_timeout_secs` sets the limit for one `tools/list` or `tools/call` on that
+server. Omit it and the client's default applies (60s, or `ATOMA_MCP_TIMEOUT`).
+
+```yaml
+shell:
+  command: bun
+  args: ["run", "./scripts/shell.ts"]
+  request_timeout_secs: 3600
+```
+
+Set it when the server's work genuinely takes minutes — a shell server running a
+build or a test suite, or one that loads a model before it can answer. **A tool's
+own timeout argument does not raise this limit.** A `shell_execute` that accepts
+`timeout_seconds: 600` still gets cut off at 60 unless the server says so here,
+and the error names the tool rather than the limit that caused it.
+
+Leave it alone otherwise. This is the only thing that notices a server which has
+stopped responding, so a large value is a long wait before a stuck run says so.
+Setting it on a server that answers in milliseconds trades away the detection and
+buys nothing.
+
+`0` means the default, the same as omitting it.
+
 ## Prefixes and reserved namespaces
 
 - External tool names are always prefixed by server name: `server__name`.
@@ -61,8 +86,26 @@ Hook rules:
 Related env timeouts:
 
 - `ATOMA_HOOK_TIMEOUT` (default 30s)
-- `ATOMA_MCP_TIMEOUT` (default 60s)
+- `ATOMA_MCP_TIMEOUT` (default 60s) — the default for every server; a server's own
+  `request_timeout_secs` wins over it
 - `ATOMA_MCP_INIT_TIMEOUT` (default 120s)
+
+Every one of these treats `0`, blank, and unparseable as "use the default".
+
+## When a call times out
+
+The call fails and the agent sees an error naming the tool. The server is not
+told: it keeps working and eventually writes its answer, which arrives after
+nobody is waiting for it.
+
+Atoma reads past that answer and discards it, matching the JSON-RPC `id` to the
+request in flight. It logs a `warn` naming both ids when it does, which is the
+signal that a timeout fired on that server earlier in the run.
+
+This matters because the alternative is silent: without the id check, the next
+call on that server reads the abandoned answer, and every answer from then on
+belongs to the previous question for the rest of the run. Nothing about the shape
+of the result gives it away.
 
 ## Skill catalog format
 
