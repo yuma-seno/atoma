@@ -179,11 +179,6 @@ impl HealthLog {
         true
     }
 
-    /// Whether anything is waiting.
-    pub fn is_empty(&self) -> bool {
-        self.notes.is_empty()
-    }
-
     /// Take everything held, leaving it empty.
     ///
     /// Taken rather than read, so one note reaches one result. Leaving it in place
@@ -334,7 +329,7 @@ mod tests {
     fn routine_is_not_recorded() {
         let mut log = HealthLog::default();
         assert!(!log.record(Severity::Routine, "listening on stdio"));
-        assert!(log.is_empty());
+        assert!(log.drain().is_empty());
     }
 
     /// Fifty search calls must not carry the same sentence fifty times. The first
@@ -355,7 +350,7 @@ mod tests {
         log.record(Severity::Error, "two");
         assert_eq!(log.drain().len(), 2);
         assert!(
-            log.is_empty(),
+            log.drain().is_empty(),
             "a note reaches one result, not every result after it"
         );
     }
@@ -380,7 +375,7 @@ mod tests {
             "7 further reports from this server were not shown",
         );
         assert!(
-            log.is_empty(),
+            log.drain().is_empty(),
             "the count is reported once, not on every later result"
         );
     }
@@ -397,7 +392,7 @@ mod tests {
     fn an_empty_message_is_not_a_report() {
         let mut log = HealthLog::default();
         assert!(!log.record(Severity::Warning, "   "));
-        assert!(log.is_empty());
+        assert!(log.drain().is_empty());
     }
 
     #[test]
