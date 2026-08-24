@@ -233,8 +233,8 @@ impl McpConnection {
         // two minutes turns a typo into a hang. Bounded by the same `init_timeout`
         // that already bounds a slow start over stdio.
         let wait_for_it = starts_a_process && config.url.is_some();
-        let init = tokio::time::timeout(init_timeout(), conn.initialize(init_params, wait_for_it))
-            .await;
+        let init =
+            tokio::time::timeout(init_timeout(), conn.initialize(init_params, wait_for_it)).await;
 
         // Whether this server said it can report its own trouble over the protocol,
         // which is what the `logging/setLevel` below is worth sending for. The value
@@ -745,9 +745,7 @@ where
         ("stdout", capture_output(stdout).await),
     ] {
         if !text.is_empty() {
-            said.push_str(&format!(
-                "\n--- {channel} ---\n{text}\n---------------"
-            ));
+            said.push_str(&format!("\n--- {channel} ---\n{text}\n---------------"));
         }
     }
     said
@@ -1002,12 +1000,9 @@ impl Http {
     }
 
     fn next_message(&mut self) -> Result<Value> {
-        self.pending.pop_front().with_context(|| {
-            format!(
-                "MCP server at {} sent no response to the request",
-                self.url
-            )
-        })
+        self.pending
+            .pop_front()
+            .with_context(|| format!("MCP server at {} sent no response to the request", self.url))
     }
 }
 
