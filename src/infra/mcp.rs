@@ -1,11 +1,13 @@
 use anyhow::{Context, Result};
 use serde_json::Value;
 use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command};
 
 use crate::domain::tool::{Hooks, ToolDef};
+use crate::domain::tool_health::{self, HealthLog, Severity};
 use crate::infra::hooks;
 
 /// How long one `tools/list` or `tools/call` may take, for a server that does not
@@ -98,6 +100,13 @@ pub struct McpConnection {
     /// because 60 seconds means "stalled" for `github` and "still compiling" for
     /// `shell`.
     request_timeout: Duration,
+    /// What this server has said about its own trouble, waiting to go out with its
+    /// next tool result. See `domain::tool_health` for why a result carries this at
+    /// all.
+    ///
+    /// Behind a lock because two readers fill it: this connection, from
+    /// `notifications/message` on stdout, and the detached task reading stderr.
+    health: Arc<Mutex<HealthLog>>,
 }
 
 impl Drop for McpConnection {
@@ -164,6 +173,7 @@ impl McpConnection {
                 .request_timeout_secs
                 .map(Duration::from_secs)
                 .unwrap_or_else(default_request_timeout),
+            health: Arc::new(Mutex::new(HealthLog::default())),
         };
 
         let init = tokio::time::timeout(
@@ -172,7 +182,7 @@ impl McpConnection {
                 "initialize",
                 serde_json::json!({
                     "protocolVersion": "2024-11-05",
-                    "capabilities": {},
+                    "capabilities": client_capabilities(),
                     "clientInfo": {
                         "name": env!("CARGO_PKG_NAME"),
                         "version": env!("CARGO_PKG_VERSION")
@@ -182,7 +192,11 @@ impl McpConnection {
         )
         .await;
 
-        match init {
+        // Whether this server said it can report its own trouble over the protocol,
+        // which is what the `logging/setLevel` below is worth sending for. The value
+        // of the match rather than a flag set inside it: there is no moment where it
+        // holds a guess.
+        let server_logs = match init {
             Ok(Ok(response)) => {
                 let result = response
                     .get("result")
@@ -207,8 +221,11 @@ impl McpConnection {
                     protocol,
                 );
 
+                let server_logs = result.pointer("/capabilities/logging").is_some();
+
                 if let Some(stderr_handle) = stderr {
                     let server_label = config.name.clone();
+                    let health = Arc::clone(&conn.health);
                     tokio::spawn(async move {
                         use tokio::io::AsyncBufReadExt;
                         let mut reader = BufReader::new(stderr_handle);
@@ -217,15 +234,27 @@ impl McpConnection {
                             line.clear();
                             match reader.read_line(&mut line).await {
                                 Ok(0) | Err(_) => break,
-                                Ok(_) => tracing::info!(
-                                    "[MCP:{}:stderr] {}",
-                                    server_label,
-                                    line.trim_end()
-                                ),
+                                Ok(_) => {
+                                    let text = line.trim_end();
+                                    tracing::info!("[MCP:{}:stderr] {}", server_label, text);
+                                    // The fallback channel, and today the only one
+                                    // in use: no server this project ships
+                                    // implements `logging` yet. Severity has to be
+                                    // read out of the words, which is what makes
+                                    // this the fallback rather than the primary.
+                                    let severity = tool_health::severity_of_stderr(text);
+                                    if severity != Severity::Routine {
+                                        if let Ok(mut log) = health.lock() {
+                                            log.record(severity, text);
+                                        }
+                                    }
+                                }
                             }
                         }
                     });
                 }
+
+                server_logs
             }
             Ok(Err(e)) => {
                 let stderr_msg = capture_stderr(stderr).await;
@@ -245,10 +274,45 @@ impl McpConnection {
                     stderr_msg,
                 );
             }
-        }
+        };
 
         conn.send_notification("notifications/initialized", serde_json::json!({}))
             .await?;
+
+        // Warnings and worse, from a server that said it can send them.
+        //
+        // Without this the server picks: MCP lets it send at "a default level of
+        // its choosing", which in practice is either nothing or every debug line.
+        // `warning` is exactly what reaches the agent, so asking for it is asking
+        // for what will be used, and nothing else crosses the transport.
+        //
+        // Best effort. A server that declared the capability and then refuses the
+        // request is still a working tool server; failing the connection over its
+        // log level would take away more than it protects.
+        if server_logs {
+            let level = serde_json::json!({ "level": "warning" });
+            match tokio::time::timeout(
+                conn.request_timeout,
+                conn.send_request("logging/setLevel", level),
+            )
+            .await
+            {
+                Ok(Ok(_)) => tracing::debug!(
+                    "MCP server '{}' will report at warning and above",
+                    config.name,
+                ),
+                Ok(Err(e)) => tracing::debug!(
+                    "MCP server '{}' declined logging/setLevel: {}",
+                    config.name,
+                    e,
+                ),
+                Err(_) => tracing::warn!(
+                    "MCP server '{}' did not answer logging/setLevel",
+                    config.name,
+                ),
+            }
+        }
+
         Ok(conn)
     }
 
@@ -336,16 +400,32 @@ impl McpConnection {
 
         let (content_parts, images) = split_content(result);
 
+        // Everything this server has reported since its last result, attached to
+        // this one. A tool's answer includes how well it could answer; the whole
+        // argument is in `domain::tool_health`.
+        //
+        // On the error path too. An error is when the agent most needs to know the
+        // server had already said something was wrong with it.
+        let notes = match self.health.lock() {
+            Ok(mut log) => log.drain(),
+            Err(_) => Vec::new(),
+        };
+        let annotation = tool_health::annotation(&self.name, &notes);
+
         if is_error {
             anyhow::bail!(
                 "Tool '{}' on MCP server '{}' reported an error: {}",
                 tool_name,
                 self.name,
-                content_parts,
+                tool_health::with_annotation(content_parts, annotation),
             );
         }
 
-        Ok((content_parts, images, session_ends))
+        Ok((
+            tool_health::with_annotation(content_parts, annotation),
+            images,
+            session_ends,
+        ))
     }
 
     async fn send_request(&mut self, method: &str, params: Value) -> Result<Value> {
@@ -435,12 +515,36 @@ impl McpConnection {
                         .get("method")
                         .and_then(Value::as_str)
                         .unwrap_or("?");
-                    tracing::debug!(
-                        "[MCP:{}] not a response to {}, reading past it: {}",
-                        self.name,
-                        expected_id,
-                        method,
-                    );
+                    // One notification is not traffic to skip. `notifications/message`
+                    // is the server reporting on itself, with a severity it chose;
+                    // it used to be discarded here, which is how a degraded server
+                    // stayed quiet -- see `domain::tool_health`.
+                    if method == LOG_NOTIFICATION {
+                        if let Some((severity, message)) = log_note(value.get("params")) {
+                            let kept = match self.health.lock() {
+                                Ok(mut log) => log.record(severity, &message),
+                                Err(_) => false,
+                            };
+                            let disposition = if kept {
+                                "goes out with the next result"
+                            } else {
+                                "already reported"
+                            };
+                            tracing::info!(
+                                "[MCP:{}:log] {} ({})",
+                                self.name,
+                                message,
+                                disposition,
+                            );
+                        }
+                    } else {
+                        tracing::debug!(
+                            "[MCP:{}] not a response to {}, reading past it: {}",
+                            self.name,
+                            expected_id,
+                            method,
+                        );
+                    }
                 }
             }
         }
@@ -532,6 +636,54 @@ fn classify(value: &Value, expected_id: u64) -> Incoming {
         // may send these unprompted, so this is normal traffic, not a fault.
         _ => Incoming::NotAResponse,
     }
+}
+
+/// What this client tells a server it can do.
+///
+/// `logging` says it will listen to `notifications/message`. A server may withhold
+/// those from a client that did not ask, so leaving this out is how a report of
+/// degradation never arrives -- see `domain::tool_health`.
+///
+/// A function so a test can hold it. Nothing observable breaks when a capability
+/// stops being declared: servers go quiet, tools keep answering, and the loss shows
+/// up as an absence months later.
+fn client_capabilities() -> Value {
+    serde_json::json!({ "logging": {} })
+}
+
+/// The method name of MCP's log notification.
+const LOG_NOTIFICATION: &str = "notifications/message";
+
+/// A `notifications/message` turned into what an agent would need to read.
+///
+/// MCP's shape is `{ level, logger?, data }`, where `data` is any JSON. The level
+/// is the server's own judgement, which is the whole reason this channel is
+/// preferred over reading stderr: there is nothing to infer.
+///
+/// `None` for anything routine, so no caller decides that a second time. A
+/// notification with no level is malformed and lands there too -- a missing
+/// severity is not an urgent one.
+fn log_note(params: Option<&Value>) -> Option<(Severity, String)> {
+    let params = params?;
+    let level = params.get("level").and_then(Value::as_str).unwrap_or("");
+    let severity = tool_health::severity_of_level(level);
+    if severity == Severity::Routine {
+        return None;
+    }
+
+    // `data` is free-form by specification. A string is the message; anything else
+    // is serialised, because a server that reports in an object is still reporting,
+    // and dropping it would lose the one thing this exists to carry.
+    let data = match params.get("data") {
+        Some(Value::String(text)) => text.clone(),
+        Some(other) => serde_json::to_string(other).unwrap_or_default(),
+        None => String::new(),
+    };
+    let message = match params.get("logger").and_then(Value::as_str) {
+        Some(logger) if !logger.trim().is_empty() => format!("{}: {}", logger.trim(), data),
+        _ => data,
+    };
+    Some((severity, message))
 }
 
 async fn capture_stderr(stderr: Option<ChildStderr>) -> String {
@@ -832,6 +984,85 @@ mod classify_tests {
         assert_eq!(
             classify(&json!({"id": 7, "result": {}}), 7),
             Incoming::TheAnswer
+        );
+    }
+}
+
+#[cfg(test)]
+mod log_note_tests {
+    use super::{log_note, LOG_NOTIFICATION};
+    use crate::domain::tool_health::Severity;
+    use serde_json::json;
+
+    /// The protocol channel, and why it is the primary one: the server said how bad
+    /// it was, so nothing has to be guessed from the words.
+    #[test]
+    fn a_warning_carries_the_servers_own_severity() {
+        let params = json!({"level": "warning", "data": "reranker unavailable"});
+        assert_eq!(
+            log_note(Some(&params)),
+            Some((Severity::Warning, "reranker unavailable".to_string())),
+        );
+    }
+
+    /// Routine traffic is not the agent's business. Dropped here so no caller has to
+    /// decide it a second time.
+    #[test]
+    fn an_info_message_is_not_a_report() {
+        let params = json!({"level": "info", "data": "listening"});
+        assert_eq!(log_note(Some(&params)), None);
+    }
+
+    /// A missing severity is not an urgent one -- and treating it as urgent would put
+    /// a malformed server's chatter into every result.
+    #[test]
+    fn a_notification_without_a_level_is_dropped() {
+        assert_eq!(log_note(Some(&json!({"data": "something"}))), None);
+        assert_eq!(log_note(None), None);
+    }
+
+    #[test]
+    fn the_logger_name_is_kept_when_there_is_one() {
+        let params = json!({"level": "error", "logger": "search.index", "data": "no such path"});
+        let (severity, message) = log_note(Some(&params)).expect("an error is a report");
+        assert_eq!(severity, Severity::Error);
+        assert_eq!(message, "search.index: no such path");
+    }
+
+    /// `data` is free-form by specification. A server reporting in an object is still
+    /// reporting; dropping it would lose the one thing this exists to carry.
+    #[test]
+    fn structured_data_survives_as_text() {
+        let params = json!({"level": "warning", "data": {"stage": "rerank", "fell_back": true}});
+        let (_, message) = log_note(Some(&params)).unwrap();
+        assert!(message.contains("rerank"), "{message}");
+        assert!(message.contains("fell_back"), "{message}");
+    }
+
+    /// A report with no `data` at all still reaches the agent as its level, rather
+    /// than being lost for having said nothing.
+    #[test]
+    fn a_bare_level_is_still_a_report() {
+        let (severity, message) = log_note(Some(&json!({"level": "error"}))).unwrap();
+        assert_eq!(severity, Severity::Error);
+        assert_eq!(message, "", "empty here; `HealthLog::record` is what refuses it");
+    }
+
+    /// Pinned because the string is the protocol's, not this project's: a typo would
+    /// silently return the code to discarding every report.
+    #[test]
+    fn the_method_name_is_the_one_mcp_defines() {
+        assert_eq!(LOG_NOTIFICATION, "notifications/message");
+    }
+
+    /// The declaration a server reads before it decides whether to report anything.
+    /// Undeclaring it breaks nothing that fails: servers just go quiet.
+    #[test]
+    fn the_client_says_it_will_listen_to_log_notifications() {
+        let capabilities = super::client_capabilities();
+        assert!(
+            capabilities.get("logging").is_some(),
+            "a server may send nothing to a client that did not ask: {capabilities}",
         );
     }
 }

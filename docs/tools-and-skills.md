@@ -55,6 +55,46 @@ buys nothing.
 
 `0` means the default, the same as omitting it.
 
+### When a server is not well
+
+A server can degrade without failing. The one this project ships that loads a
+reranker kept answering every search after the model failed to load -- with
+first-stage results, which look exactly like results. Nothing noticed for two
+releases.
+
+So a server's report about itself travels with its next tool result, named as
+coming from the server:
+
+```
+...the tool's answer...
+
+--- 1 problem reported by the 'search' server, not part of the answer above ---
+warning: could not preload the reranker (EACCES), results are first-stage ordered
+```
+
+Nothing is attached on a healthy call, and there is nowhere for an agent to go and
+look: it arrives where it is used. Warnings and errors only; anything a server logs
+at `info` or below stays in the run log.
+
+Two channels feed it:
+
+- **`notifications/message`**, MCP's `logging` capability. Atoma declares it,
+  asks for `warning` and above with `logging/setLevel`, and takes the severity
+  from the notification's `level`. This is the one to implement: it works over any
+  transport and the server says how bad the thing is.
+- **the server's stderr**, for a server that implements no logging capability --
+  which today is every third-party one. Severity is read out of the words
+  (`error`, `fatal`, `panic`, `warn`), so it is a guess: a line that happens to
+  contain "warning" is surfaced, and one reporting trouble without any of those
+  words is missed.
+
+The same report is attached once, not on every call after it, and at most twenty
+distinct ones travel with a single result -- past that a count goes in their place.
+
+For a server this project owns, log to `notifications/message`. A message an agent
+cannot act on costs it a result it has to read past, so what belongs at `warning`
+is what changed about the answer, not that something happened.
+
 ## Prefixes and reserved namespaces
 
 - External tool names are always prefixed by server name: `server__name`.
