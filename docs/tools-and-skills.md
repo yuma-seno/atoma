@@ -26,9 +26,80 @@ filesystem:
 
 At runtime:
 
-- Atoma spawns each configured server.
+- Atoma starts each configured server, or connects to one that is already running.
 - Calls MCP `tools/list` and registers each tool as `server__tool`.
 - Converts MCP `inputSchema` to OpenAI-compatible `function.parameters`.
+
+### Where a server is
+
+`command` starts one. `url` reaches one that is already running, over MCP's
+Streamable HTTP transport. Both together start one and then speak HTTP to it.
+
+```yaml
+# A child process, over stdio. The usual case.
+shell:
+  command: bun
+  args: ["run", "./scripts/shell.ts"]
+
+# Already running somewhere else.
+warehouse:
+  url: https://mcp.internal.example.com/mcp
+  headers:
+    Authorization: "Bearer ${WAREHOUSE_TOKEN}"
+
+# Started here, spoken to over HTTP.
+indexer:
+  command: ./scripts/indexer
+  url: http://127.0.0.1:9137/mcp
+  env:
+    GH_TOKEN: "${GH_TOKEN}"
+```
+
+A server with neither is refused when the tools file is read, as is a `url` that is
+not `http://` or `https://`.
+
+**A credential reaches a process through `env` and an endpoint through `headers`,
+and neither substitutes for the other.** `env` is applied to a child's environment,
+so on a server with a `url` and no `command` there is nothing to apply it to —
+that combination is refused rather than ignored, because a credential you believe
+you routed and did not is worse than an error. The mirror is refused for the same
+reason: `headers` on a server with no `url` would be a token that is never sent.
+Both lists are still per server, so a value reaches one server only by being named
+in that server's own block.
+
+What the third form buys is worth stating, because it looks redundant. A server
+atoma starts is one whose **stderr and stdout atoma owns**, so its reports still
+reach the agent (see below) — and one that can be handed a credential through its
+environment, which is how most servers are written to take one. A server somebody
+else is running has neither: it is authenticated by what it already holds, and
+whatever it logs, it logs where atoma cannot see.
+
+| | `command` | `url` | both |
+|---|---|---|---|
+| transport | stdio | Streamable HTTP | Streamable HTTP |
+| credential | `env` | `headers` | `env`, and `headers` if it wants them |
+| its logs | stderr | not visible here | stderr and stdout |
+| lifetime | the run | outlives every run | the run |
+| startup cost | every run | paid once, elsewhere | every run |
+
+A server atoma starts and then reaches over HTTP is not listening the instant it is
+spawned, so `initialize` is retried until it answers, bounded by
+`ATOMA_MCP_INIT_TIMEOUT` (120s). A `url` atoma did **not** start is tried once: it is
+either up or the address is wrong, and retrying a wrong address for two minutes
+turns a typo into a hang.
+
+### What Streamable HTTP does and does not do here
+
+- One POST per message. The response is either one JSON object or an SSE stream,
+  and both are accepted — the server chooses.
+- A `Mcp-Session-Id` the server assigns at `initialize` is sent back on every
+  later request, and so is the protocol version the server answered with.
+- **Not implemented:** the older HTTP+SSE transport (two endpoints, deprecated in
+  the specification since 2025-03-26), the optional `GET` stream for
+  server-initiated messages, resumption with `Last-Event-ID`, and OAuth. A token
+  goes in `headers`.
+- A session is not deleted when the run ends. Servers time them out; atoma does not
+  send the optional `DELETE`.
 
 ### How long a server has to answer
 
@@ -76,17 +147,23 @@ Nothing is attached on a healthy call, and there is nowhere for an agent to go a
 look: it arrives where it is used. Warnings and errors only; anything a server logs
 at `info` or below stays in the run log.
 
-Two channels feed it:
+Two channels feed it, whatever transport the server speaks:
 
 - **`notifications/message`**, MCP's `logging` capability. Atoma declares it,
   asks for `warning` and above with `logging/setLevel`, and takes the severity
   from the notification's `level`. This is the one to implement: it works over any
   transport and the server says how bad the thing is.
-- **the server's stderr**, for a server that implements no logging capability --
+- **the server's own output**, for a server that implements no logging capability --
   which today is every third-party one. Severity is read out of the words
-  (`error`, `fatal`, `panic`, `warn`), so it is a guess: a line that happens to
-  contain "warning" is surfaced, and one reporting trouble without any of those
-  words is missed.
+  (`error`, `errors`, `fatal`, `panic`, `warn`, `warning`, `warnings`), so it is a
+  guess: a line that happens to contain "warning" is surfaced, and one reporting
+  trouble without any of those words is missed.
+
+  This channel only exists for a server atoma started. Over stdio that means
+  stderr, because stdout is the transport; over HTTP it means stderr **and**
+  stdout, since neither is. **A server atoma did not start has no such channel at
+  all** — it logs where atoma cannot read — so for a remote server,
+  `notifications/message` is the only way a problem reaches the agent.
 
 The same report is attached once, not on every call after it, and at most twenty
 distinct ones travel with a single result -- past that a count goes in their place.

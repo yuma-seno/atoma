@@ -72,6 +72,8 @@ impl SingleEntryToolDefPort {
                 command: "echo".to_string(),
                 args: vec![],
                 env: HashMap::new(),
+                url: None,
+                headers: HashMap::new(),
                 hooks: atoma::domain::tool::Hooks::default(),
                 request_timeout_secs: None,
             },

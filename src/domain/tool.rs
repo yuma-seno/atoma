@@ -26,12 +26,41 @@ pub struct Hooks {
 ///
 /// Parsing from YAML and loading from disk is handled by
 /// `crate::infra::persistence::tool_def`.
+///
+/// # Where a server is
+///
+/// Three arrangements, and the fields say which:
+///
+/// | `command` | `url` | what it means |
+/// |---|---|---|
+/// | set | absent | a child process, spoken to over stdio |
+/// | absent | set | something already running, spoken to over HTTP |
+/// | set | set | atoma starts it, then speaks HTTP to it |
+///
+/// The third is not a curiosity. A server atoma starts is one whose stderr atoma
+/// owns, which is what keeps `domain::tool_health`'s fallback channel working and
+/// what lets a credential be routed to it -- and neither of those reaches a server
+/// somebody else is running. Whether the conversation then happens over a pipe or
+/// a socket is a separate question from who started it.
 #[derive(Debug, Clone)]
 pub struct ToolDef {
     pub name: String,
+    /// The program to start. Empty when the server is already running.
     pub command: String,
     pub args: Vec<String>,
+    /// The environment the child is started with. Empty when there is no child --
+    /// which is why a remote server declaring one is refused rather than ignored:
+    /// a credential you believe you routed and did not is the worst of the three
+    /// outcomes.
     pub env: HashMap<String, String>,
+    /// Where to reach the server over Streamable HTTP. `None` means stdio.
+    pub url: Option<String>,
+    /// Headers sent with every request to `url`.
+    ///
+    /// This is how a remote server is authenticated, and it is the whole of it.
+    /// `env` cannot reach an endpoint somebody else is running, so a token gets
+    /// there as a header or not at all.
+    pub headers: HashMap<String, String>,
     pub hooks: Hooks,
     /// How long one `tools/list` or `tools/call` on this server may take, in
     /// seconds. `None` means the client's default.

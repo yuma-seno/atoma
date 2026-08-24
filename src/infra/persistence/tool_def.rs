@@ -10,11 +10,21 @@ use crate::infra::credentials::{expand_from_environment, Credentials};
 /// YAML deserialization view — private to this module.
 #[derive(Deserialize)]
 struct ToolConfig {
+    /// Optional now, because a server that is already running has no command.
+    /// Which of `command` and `url` are present is checked in [`transport_of`],
+    /// where the error can say what the four combinations mean.
+    #[serde(default)]
     pub command: String,
     #[serde(default)]
     pub args: Vec<String>,
     #[serde(default)]
     pub env: HashMap<String, String>,
+    /// Where the server is, for one that is reached over Streamable HTTP.
+    #[serde(default)]
+    pub url: Option<String>,
+    /// Headers for every request to `url`.
+    #[serde(default)]
+    pub headers: HashMap<String, String>,
     #[serde(default)]
     pub hooks: HooksConfig,
     /// Seconds one `tools/list` or `tools/call` on this server may take. Absent
@@ -33,6 +43,71 @@ struct HooksConfig {
     pub before_tool: Option<String>,
     #[serde(default)]
     pub after_tool: Option<String>,
+}
+
+/// Which of the four combinations of `command` and `url` this entry is, or an
+/// error naming what is missing.
+///
+/// A function so the reasoning sits next to the rule. Three combinations are
+/// meaningful and one is not:
+///
+///   - `command`          -- a child, over stdio
+///   - `url`              -- something already running, over HTTP
+///   - `command` + `url`  -- atoma starts it, then speaks HTTP to it
+///   - neither            -- nothing to talk to
+///
+/// The last used to be impossible to write, because `command` was required. Now it
+/// is possible and is refused here, before anything starts: a tools file naming a
+/// server with no way to reach it would otherwise fail at connection time with an
+/// error about an empty program name.
+fn transport_of(name: &str, cfg: &ToolConfig) -> Result<()> {
+    let has_command = !cfg.command.trim().is_empty();
+    let url = cfg.url.as_deref().map(str::trim).unwrap_or("");
+    let has_url = !url.is_empty();
+
+    if !has_command && !has_url {
+        anyhow::bail!(
+            "Tool server '{}' names neither 'command' nor 'url', so there is nothing to \
+             connect to. Give it a 'command' to start a server over stdio, a 'url' to \
+             reach one that is already running, or both to start one and reach it over HTTP.",
+            name,
+        );
+    }
+
+    if has_url && !url.starts_with("http://") && !url.starts_with("https://") {
+        anyhow::bail!(
+            "Tool server '{}' has url '{}', which is not an http:// or https:// address. \
+             Streamable HTTP is the only transport a url names.",
+            name,
+            url,
+        );
+    }
+
+    // Refused rather than ignored, and this is the case worth being strict about.
+    // `env` is how a credential reaches a server, and it reaches it by being placed
+    // in a child process's environment. There is no child here, so the value goes
+    // nowhere -- and a credential someone believes they routed and did not is worse
+    // than either a failure or an honest absence. A remote endpoint is
+    // authenticated by `headers`.
+    if has_url && !has_command && !cfg.env.is_empty() {
+        anyhow::bail!(
+            "Tool server '{}' declares 'env' but no 'command', so nothing is started and \
+             those values reach nothing. A server at a url is authenticated with 'headers'.",
+            name,
+        );
+    }
+
+    // The mirror of the above, for the same reason: a header on a server nobody
+    // sends a request to is a token that was never sent.
+    if !has_url && !cfg.headers.is_empty() {
+        anyhow::bail!(
+            "Tool server '{}' declares 'headers' but no 'url'. A server spoken to over stdio \
+             has no requests to put them on; a credential reaches it through 'env'.",
+            name,
+        );
+    }
+
+    Ok(())
 }
 
 /// Load a tools YAML file and return a map of server-name → `ToolDef`.
@@ -56,6 +131,14 @@ struct HooksConfig {
 ///   # A build is not a stall. Only set this for a server whose work genuinely
 ///   # takes minutes -- it is also the only thing that notices a hung server.
 ///   request_timeout_secs: 3600
+///
+/// # Already running somewhere else. No process, so no `env`: the token is a
+/// # header, because that is the only thing that reaches an endpoint atoma did
+/// # not start.
+/// warehouse:
+///   url: https://mcp.internal.example.com/mcp
+///   headers:
+///     Authorization: "Bearer ${WAREHOUSE_TOKEN}"
 /// ```
 pub fn load(path: &Path, credentials: &Credentials) -> Result<HashMap<String, ToolDef>> {
     let content = fs::read_to_string(path)
@@ -86,6 +169,7 @@ pub fn load(path: &Path, credentials: &Credentials) -> Result<HashMap<String, To
     configs
         .into_iter()
         .map(|(name, cfg)| {
+            transport_of(&name, &cfg)?;
             let hooks = Hooks {
                 tool_allowlist: cfg.hooks.tool_allowlist,
                 tool_denylist: cfg.hooks.tool_denylist,
@@ -116,6 +200,21 @@ pub fn load(path: &Path, credentials: &Credentials) -> Result<HashMap<String, To
                 // older atoma is unaffected -- there is nothing to expand in it.
                 env: cfg
                     .env
+                    .into_iter()
+                    .map(|(key, value)| (key, credentials.expand(&value)))
+                    .collect(),
+                // The environment, not the credentials -- a url is an address and
+                // the delivery runner already points server paths at a checkout
+                // the same way. Same reasoning as `args` above.
+                url: cfg
+                    .url
+                    .map(|url| expand_from_environment(url.trim()))
+                    .filter(|url| !url.is_empty()),
+                // The credentials, like `env` -- these carry the token. Same
+                // routing rule: a value reaches a server only by being named in
+                // that server's own block.
+                headers: cfg
+                    .headers
                     .into_iter()
                     .map(|(key, value)| (key, credentials.expand(&value)))
                     .collect(),
@@ -201,5 +300,105 @@ mod tests {
     fn zero_means_the_default_the_same_as_absent() {
         let tools = load_yaml("web:\n  command: bun\n  args: []\n  request_timeout_secs: 0\n");
         assert_eq!(tools["web"].request_timeout_secs, None);
+    }
+
+    fn load_err(body: &str) -> String {
+        let mut file = tempfile::NamedTempFile::new().expect("temp file");
+        file.write_all(body.as_bytes()).expect("write");
+        load(file.path(), &Credentials::from_environment())
+            .expect_err("expected this tools file to be refused")
+            .to_string()
+    }
+
+    #[test]
+    fn a_command_alone_is_stdio() {
+        let tools = load_yaml("shell:\n  command: bun\n  args: []\n");
+        assert_eq!(tools["shell"].url, None);
+        assert!(tools["shell"].headers.is_empty());
+    }
+
+    #[test]
+    fn a_url_alone_needs_no_command() {
+        let tools = load_yaml("warehouse:\n  url: https://mcp.example.com/mcp\n");
+        assert_eq!(
+            tools["warehouse"].url.as_deref(),
+            Some("https://mcp.example.com/mcp"),
+        );
+        assert_eq!(tools["warehouse"].command, "");
+    }
+
+    /// Both, which is the arrangement that keeps a server's stderr -- and so its
+    /// health reports -- while talking to it over HTTP.
+    #[test]
+    fn a_command_and_a_url_together_are_allowed() {
+        let tools = load_yaml(
+            r#"local:
+  command: bun
+  args: ["run", "s.ts"]
+  url: http://127.0.0.1:9000/mcp
+"#,
+        );
+        assert_eq!(tools["local"].command, "bun");
+        assert!(tools["local"].url.is_some());
+    }
+
+    /// `command` used to be required, so this shape could not be written. It can
+    /// now, and connecting would fail with an error about an empty program name.
+    #[test]
+    fn neither_a_command_nor_a_url_is_refused_at_load() {
+        let message = load_err("nowhere:\n  args: []\n");
+        assert!(message.contains("neither"), "{message}");
+        assert!(message.contains("nowhere"), "{message}");
+    }
+
+    #[test]
+    fn a_url_that_is_not_http_is_refused() {
+        let message = load_err("odd:\n  url: ws://example.com/mcp\n");
+        assert!(message.contains("Streamable HTTP"), "{message}");
+    }
+
+    /// The case worth being strict about: `env` puts a value in a child's
+    /// environment, and there is no child. Ignoring it silently would mean a
+    /// credential someone believes they routed and did not.
+    #[test]
+    fn env_on_a_server_with_no_process_is_refused() {
+        let message = load_err(
+            r#"remote:
+  url: https://x.example/mcp
+  env:
+    GH_TOKEN: "${GH_TOKEN}"
+"#,
+        );
+        assert!(message.contains("reach nothing"), "{message}");
+        assert!(message.contains("headers"), "{message}");
+    }
+
+    /// And the mirror: a header on a server nobody sends a request to.
+    #[test]
+    fn headers_on_a_stdio_server_are_refused() {
+        let message = load_err(
+            r#"piped:
+  command: bun
+  headers:
+    Authorization: "Bearer x"
+"#,
+        );
+        assert!(message.contains("no 'url'"), "{message}");
+        assert!(message.contains("env"), "{message}");
+    }
+
+    /// `env` is allowed the moment there is a process to put it in, even when the
+    /// conversation happens over HTTP.
+    #[test]
+    fn env_is_allowed_when_a_command_starts_the_server() {
+        let tools = load_yaml(
+            r#"local:
+  command: bun
+  url: http://127.0.0.1:9000/mcp
+  env:
+    GH_TOKEN: "${GH_TOKEN}"
+"#,
+        );
+        assert!(tools["local"].env.contains_key("GH_TOKEN"));
     }
 }

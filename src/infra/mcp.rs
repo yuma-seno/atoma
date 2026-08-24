@@ -1,10 +1,10 @@
 use anyhow::{Context, Result};
 use serde_json::Value;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
-use tokio::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command};
+use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWriteExt, BufReader};
+use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 
 use crate::domain::tool::{Hooks, ToolDef};
 use crate::domain::tool_health::{self, HealthLog, Severity};
@@ -92,8 +92,11 @@ pub struct RegisteredTool {
 
 pub struct McpConnection {
     pub name: String,
-    stdin: ChildStdin,
-    stdout: BufReader<ChildStdout>,
+    /// How this server is reached. Everything else here reads the same for a child
+    /// process and for something already running at a url.
+    transport: Transport,
+    /// The child, when there is one. A server at a url that atoma did not start has
+    /// none, and outlives the run.
     process: Option<Child>,
     next_id: u64,
     /// How long this server's `tools/list` and `tools/call` may take. Per server,
@@ -122,52 +125,92 @@ impl Drop for McpConnection {
     }
 }
 
+/// Start the program a definition names, with the environment it declares.
+///
+/// A tool server gets the credentials its own configuration names, and no others.
+///
+/// Not `env_clear()`. A tool server needs PATH to find its interpreter, HOME for
+/// its package caches, LANG for its encoding, and an allowlist of that would be
+/// long, runtime-specific, and wrong the first time someone adds a Python server --
+/// exactly the enumeration this codebase has been burned by before. Removing the
+/// credentials leaves everything a runtime needs untouched.
+///
+/// The removal comes first and `envs` second, so a server that declares one of
+/// these gets it back. That is the whole routing mechanism: `github` says
+/// `GH_TOKEN: ${GH_TOKEN}` and receives it, `shell` says nothing and does not.
+///
+/// All three pipes, whichever transport follows. What stdout then means differs --
+/// see `connect`.
+fn spawn_process(config: &ToolDef) -> Result<Child> {
+    let mut cmd = Command::new(&config.command);
+    cmd.args(&config.args);
+    for name in crate::infra::credentials::credential_env_names() {
+        cmd.env_remove(name);
+    }
+    cmd.envs(&config.env);
+    cmd.stdin(std::process::Stdio::piped());
+    cmd.stdout(std::process::Stdio::piped());
+    cmd.stderr(std::process::Stdio::piped());
+    cmd.spawn()
+        .with_context(|| format!("Failed to spawn MCP server: {}", config.name))
+}
+
 impl McpConnection {
-    pub async fn spawn(config: &ToolDef) -> Result<Self> {
-        let mut cmd = Command::new(&config.command);
-        cmd.args(&config.args);
+    /// Reach the server this definition names, starting it first if it names a
+    /// command.
+    ///
+    /// Was `spawn`, and the rename is the point: starting a process is one of the
+    /// things this may do rather than the whole of what it is. The three
+    /// arrangements are in `domain::tool::ToolDef`.
+    pub async fn connect(config: &ToolDef) -> Result<Self> {
+        let starts_a_process = !config.command.trim().is_empty();
+        let mut process: Option<Child> = None;
+        // Held rather than read, so a failure to initialise can put what the server
+        // said into the error. The log readers take them once it succeeds.
+        let mut stderr = None;
+        let mut logged_stdout = None;
+        let mut stdio: Option<(ChildStdin, BufReader<ChildStdout>)> = None;
 
-        // A tool server gets the credentials its own configuration names, and no
-        // others.
-        //
-        // Not `env_clear()`. A tool server needs PATH to find its interpreter,
-        // HOME for its package caches, LANG for its encoding, and an allowlist of
-        // that would be long, runtime-specific, and wrong the first time someone
-        // adds a Python server -- exactly the enumeration this codebase has been
-        // burned by before. Removing the credentials leaves everything a runtime
-        // needs untouched.
-        //
-        // The removal comes first and `envs` second, so a server that declares
-        // one of these gets it back. That is the whole routing mechanism: `github`
-        // says `GH_TOKEN: ${GH_TOKEN}` and receives it, `shell` says nothing and
-        // does not.
-        for name in crate::infra::credentials::credential_env_names() {
-            cmd.env_remove(name);
+        if starts_a_process {
+            let mut child = spawn_process(config)?;
+            stderr = child.stderr.take();
+            if config.url.is_none() {
+                // Over stdio the pipe IS the transport, so nothing else may read it.
+                let stdin = child
+                    .stdin
+                    .take()
+                    .context("Failed to capture MCP server stdin")?;
+                let stdout = child
+                    .stdout
+                    .take()
+                    .context("Failed to capture MCP server stdout")?;
+                stdio = Some((stdin, BufReader::new(stdout)));
+            } else {
+                // Over HTTP it is not, so whatever the server writes there is
+                // ordinary logging and is read like stderr. Left unread it fills the
+                // pipe and stalls the server at 64KB -- a hang with no message
+                // attached to it.
+                logged_stdout = child.stdout.take();
+            }
+            process = Some(child);
         }
-        cmd.envs(&config.env);
-        cmd.stdin(std::process::Stdio::piped());
-        cmd.stdout(std::process::Stdio::piped());
-        cmd.stderr(std::process::Stdio::piped());
 
-        let mut process = cmd
-            .spawn()
-            .with_context(|| format!("Failed to spawn MCP server: {}", config.name))?;
-
-        let stdin = process
-            .stdin
-            .take()
-            .context("Failed to capture MCP server stdin")?;
-        let stdout = process
-            .stdout
-            .take()
-            .context("Failed to capture MCP server stdout")?;
-        let stderr = process.stderr.take();
+        let transport = match (&config.url, stdio) {
+            (Some(url), _) => Transport::Http(Http::new(url.clone(), config.headers.clone())),
+            (None, Some((stdin, stdout))) => Transport::Stdio { stdin, stdout },
+            // `persistence::tool_def` refuses a server with neither, so a tools file
+            // cannot reach this. Named rather than unwrapped, so the two files do not
+            // have to be read together to know that.
+            (None, None) => anyhow::bail!(
+                "MCP server '{}' has neither a command to start nor a url to reach",
+                config.name,
+            ),
+        };
 
         let mut conn = McpConnection {
             name: config.name.clone(),
-            stdin,
-            stdout: BufReader::new(stdout),
-            process: Some(process),
+            transport,
+            process,
             next_id: 1,
             request_timeout: config
                 .request_timeout_secs
@@ -176,21 +219,22 @@ impl McpConnection {
             health: Arc::new(Mutex::new(HealthLog::default())),
         };
 
-        let init = tokio::time::timeout(
-            init_timeout(),
-            conn.send_request(
-                "initialize",
-                serde_json::json!({
-                    "protocolVersion": "2024-11-05",
-                    "capabilities": client_capabilities(),
-                    "clientInfo": {
-                        "name": env!("CARGO_PKG_NAME"),
-                        "version": env!("CARGO_PKG_VERSION")
-                    }
-                }),
-            ),
-        )
-        .await;
+        let init_params = serde_json::json!({
+            "protocolVersion": "2024-11-05",
+            "capabilities": client_capabilities(),
+            "clientInfo": {
+                "name": env!("CARGO_PKG_NAME"),
+                "version": env!("CARGO_PKG_VERSION")
+            }
+        });
+        // A server atoma just started is not listening the instant it is spawned, so
+        // the first POST arrives before it binds. Retried only in that case: a url
+        // atoma did not start is either up or wrong, and retrying a wrong address for
+        // two minutes turns a typo into a hang. Bounded by the same `init_timeout`
+        // that already bounds a slow start over stdio.
+        let wait_for_it = starts_a_process && config.url.is_some();
+        let init = tokio::time::timeout(init_timeout(), conn.initialize(init_params, wait_for_it))
+            .await;
 
         // Whether this server said it can report its own trouble over the protocol,
         // which is what the `logging/setLevel` below is worth sending for. The value
@@ -221,57 +265,52 @@ impl McpConnection {
                     protocol,
                 );
 
+                // What the server said it speaks, which its own specification says
+                // to put on every later request. atoma asks for 2024-11-05 and a
+                // newer server answers with its own version; echoing the answer
+                // rather than the question is the difference between agreeing and
+                // insisting.
+                if let Some(version) = result.get("protocolVersion").and_then(Value::as_str) {
+                    conn.transport.negotiated(version);
+                }
+
                 let server_logs = result.pointer("/capabilities/logging").is_some();
 
-                if let Some(stderr_handle) = stderr {
-                    let server_label = config.name.clone();
-                    let health = Arc::clone(&conn.health);
-                    tokio::spawn(async move {
-                        use tokio::io::AsyncBufReadExt;
-                        let mut reader = BufReader::new(stderr_handle);
-                        let mut line = String::new();
-                        loop {
-                            line.clear();
-                            match reader.read_line(&mut line).await {
-                                Ok(0) | Err(_) => break,
-                                Ok(_) => {
-                                    let text = line.trim_end();
-                                    tracing::info!("[MCP:{}:stderr] {}", server_label, text);
-                                    // The fallback channel, and today the only one
-                                    // in use: no server this project ships
-                                    // implements `logging` yet. Severity has to be
-                                    // read out of the words, which is what makes
-                                    // this the fallback rather than the primary.
-                                    let severity = tool_health::severity_of_stderr(text);
-                                    if severity != Severity::Routine {
-                                        if let Ok(mut log) = health.lock() {
-                                            log.record(severity, text);
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    });
+                if let Some(handle) = stderr {
+                    watch_log(
+                        config.name.clone(),
+                        "stderr",
+                        handle,
+                        Arc::clone(&conn.health),
+                    );
+                }
+                if let Some(handle) = logged_stdout {
+                    watch_log(
+                        config.name.clone(),
+                        "stdout",
+                        handle,
+                        Arc::clone(&conn.health),
+                    );
                 }
 
                 server_logs
             }
             Ok(Err(e)) => {
-                let stderr_msg = capture_stderr(stderr).await;
+                let said = what_it_said(stderr, logged_stdout).await;
                 anyhow::bail!(
                     "Failed to initialize MCP server '{}': {}{}",
                     config.name,
                     e,
-                    stderr_msg,
+                    said,
                 );
             }
             Err(_) => {
-                let stderr_msg = capture_stderr(stderr).await;
+                let said = what_it_said(stderr, logged_stdout).await;
                 anyhow::bail!(
                     "MCP server '{}' initialization timed out ({}s){}",
                     config.name,
                     init_timeout().as_secs(),
-                    stderr_msg,
+                    said,
                 );
             }
         };
@@ -439,13 +478,12 @@ impl McpConnection {
             "params": params,
         });
 
-        let request_str = serde_json::to_string(&request)?;
-        tracing::debug!("[MCP:{}] Sending: {}", self.name, request_str);
-
-        self.stdin
-            .write_all(format!("{}\n", request_str).as_bytes())
-            .await?;
-        self.stdin.flush().await?;
+        tracing::debug!(
+            "[MCP:{}] Sending: {}",
+            self.name,
+            serde_json::to_string(&request).unwrap_or_default(),
+        );
+        self.transport.send(&request).await?;
 
         let response = self.read_response(id).await?;
         tracing::debug!(
@@ -498,7 +536,7 @@ impl McpConnection {
     /// seeing next to the tool that caused it.
     async fn read_response(&mut self, expected_id: u64) -> Result<Value> {
         loop {
-            let value = self.read_json_value().await?;
+            let value = self.transport.next_message().await?;
             match classify(&value, expected_id) {
                 Incoming::TheAnswer => return Ok(value),
                 Incoming::Abandoned(id) => tracing::warn!(
@@ -550,50 +588,35 @@ impl McpConnection {
         }
     }
 
-    /// One complete JSON value from the server's stdout.
-    ///
-    /// Accumulates lines because a server may pretty-print, which puts one value
-    /// across many lines; `is_eof` is how serde says "valid so far, incomplete".
-    async fn read_json_value(&mut self) -> Result<Value> {
-        let mut buf = String::new();
-        loop {
-            let mut line = String::new();
-            let n = self
-                .stdout
-                .read_line(&mut line)
-                .await
-                .context("Failed to read response from MCP server")?;
-            if n == 0 {
-                anyhow::bail!("MCP server closed connection");
-            }
-            buf.push_str(&line);
-            match serde_json::from_str(&buf) {
-                Ok(value) => return Ok(value),
-                Err(e) if e.is_eof() => {
-                    if buf.len() > 10_485_760 {
-                        anyhow::bail!("MCP response exceeded maximum size (10MB)");
-                    }
-                    continue;
-                }
-                Err(e) => {
-                    anyhow::bail!("Failed to parse MCP JSON-RPC response: {}", e);
-                }
-            }
-        }
-    }
-
     async fn send_notification(&mut self, method: &str, params: Value) -> Result<()> {
-        let request = serde_json::json!({
+        let notification = serde_json::json!({
             "jsonrpc": "2.0",
             "method": method,
             "params": params,
         });
-        let request_str = serde_json::to_string(&request)?;
-        self.stdin
-            .write_all(format!("{}\n", request_str).as_bytes())
-            .await?;
-        self.stdin.flush().await?;
-        Ok(())
+        self.transport.send(&notification).await
+    }
+
+    /// `initialize`, waiting for a server that is still starting when told to.
+    ///
+    /// Only a refused connection is retried, and only when the caller says atoma
+    /// started this server. Anything the server itself answers -- an error
+    /// included -- is an answer, and is returned.
+    async fn initialize(&mut self, params: Value, wait_for_it: bool) -> Result<Value> {
+        loop {
+            match self.send_request("initialize", params.clone()).await {
+                Ok(response) => return Ok(response),
+                Err(e) if wait_for_it && not_listening_yet(&e) => {
+                    tracing::debug!(
+                        "[MCP:{}] not accepting connections yet, retrying: {}",
+                        self.name,
+                        e,
+                    );
+                    tokio::time::sleep(Duration::from_millis(200)).await;
+                }
+                Err(e) => return Err(e),
+            }
+        }
     }
 }
 
@@ -686,23 +709,366 @@ fn log_note(params: Option<&Value>) -> Option<(Severity, String)> {
     Some((severity, message))
 }
 
-async fn capture_stderr(stderr: Option<ChildStderr>) -> String {
-    if let Some(mut handle) = stderr {
-        let mut buf = String::new();
-        match tokio::time::timeout(
-            std::time::Duration::from_millis(500),
-            handle.read_to_string(&mut buf),
-        )
-        .await
-        {
-            Ok(Ok(_)) if !buf.trim().is_empty() => {
-                format!("\n--- stderr ---\n{}\n---------------", buf.trim_end())
-            }
-            _ => String::new(),
-        }
-    } else {
-        String::new()
+/// Whatever a server managed to say before it failed to start, for the error.
+///
+/// Generic over the handle because there are two now: over HTTP a server's stdout
+/// is a log rather than the transport, and a server that dies while binding its
+/// port is as likely to explain itself there as on stderr.
+async fn capture_output<R>(handle: Option<R>) -> String
+where
+    R: AsyncRead + Unpin,
+{
+    let Some(mut handle) = handle else {
+        return String::new();
+    };
+    let mut buf = String::new();
+    match tokio::time::timeout(
+        std::time::Duration::from_millis(500),
+        handle.read_to_string(&mut buf),
+    )
+    .await
+    {
+        Ok(Ok(_)) if !buf.trim().is_empty() => buf.trim_end().to_string(),
+        _ => String::new(),
     }
+}
+
+/// Both log channels, labelled, for an error message.
+async fn what_it_said<E, O>(stderr: Option<E>, stdout: Option<O>) -> String
+where
+    E: AsyncRead + Unpin,
+    O: AsyncRead + Unpin,
+{
+    let mut said = String::new();
+    for (channel, text) in [
+        ("stderr", capture_output(stderr).await),
+        ("stdout", capture_output(stdout).await),
+    ] {
+        if !text.is_empty() {
+            said.push_str(&format!(
+                "\n--- {channel} ---\n{text}\n---------------"
+            ));
+        }
+    }
+    said
+}
+
+/// Read a channel that is not the transport: log every line, keep the ones that
+/// report trouble.
+///
+/// Detached, and lives as long as the pipe. The connection's `Drop` kills the
+/// process, which closes it.
+///
+/// Called once per channel that is not carrying the protocol -- stderr always, and
+/// stdout as well for a server spoken to over HTTP. Both are ordinary logging there,
+/// and the reason to read stdout at all is that an unread pipe stalls the writer at
+/// 64KB.
+fn watch_log<R>(server: String, channel: &'static str, handle: R, health: Arc<Mutex<HealthLog>>)
+where
+    R: AsyncRead + Unpin + Send + 'static,
+{
+    tokio::spawn(async move {
+        let mut reader = BufReader::new(handle);
+        let mut line = String::new();
+        loop {
+            line.clear();
+            match reader.read_line(&mut line).await {
+                Ok(0) | Err(_) => break,
+                Ok(_) => {
+                    let text = line.trim_end();
+                    tracing::info!("[MCP:{}:{}] {}", server, channel, text);
+                    // The fallback channel of `domain::tool_health`, and today the
+                    // only one in use: no server this project ships implements
+                    // `logging` yet. Severity has to be read out of the words, which
+                    // is what makes this the fallback rather than the primary.
+                    let severity = tool_health::severity_of_stderr(text);
+                    if severity != Severity::Routine {
+                        if let Ok(mut log) = health.lock() {
+                            log.record(severity, text);
+                        }
+                    }
+                }
+            }
+        }
+    });
+}
+
+/// Whether an error means "nothing is accepting connections there yet".
+///
+/// Read out of the error chain rather than matched against a message: `reqwest`
+/// already classifies this, and a string match would be one dependency update away
+/// from silently never retrying -- which would look like a server that is slow to
+/// start being a server that is broken.
+fn not_listening_yet(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        cause
+            .downcast_ref::<reqwest::Error>()
+            .is_some_and(reqwest::Error::is_connect)
+    })
+}
+
+// ── Transport ─────────────────────────────────────────────────────────────────
+
+/// How atoma reaches a server, once there is one to reach.
+///
+/// Two, and the difference is narrower than it looks: both carry JSON-RPC messages
+/// and everything above this -- ids, timeouts, the health log, `classify` -- is
+/// written once and works for either.
+///
+/// What genuinely differs is where a message comes from. Over stdio it is a line on
+/// a pipe that may arrive at any time. Over HTTP it is in the body of the response
+/// to a request, so messages arrive in batches and there is nothing to read between
+/// them.
+enum Transport {
+    /// Pipes to a child process. `stdout` IS the transport, which is why a stdio
+    /// server logs to stderr and why nothing else may read it.
+    Stdio {
+        stdin: ChildStdin,
+        stdout: BufReader<ChildStdout>,
+    },
+    /// Streamable HTTP, the transport MCP defines for a server reached over a
+    /// network.
+    Http(Http),
+}
+
+impl Transport {
+    async fn send(&mut self, message: &Value) -> Result<()> {
+        match self {
+            Transport::Stdio { stdin, .. } => {
+                let line = serde_json::to_string(message)?;
+                stdin.write_all(format!("{line}\n").as_bytes()).await?;
+                stdin.flush().await?;
+                Ok(())
+            }
+            Transport::Http(http) => http.post(message).await,
+        }
+    }
+
+    async fn next_message(&mut self) -> Result<Value> {
+        match self {
+            Transport::Stdio { stdout, .. } => read_json_value(stdout).await,
+            Transport::Http(http) => http.next_message(),
+        }
+    }
+
+    /// Remember the protocol version the server answered `initialize` with.
+    ///
+    /// Nothing for stdio, which has no headers to carry it.
+    fn negotiated(&mut self, version: &str) {
+        if let Transport::Http(http) = self {
+            http.protocol = Some(version.to_string());
+        }
+    }
+}
+
+/// One complete JSON value from a server's stdout.
+///
+/// Accumulates lines because a server may pretty-print, which puts one value across
+/// many lines; `is_eof` is how serde says "valid so far, incomplete".
+async fn read_json_value(stdout: &mut BufReader<ChildStdout>) -> Result<Value> {
+    let mut buf = String::new();
+    loop {
+        let mut line = String::new();
+        let n = stdout
+            .read_line(&mut line)
+            .await
+            .context("Failed to read response from MCP server")?;
+        if n == 0 {
+            anyhow::bail!("MCP server closed connection");
+        }
+        buf.push_str(&line);
+        match serde_json::from_str(&buf) {
+            Ok(value) => return Ok(value),
+            Err(e) if e.is_eof() => {
+                if buf.len() > 10_485_760 {
+                    anyhow::bail!("MCP response exceeded maximum size (10MB)");
+                }
+                continue;
+            }
+            Err(e) => {
+                anyhow::bail!("Failed to parse MCP JSON-RPC response: {}", e);
+            }
+        }
+    }
+}
+
+/// A server reached over Streamable HTTP.
+///
+/// One POST carries one message and its answer comes back in the response body, as
+/// either a single JSON object or an SSE stream that may carry notifications before
+/// the answer. Both are read to completion and queued, so `next_message` hands them
+/// out in the order the server sent them and `read_response` sees exactly what it
+/// sees over stdio.
+///
+/// Read to completion rather than streamed: the specification says a server SHOULD
+/// close the stream once it has sent the response, and the request timeout is what
+/// bounds one that does not. Streaming would buy a notification arriving earlier
+/// than the result it belongs to, and nothing here has anything to do with it any
+/// sooner -- the annotation goes out with that result either way.
+struct Http {
+    client: reqwest::Client,
+    url: String,
+    /// Sent with every request. How a remote server is authenticated, and the only
+    /// way -- `env` reaches a process, and there is not necessarily one.
+    headers: HashMap<String, String>,
+    /// The session the server assigned at `initialize`, if it assigned one. A
+    /// server that works in sessions rejects a request without it.
+    session: Option<String>,
+    /// The version the server answered with, echoed on every later request.
+    protocol: Option<String>,
+    /// What the last response carried and no caller has taken yet.
+    pending: VecDeque<Value>,
+}
+
+impl Http {
+    fn new(url: String, headers: HashMap<String, String>) -> Self {
+        Self {
+            client: reqwest::Client::new(),
+            url,
+            headers,
+            session: None,
+            protocol: None,
+            pending: VecDeque::new(),
+        }
+    }
+
+    async fn post(&mut self, message: &Value) -> Result<()> {
+        let mut request = self
+            .client
+            .post(&self.url)
+            .header("content-type", "application/json")
+            // Both, because the server chooses which to send: one JSON object, or a
+            // stream that may carry notifications ahead of the answer. A client
+            // accepting only one of them refuses half the servers that exist.
+            .header("accept", "application/json, text/event-stream");
+        for (name, value) in &self.headers {
+            request = request.header(name.as_str(), value.as_str());
+        }
+        if let Some(session) = &self.session {
+            request = request.header("mcp-session-id", session);
+        }
+        if let Some(protocol) = &self.protocol {
+            request = request.header("mcp-protocol-version", protocol);
+        }
+
+        let response = request
+            .json(message)
+            .send()
+            .await
+            .with_context(|| format!("Failed to reach MCP server at {}", self.url))?;
+
+        if let Some(session) = response
+            .headers()
+            .get("mcp-session-id")
+            .and_then(|value| value.to_str().ok())
+        {
+            self.session = Some(session.to_string());
+        }
+
+        let status = response.status();
+        let content_type = response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or("")
+            .to_string();
+        let body = response.text().await.unwrap_or_default();
+
+        // A session the server has forgotten. Said plainly because the alternative
+        // reading -- a wrong url -- is a different fix, and both arrive as a 404.
+        if status == reqwest::StatusCode::NOT_FOUND && self.session.is_some() {
+            self.session = None;
+            anyhow::bail!(
+                "MCP server at {} no longer knows this session; it ended the conversation",
+                self.url,
+            );
+        }
+        if !status.is_success() {
+            anyhow::bail!(
+                "MCP server at {} answered {}: {}",
+                self.url,
+                status,
+                body.trim(),
+            );
+        }
+
+        // 202 with an empty body is the right answer to a notification, and there is
+        // nothing to queue. Only a request expects a message back, and
+        // `next_message` is where the absence of one is reported.
+        for value in parse_body(&content_type, &body)? {
+            self.pending.push_back(value);
+        }
+        Ok(())
+    }
+
+    fn next_message(&mut self) -> Result<Value> {
+        self.pending.pop_front().with_context(|| {
+            format!(
+                "MCP server at {} sent no response to the request",
+                self.url
+            )
+        })
+    }
+}
+
+/// The JSON-RPC messages a response body carries, in the order the server sent them.
+fn parse_body(content_type: &str, body: &str) -> Result<Vec<Value>> {
+    if body.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+    if content_type.starts_with("text/event-stream") {
+        return Ok(sse_messages(body));
+    }
+    let value: Value = serde_json::from_str(body)
+        .with_context(|| format!("Failed to parse MCP JSON-RPC response: {}", body.trim()))?;
+    Ok(match value {
+        // A batch. JSON-RPC allows one, and flattening it here is what lets
+        // everything above this file treat one message at a time.
+        Value::Array(values) => values,
+        one => vec![one],
+    })
+}
+
+/// The messages in a `text/event-stream` body.
+///
+/// One event per blank line, its `data:` lines joined with newlines as the SSE
+/// specification says. `event:`, `id:` and `retry:` are read past: atoma does not
+/// resume a stream, so an event id is nothing it could use.
+///
+/// An event that is not JSON is logged and dropped rather than failing the call. A
+/// server is allowed to send things this client does not know about, and refusing
+/// the whole response over one of them would turn an unknown extension into a
+/// broken tool.
+fn sse_messages(body: &str) -> Vec<Value> {
+    let mut messages = Vec::new();
+    let mut data = String::new();
+    for line in body.lines() {
+        if line.is_empty() {
+            end_of_event(&mut messages, &mut data);
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix("data:") {
+            if !data.is_empty() {
+                data.push('\n');
+            }
+            data.push_str(rest.strip_prefix(' ').unwrap_or(rest));
+        }
+    }
+    // A body that ends without a trailing blank line still ends its last event.
+    end_of_event(&mut messages, &mut data);
+    messages
+}
+
+fn end_of_event(messages: &mut Vec<Value>, data: &mut String) {
+    if data.trim().is_empty() {
+        data.clear();
+        return;
+    }
+    match serde_json::from_str(data) {
+        Ok(value) => messages.push(value),
+        Err(e) => tracing::warn!("[MCP] discarding an SSE event that is not JSON: {}", e),
+    }
+    data.clear();
 }
 
 /// Manages multiple MCP connections and routes tool calls by tool prefix.
@@ -728,7 +1094,7 @@ impl McpRegistry {
         let mut all_tools = Vec::new();
 
         for config in configs {
-            let mut conn = McpConnection::spawn(config).await?;
+            let mut conn = McpConnection::connect(config).await?;
             let tools = conn.list_tools().await?.into_iter().filter(|tool| {
                 hooks::access_denial_reason(&config.hooks, &tool.prefixed_name).is_none()
             });
@@ -1067,5 +1433,106 @@ mod log_note_tests {
             capabilities.get("logging").is_some(),
             "a server may send nothing to a client that did not ask: {capabilities}",
         );
+    }
+}
+
+#[cfg(test)]
+mod http_body_tests {
+    use super::{parse_body, sse_messages};
+    use serde_json::json;
+
+    const JSON: &str = "application/json";
+    const SSE: &str = "text/event-stream";
+
+    #[test]
+    fn one_json_object_is_one_message() {
+        let body = r#"{"jsonrpc":"2.0","id":1,"result":{}}"#;
+        let messages = parse_body(JSON, body).expect("valid json");
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0]["id"], json!(1));
+    }
+
+    /// JSON-RPC allows a batch, and flattening it here is what lets everything
+    /// above this file go on handling one message at a time.
+    #[test]
+    fn a_batch_is_flattened_in_order() {
+        let body = r#"[{"id":1,"result":{}},{"id":2,"result":{}}]"#;
+        let messages = parse_body(JSON, body).expect("valid json");
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0]["id"], json!(1));
+        assert_eq!(messages[1]["id"], json!(2));
+    }
+
+    /// The right answer to a notification is 202 with nothing in it. Not an error:
+    /// nothing was asked.
+    #[test]
+    fn an_empty_body_carries_nothing() {
+        assert!(parse_body(JSON, "").expect("empty is fine").is_empty());
+        assert!(parse_body(SSE, "   \n").expect("blank is fine").is_empty());
+    }
+
+    #[test]
+    fn a_body_that_is_not_json_is_an_error_naming_the_body() {
+        let message = parse_body(JSON, "<html>gateway timeout</html>")
+            .expect_err("not json")
+            .to_string();
+        assert!(message.contains("gateway timeout"), "{message}");
+    }
+
+    /// The case this exists for: the notification arrives ahead of the result it
+    /// belongs to, on the same stream. That ordering is what `read_response` reads
+    /// past to find its answer, and what `domain::tool_health` then attaches.
+    #[test]
+    fn a_stream_carries_a_notification_then_the_answer() {
+        let warning =
+            r#"{"jsonrpc":"2.0","method":"notifications/message","params":{"level":"warning"}}"#;
+        let answer = r#"{"jsonrpc":"2.0","id":7,"result":{}}"#;
+        let body = format!("event: message\r\ndata: {warning}\r\n\r\ndata: {answer}\r\n\r\n");
+        let messages = parse_body(SSE, &body).expect("a stream parses");
+        assert_eq!(messages.len(), 2, "{messages:?}");
+        assert_eq!(messages[0]["method"], json!("notifications/message"));
+        assert_eq!(messages[1]["id"], json!(7));
+    }
+
+    /// A `data:` field split across lines is one value joined with newlines, which
+    /// is the SSE specification and also how a server pretty-prints.
+    #[test]
+    fn several_data_lines_are_one_event() {
+        let body = "data: {\ndata: \"id\": 3,\ndata: \"result\": {}\ndata: }\n\n";
+        let messages = sse_messages(body);
+        assert_eq!(messages.len(), 1, "{messages:?}");
+        assert_eq!(messages[0]["id"], json!(3));
+    }
+
+    /// A body that ends without a trailing blank line still ends its last event.
+    /// Servers do this, and losing the answer to the last request of a run would be
+    /// the hardest kind of bug to find.
+    #[test]
+    fn the_last_event_needs_no_blank_line() {
+        let messages = sse_messages("data: {\"id\":9,\"result\":{}}");
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0]["id"], json!(9));
+    }
+
+    /// Comments, ids and retry hints are read past. atoma does not resume a stream,
+    /// so an event id is nothing it could use.
+    #[test]
+    fn the_fields_this_client_cannot_use_are_ignored() {
+        let event = r#"{"id":1,"result":{}}"#;
+        let body = format!(": keep-alive\nid: 42\nretry: 3000\nevent: message\ndata: {event}\n\n");
+        let messages = sse_messages(&body);
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0]["id"], json!(1));
+    }
+
+    /// One unreadable event does not fail the call. A server may send things this
+    /// client knows nothing about, and refusing the whole response over one of them
+    /// would turn an unknown extension into a broken tool.
+    #[test]
+    fn an_event_that_is_not_json_is_dropped_and_the_rest_survive() {
+        let body = "data: not json at all\n\ndata: {\"id\":2,\"result\":{}}\n\n";
+        let messages = sse_messages(body);
+        assert_eq!(messages.len(), 1, "{messages:?}");
+        assert_eq!(messages[0]["id"], json!(2));
     }
 }
