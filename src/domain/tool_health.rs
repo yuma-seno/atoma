@@ -97,7 +97,10 @@ pub fn severity_of_stderr(line: &str) -> Severity {
     if ERROR_WORDS.iter().any(|&word| contains_word(&lower, word)) {
         return Severity::Error;
     }
-    if WARNING_WORDS.iter().any(|&word| contains_word(&lower, word)) {
+    if WARNING_WORDS
+        .iter()
+        .any(|&word| contains_word(&lower, word))
+    {
         return Severity::Warning;
     }
     Severity::Routine
@@ -217,7 +220,11 @@ pub fn annotation(server: &str, notes: &[HealthNote]) -> Option<String> {
     lines.push(format!(
         "--- {} {} reported by the '{}' server, not part of the answer above ---",
         notes.len(),
-        if notes.len() == 1 { "problem" } else { "problems" },
+        if notes.len() == 1 {
+            "problem"
+        } else {
+            "problems"
+        },
         server,
     ));
     for note in notes {
@@ -275,9 +282,18 @@ mod tests {
 
     #[test]
     fn stderr_severity_reads_the_words_it_knows() {
-        assert_eq!(severity_of_stderr("Error: could not connect"), Severity::Error);
-        assert_eq!(severity_of_stderr("fatal: not a git repository"), Severity::Error);
-        assert_eq!(severity_of_stderr("warning: falling back"), Severity::Warning);
+        assert_eq!(
+            severity_of_stderr("Error: could not connect"),
+            Severity::Error
+        );
+        assert_eq!(
+            severity_of_stderr("fatal: not a git repository"),
+            Severity::Error
+        );
+        assert_eq!(
+            severity_of_stderr("warning: falling back"),
+            Severity::Warning
+        );
         assert_eq!(
             severity_of_stderr("Secure MCP Filesystem Server running on stdio"),
             Severity::Routine,
@@ -288,16 +304,28 @@ mod tests {
     /// looser rule, because the looser rule also claims `errorless`.
     #[test]
     fn the_plurals_are_on_the_list() {
-        assert_eq!(severity_of_stderr("3 warnings during startup"), Severity::Warning);
-        assert_eq!(severity_of_stderr("2 errors while indexing"), Severity::Error);
+        assert_eq!(
+            severity_of_stderr("3 warnings during startup"),
+            Severity::Warning
+        );
+        assert_eq!(
+            severity_of_stderr("2 errors while indexing"),
+            Severity::Error
+        );
     }
 
     /// Word boundaries, or ordinary output becomes a warning. `forward` and
     /// `errorless` both contain a keyword and neither is a report of trouble.
     #[test]
     fn a_keyword_inside_a_word_is_not_a_report() {
-        assert_eq!(severity_of_stderr("forwarding to port 8080"), Severity::Routine);
-        assert_eq!(severity_of_stderr("errorless parse completed"), Severity::Routine);
+        assert_eq!(
+            severity_of_stderr("forwarding to port 8080"),
+            Severity::Routine
+        );
+        assert_eq!(
+            severity_of_stderr("errorless parse completed"),
+            Severity::Routine
+        );
         assert_eq!(severity_of_stderr("warning"), Severity::Warning);
         assert_eq!(severity_of_stderr("[WARN] x"), Severity::Warning);
     }
@@ -326,7 +354,10 @@ mod tests {
         log.record(Severity::Warning, "one");
         log.record(Severity::Error, "two");
         assert_eq!(log.drain().len(), 2);
-        assert!(log.is_empty(), "a note reaches one result, not every result after it");
+        assert!(
+            log.is_empty(),
+            "a note reaches one result, not every result after it"
+        );
     }
 
     /// A server producing a fresh sentence every second defeats dedup, so there is a
@@ -339,12 +370,19 @@ mod tests {
             log.record(Severity::Warning, &format!("problem {n}"));
         }
         let notes = log.drain();
-        assert_eq!(notes.len(), MAX_NOTES + 1, "the capped notes plus one count");
+        assert_eq!(
+            notes.len(),
+            MAX_NOTES + 1,
+            "the capped notes plus one count"
+        );
         assert_eq!(
             notes.last().unwrap().message,
             "7 further reports from this server were not shown",
         );
-        assert!(log.is_empty(), "the count is reported once, not on every later result");
+        assert!(
+            log.is_empty(),
+            "the count is reported once, not on every later result"
+        );
     }
 
     #[test]
@@ -385,8 +423,14 @@ mod tests {
     #[test]
     fn several_notes_are_counted_in_the_plural() {
         let notes = vec![
-            HealthNote { severity: Severity::Warning, message: "a".into() },
-            HealthNote { severity: Severity::Error, message: "b".into() },
+            HealthNote {
+                severity: Severity::Warning,
+                message: "a".into(),
+            },
+            HealthNote {
+                severity: Severity::Error,
+                message: "b".into(),
+            },
         ];
         let text = annotation("shell", &notes).unwrap();
         assert!(text.contains("2 problems"), "{text}");

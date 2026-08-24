@@ -1045,7 +1045,10 @@ mod log_note_tests {
     fn a_bare_level_is_still_a_report() {
         let (severity, message) = log_note(Some(&json!({"level": "error"}))).unwrap();
         assert_eq!(severity, Severity::Error);
-        assert_eq!(message, "", "empty here; `HealthLog::record` is what refuses it");
+        assert_eq!(
+            message, "",
+            "empty here; `HealthLog::record` is what refuses it"
+        );
     }
 
     /// Pinned because the string is the protocol's, not this project's: a typo would
