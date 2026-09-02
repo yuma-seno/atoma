@@ -359,6 +359,7 @@ mod tests {
                 validate(
                     path,
                     None,
+                    None,
                     &FileAgentDefAdapter,
                     &FileToolDefAdapter::default()
                 )
