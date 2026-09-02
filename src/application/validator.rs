@@ -2,6 +2,8 @@ use anyhow::{bail, Result};
 use std::path::PathBuf;
 
 use crate::domain::ports::{AgentDefPort, ToolDefPort};
+use crate::infra::llm::check_provider_name;
+use crate::infra::template::unknown_placeholders;
 
 const VALID_CALLABLE_BY: &[&str] = &["user", "agent"];
 
@@ -17,9 +19,19 @@ const VALID_CALLABLE_BY: &[&str] = &["user", "agent"];
 ///   6. If a tools file is provided:
 ///      a. The tools file parses without error.
 ///      b. Each `mcp_servers` entry is present in the tools file.
+///   7. `provider`, when named, is one this build has.
+///   8. If a template is provided: every `{{...}}` in it is one that gets
+///      substituted.
+///
+/// The last two are here rather than in a caller because they are facts only this
+/// crate holds. `atoma-autonomous-delivery` runs this against every agent
+/// definition a pull request would merge; checking them there would mean keeping a
+/// copy of the provider list and of the template vocabulary in another repository,
+/// in another language.
 pub fn validate(
     agent_def_path: PathBuf,
     tools_file: Option<PathBuf>,
+    template_file: Option<PathBuf>,
     agent_def_port: &dyn AgentDefPort,
     tool_def_port: &dyn ToolDefPort,
 ) -> Result<()> {
@@ -94,6 +106,21 @@ pub fn validate(
             }
         }
 
+        // The name only. A provider that does not exist is a defect in the definition;
+        // a credential that is not set is not, and a validation run has none -- so
+        // conflating them would fail every run of this command.
+        if let Some(ref provider) = agent.provider {
+            let name = provider.trim();
+            if name.is_empty() {
+                errors.push("provider is present but empty; remove it or name one".to_string());
+            } else {
+                match check_provider_name(name) {
+                    Ok(()) => println!("  ✓ provider '{}' is known", name),
+                    Err(e) => errors.push(format!("{}", e)),
+                }
+            }
+        }
+
         // No `tools` shape check here. A non-array is not fatal -- `reconcile_tools` keeps
         // the runtime definitions and warns at run time -- and this function reports only
         // errors, so its only way to speak was to call a tolerated configuration invalid.
@@ -122,6 +149,31 @@ pub fn validate(
             println!(
                 "  ⚠ mcp_servers is non-empty but --tools-file was not provided; skipping server check"
             );
+        }
+    }
+
+    // Independent of the agent definition, so it runs even when that failed to parse:
+    // a template is wrong or right on its own terms, and reporting both problems at
+    // once beats reporting them one run apart.
+    if let Some(ref template_path) = template_file {
+        match std::fs::read_to_string(template_path) {
+            Ok(template) => {
+                let unknown = unknown_placeholders(&template);
+                if unknown.is_empty() {
+                    println!("✓ Template checked: every placeholder is one atoma substitutes");
+                } else {
+                    // Not a warning. An unsubstituted placeholder renders literally into
+                    // the system prompt, where a model reads it as text it was given on
+                    // purpose -- which is worse than an obviously missing section.
+                    errors.push(format!(
+                        "template {:?} uses {} placeholder(s) nothing substitutes: {}",
+                        template_path,
+                        unknown.len(),
+                        unknown.join(", "),
+                    ));
+                }
+            }
+            Err(e) => errors.push(format!("Failed to read template {:?}: {}", template_path, e)),
         }
     }
 
@@ -158,12 +210,94 @@ mod tests {
         path
     }
 
+    /// The error the run would have produced, produced earlier. A definition naming
+    /// a provider that does not exist used to fail at `build_llm_client` -- after the
+    /// tool servers had started and the prompt had been assembled.
+    #[test]
+    fn an_unknown_provider_is_a_validation_error_that_names_the_alternatives() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_agent(dir.path(), "solo", "provider: openai-responsez\n");
+        let result = validate(
+            path,
+            None,
+            None,
+            &FileAgentDefAdapter,
+            &FileToolDefAdapter::default(),
+        );
+        assert!(result.is_err());
+    }
+
+    /// The distinction the check rests on: the name being unknown and the credential
+    /// being absent are different facts, and only the first is a defect in the
+    /// definition. No credentials are set here, which is the state every validation
+    /// run is in.
+    #[test]
+    fn a_known_provider_passes_without_its_credential() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_agent(dir.path(), "solo", "provider: openai\n");
+        let result = validate(
+            path,
+            None,
+            None,
+            &FileAgentDefAdapter,
+            &FileToolDefAdapter::default(),
+        );
+        assert!(result.is_ok(), "{:?}", result.err());
+    }
+
+    #[test]
+    fn a_definition_that_names_no_provider_is_not_checked_for_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_agent(dir.path(), "solo", "");
+        assert!(validate(
+            path,
+            None,
+            None,
+            &FileAgentDefAdapter,
+            &FileToolDefAdapter::default()
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn a_template_placeholder_nothing_substitutes_fails_validation() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_agent(dir.path(), "solo", "");
+        let template = dir.path().join("prompt.md");
+        fs::write(&template, "You are {{AGENT_NAME}}. Use {{AVAILABLE_TOOL}}.").unwrap();
+        let result = validate(
+            path,
+            None,
+            Some(template),
+            &FileAgentDefAdapter,
+            &FileToolDefAdapter::default(),
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn a_template_that_only_uses_known_placeholders_passes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_agent(dir.path(), "solo", "");
+        let template = dir.path().join("prompt.md");
+        fs::write(&template, "You are {{AGENT_NAME}} in {{WORKING_DIRECTORY}}.").unwrap();
+        let result = validate(
+            path,
+            None,
+            Some(template),
+            &FileAgentDefAdapter,
+            &FileToolDefAdapter::default(),
+        );
+        assert!(result.is_ok(), "{:?}", result.err());
+    }
+
     #[test]
     fn callable_by_rejects_unknown_values() {
         let dir = tempfile::tempdir().unwrap();
         let path = write_agent(dir.path(), "solo", "callable_by:\n  - human\n");
         let result = validate(
             path,
+            None,
             None,
             &FileAgentDefAdapter,
             &FileToolDefAdapter::default(),
@@ -177,6 +311,7 @@ mod tests {
         let path = write_agent(dir.path(), "solo", "callable_by:\n  - user\n  - agent\n");
         let result = validate(
             path,
+            None,
             None,
             &FileAgentDefAdapter,
             &FileToolDefAdapter::default(),
@@ -193,6 +328,7 @@ mod tests {
         let path = write_agent(dir.path(), "solo", "extra_body:\n  tools: web_search\n");
         assert!(validate(
             path,
+            None,
             None,
             &FileAgentDefAdapter,
             &FileToolDefAdapter::default()
@@ -236,6 +372,7 @@ mod tests {
         assert!(validate(
             path,
             None,
+            None,
             &FileAgentDefAdapter,
             &FileToolDefAdapter::default()
         )
@@ -255,6 +392,7 @@ mod tests {
         let result = validate(
             caller,
             None,
+            None,
             &FileAgentDefAdapter,
             &FileToolDefAdapter::default(),
         );
@@ -272,6 +410,7 @@ mod tests {
         );
         let result = validate(
             caller,
+            None,
             None,
             &FileAgentDefAdapter,
             &FileToolDefAdapter::default(),

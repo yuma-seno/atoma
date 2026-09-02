@@ -158,10 +158,17 @@ async fn main() -> Result<()> {
         Command::Validate {
             agent_def,
             tools_file,
+            template,
         } => {
             let agent_def_port = infra::persistence::agent_def::FileAgentDefAdapter;
             let tool_def_port = infra::persistence::tool_def::FileToolDefAdapter::default();
-            application::validator::validate(agent_def, tools_file, &agent_def_port, &tool_def_port)
+            application::validator::validate(
+                agent_def,
+                tools_file,
+                template,
+                &agent_def_port,
+                &tool_def_port,
+            )
         }
         Command::Init => {
             let template = config_module::generate_default_config();

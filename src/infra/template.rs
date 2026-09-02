@@ -65,16 +65,93 @@ Before taking action or generating final output, always use the `<thought>` tag 
 - [Autonomy & Coordination] Do not repeatedly call yourself or other agents without purpose (no infinite loops). Use `/` commands only when there is a clear request to make.
 "#;
 
+/// Everything a template may say, as one list.
+///
+/// The vocabulary was written out three times -- in `DEFAULT_TEMPLATE`, in a doc
+/// comment above this function, and in the `replace` calls that did the work -- and
+/// nothing held them together. An eighth placeholder added to two of the three would
+/// have looked right in review.
+///
+/// An enum rather than an array of strings, because it makes the substitution below
+/// an exhaustive match: a variant added here does not compile until it has a value.
+/// That is the property `atoma validate` now depends on. Without it, validation
+/// would be checking a template against a list that is only believed to be current.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Placeholder {
+    AgentName,
+    AgentRolePrompt,
+    ColleaguesList,
+    AvailableTools,
+    AvailableSkills,
+    LoadSkillTool,
+    WorkingDirectory,
+}
+
+impl Placeholder {
+    /// Every one of them. The order is the order they are substituted in, which does
+    /// not matter -- no value here contains another's token.
+    pub const ALL: [Placeholder; 7] = [
+        Placeholder::AgentName,
+        Placeholder::AgentRolePrompt,
+        Placeholder::ColleaguesList,
+        Placeholder::AvailableTools,
+        Placeholder::AvailableSkills,
+        Placeholder::LoadSkillTool,
+        Placeholder::WorkingDirectory,
+    ];
+
+    /// What it looks like in a template.
+    pub fn token(self) -> &'static str {
+        match self {
+            Placeholder::AgentName => "{{AGENT_NAME}}",
+            Placeholder::AgentRolePrompt => "{{AGENT_ROLE_PROMPT}}",
+            Placeholder::ColleaguesList => "{{COLLEAGUES_LIST}}",
+            Placeholder::AvailableTools => "{{AVAILABLE_TOOLS}}",
+            Placeholder::AvailableSkills => "{{AVAILABLE_SKILLS}}",
+            Placeholder::LoadSkillTool => "{{LOAD_SKILL_TOOL}}",
+            Placeholder::WorkingDirectory => "{{WORKING_DIRECTORY}}",
+        }
+    }
+}
+
+/// A `{{...}}` in a template that nothing will substitute, in the order it appears.
+///
+/// Worth reporting rather than tolerating, because the failure is silent and looks
+/// like an instruction: an unsubstituted `{{AVAILABLE_TOOL}}` renders literally into
+/// the system prompt, and a model reads it as text it was given on purpose.
+///
+/// Only `{{NAME}}` shapes are considered. A template is prose, and something like
+/// `{{ see the docs }}` is a sentence rather than a mistyped placeholder -- so the
+/// name has to look like one: capitals, digits and underscores.
+pub fn unknown_placeholders(template: &str) -> Vec<String> {
+    let known: Vec<&str> = Placeholder::ALL.iter().map(|p| p.token()).collect();
+    let mut unknown = Vec::new();
+    let mut rest = template;
+
+    while let Some(start) = rest.find("{{") {
+        let after = &rest[start + 2..];
+        let Some(end) = after.find("}}") else { break };
+        let name = &after[..end];
+        rest = &after[end + 2..];
+
+        let looks_like_one = !name.is_empty()
+            && name
+                .chars()
+                .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_');
+        if !looks_like_one {
+            continue;
+        }
+        let token = format!("{{{{{name}}}}}");
+        if !known.contains(&token.as_str()) && !unknown.contains(&token) {
+            unknown.push(token);
+        }
+    }
+    unknown
+}
+
 /// Build the system prompt by substituting template variables.
 ///
-/// Template variables:
-/// - `{{AGENT_NAME}}` — agent name
-/// - `{{AGENT_ROLE_PROMPT}}` — custom body or description fallback
-/// - `{{COLLEAGUES_LIST}}` — formatted list of known colleagues
-/// - `{{AVAILABLE_TOOLS}}` — formatted list of tool descriptions
-/// - `{{AVAILABLE_SKILLS}}` — skill names and descriptions (not full instructions)
-/// - `{{LOAD_SKILL_TOOL}}` — the name of the tool that loads one, from `domain::skill`
-/// - `{{WORKING_DIRECTORY}}` — current working directory
+/// The vocabulary is `Placeholder`; see there for why it is not listed here too.
 ///
 /// Pass `custom_template` to override the built-in template entirely.
 pub fn build_system_prompt(
@@ -88,50 +165,112 @@ pub fn build_system_prompt(
     let template = custom_template.unwrap_or(DEFAULT_TEMPLATE);
     let mut prompt = template.to_string();
 
-    prompt = prompt.replace("{{AGENT_NAME}}", &agent.frontmatter.name);
-    prompt = prompt.replace("{{WORKING_DIRECTORY}}", working_dir);
-
-    let role_prompt = agent
-        .body
-        .as_deref()
-        .unwrap_or(&agent.frontmatter.description);
-    prompt = prompt.replace("{{AGENT_ROLE_PROMPT}}", role_prompt);
-
-    if colleagues.is_empty() {
-        prompt = prompt.replace(
-            "{{COLLEAGUES_LIST}}",
-            "No agents currently available for collaboration.",
-        );
-    } else {
-        let lines: Vec<String> = colleagues
-            .iter()
-            .map(|(name, desc)| format!("- `{}`: {}", name, desc))
-            .collect();
-        prompt = prompt.replace("{{COLLEAGUES_LIST}}", &lines.join("\n"));
-    }
-
-    if tool_descriptions.is_empty() {
-        prompt = prompt.replace("{{AVAILABLE_TOOLS}}", "No tools currently available.");
-    } else {
-        prompt = prompt.replace("{{AVAILABLE_TOOLS}}", &tool_descriptions.join("\n"));
-    }
-
-    // The one place the tool's name enters the prompt. A custom template written before
-    // this placeholder existed simply keeps whatever it says, which is the same tolerance
-    // every other placeholder here has.
-    prompt = prompt.replace("{{LOAD_SKILL_TOOL}}", crate::domain::skill::LOAD_SKILL_TOOL);
-
-    if skills.is_empty() {
-        prompt = prompt.replace("{{AVAILABLE_SKILLS}}", "No skills currently available.");
-    } else {
-        let lines: Vec<String> = skills
-            .iter()
-            .map(|skill| format!("- `{}`: {}", skill.name, skill.description))
-            .collect();
-        prompt = prompt.replace("{{AVAILABLE_SKILLS}}", &lines.join("\n"));
+    for placeholder in Placeholder::ALL {
+        // Exhaustive on purpose: a placeholder added to the enum does not compile
+        // until it has a value here.
+        let value: String = match placeholder {
+            Placeholder::AgentName => agent.frontmatter.name.clone(),
+            Placeholder::AgentRolePrompt => agent
+                .body
+                .as_deref()
+                .unwrap_or(&agent.frontmatter.description)
+                .to_string(),
+            Placeholder::ColleaguesList => {
+                if colleagues.is_empty() {
+                    "No agents currently available for collaboration.".to_string()
+                } else {
+                    colleagues
+                        .iter()
+                        .map(|(name, desc)| format!("- `{}`: {}", name, desc))
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                }
+            }
+            Placeholder::AvailableTools => {
+                if tool_descriptions.is_empty() {
+                    "No tools currently available.".to_string()
+                } else {
+                    tool_descriptions.join("\n")
+                }
+            }
+            Placeholder::AvailableSkills => {
+                if skills.is_empty() {
+                    "No skills currently available.".to_string()
+                } else {
+                    skills
+                        .iter()
+                        .map(|skill| format!("- `{}`: {}", skill.name, skill.description))
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                }
+            }
+            // The one place the tool's name enters the prompt. A custom template written
+            // before this placeholder existed simply keeps whatever it says, which is the
+            // same tolerance every other placeholder here has.
+            Placeholder::LoadSkillTool => crate::domain::skill::LOAD_SKILL_TOOL.to_string(),
+            Placeholder::WorkingDirectory => working_dir.to_string(),
+        };
+        prompt = prompt.replace(placeholder.token(), &value);
     }
 
     prompt
+}
+
+#[cfg(test)]
+mod placeholder_tests {
+    use super::{unknown_placeholders, Placeholder, DEFAULT_TEMPLATE};
+
+    /// The invariant that makes the vocabulary trustworthy: the template shipped in
+    /// this binary uses all of it and nothing else. A token added to the enum and
+    /// forgotten in the template, or the reverse, shows up here.
+    #[test]
+    fn the_built_in_template_uses_the_whole_vocabulary_and_nothing_else() {
+        for placeholder in Placeholder::ALL {
+            assert!(
+                DEFAULT_TEMPLATE.contains(placeholder.token()),
+                "the built-in template never uses {}",
+                placeholder.token(),
+            );
+        }
+        assert_eq!(unknown_placeholders(DEFAULT_TEMPLATE), Vec::<String>::new());
+    }
+
+    /// The failure this reports is silent: an unsubstituted placeholder renders
+    /// literally into the system prompt, and a model reads it as text it was handed
+    /// on purpose.
+    #[test]
+    fn a_placeholder_nothing_substitutes_is_reported() {
+        let unknown = unknown_placeholders("Hello {{AGENT_NAME}}, use {{AVAILABLE_TOOL}}.");
+        assert_eq!(unknown, vec!["{{AVAILABLE_TOOL}}".to_string()]);
+    }
+
+    #[test]
+    fn each_unknown_is_reported_once_in_the_order_it_appears() {
+        let unknown = unknown_placeholders("{{B_ONE}} {{A_TWO}} {{B_ONE}}");
+        assert_eq!(
+            unknown,
+            vec!["{{B_ONE}}".to_string(), "{{A_TWO}}".to_string()],
+        );
+    }
+
+    /// A template is prose. Braces around a sentence are a sentence, and reporting
+    /// them would teach whoever reads this to ignore it.
+    #[test]
+    fn something_that_is_not_shaped_like_a_placeholder_is_left_alone() {
+        for text in [
+            "see {{ the docs }} for more",
+            "a JSON example: {{\"a\": 1}}",
+            "{{lowercase}} is prose",
+            "an unclosed {{THING",
+        ] {
+            assert_eq!(unknown_placeholders(text), Vec::<String>::new(), "{text}");
+        }
+    }
+
+    #[test]
+    fn a_template_with_no_placeholders_at_all_is_fine() {
+        assert_eq!(unknown_placeholders("just words"), Vec::<String>::new());
+    }
 }
 
 #[cfg(test)]

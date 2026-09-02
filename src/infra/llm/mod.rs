@@ -423,6 +423,20 @@ pub fn describe_providers() -> String {
 /// `ORCAROUTER_API_KEY` were added here and not there, so in environment mode a tool
 /// server inherited them and could read a provider key straight out of its own
 /// environment.
+/// Whether a name is a provider this build knows.
+///
+/// For `atoma validate`, and deliberately nothing more than the name. A definition
+/// naming a provider that does not exist and a credential that is not set are
+/// different facts: only the first is a defect in the definition, and a check that
+/// conflated them would fail every validation run, which have no credentials.
+///
+/// Goes through `by_name` rather than comparing against a list of its own, so the
+/// error a pull request sees is the error the run would have produced -- including
+/// the candidates, which is the part that makes it actionable.
+pub fn check_provider_name(name: &str) -> Result<()> {
+    by_name(PROVIDERS, name).map(|_| ())
+}
+
 pub fn provider_credential_names() -> Vec<&'static str> {
     let mut names: Vec<&'static str> = PROVIDERS
         .iter()

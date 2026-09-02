@@ -140,12 +140,20 @@ pub enum Command {
     /// Validate an agent definition and optional tools file
     #[command(after_help = "EXAMPLES:
   atoma validate --agent-def ./agent.md
-  atoma validate --agent-def ./agent.md --tools-file ./tools.yml")]
+  atoma validate --agent-def ./agent.md --tools-file ./tools.yml
+  atoma validate --agent-def ./agent.md --template ./prompt-template.md")]
     Validate {
         #[arg(long, value_name = "FILE")]
         agent_def: PathBuf,
         #[arg(long, value_name = "FILE")]
         tools_file: Option<PathBuf>,
+        /// Prompt template to check for placeholders nothing substitutes
+        ///
+        /// Optional, like `--tools-file`: absent means the template is not checked
+        /// rather than that there is none, since `run` falls back to the built-in
+        /// one, which is correct by construction.
+        #[arg(long, value_name = "FILE")]
+        template: Option<PathBuf>,
     },
 
     /// Generate a default atoma.toml configuration file
