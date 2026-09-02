@@ -173,7 +173,10 @@ pub fn validate(
                     ));
                 }
             }
-            Err(e) => errors.push(format!("Failed to read template {:?}: {}", template_path, e)),
+            Err(e) => errors.push(format!(
+                "Failed to read template {:?}: {}",
+                template_path, e
+            )),
         }
     }
 
@@ -280,7 +283,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = write_agent(dir.path(), "solo", "");
         let template = dir.path().join("prompt.md");
-        fs::write(&template, "You are {{AGENT_NAME}} in {{WORKING_DIRECTORY}}.").unwrap();
+        fs::write(
+            &template,
+            "You are {{AGENT_NAME}} in {{WORKING_DIRECTORY}}.",
+        )
+        .unwrap();
         let result = validate(
             path,
             None,
