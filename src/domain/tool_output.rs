@@ -140,7 +140,13 @@ mod tests {
     #[test]
     fn the_marker_says_how_much_went_and_from_where() {
         let capped = cap(&"x".repeat(1000), 100);
-        assert!(capped.text.contains("900 characters dropped from the middle"), "{}", capped.text);
+        assert!(
+            capped
+                .text
+                .contains("900 characters dropped from the middle"),
+            "{}",
+            capped.text
+        );
         assert!(capped.text.contains("100 shown"), "{}", capped.text);
     }
 
