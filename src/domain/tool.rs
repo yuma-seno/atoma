@@ -62,6 +62,14 @@ pub struct ToolDef {
     /// there as a header or not at all.
     pub headers: HashMap<String, String>,
     pub hooks: Hooks,
+    /// How much of one tool result from this server reaches the model, in
+    /// characters. `None` means the client's default.
+    ///
+    /// Per server for the same reason the timeout is: a shell server returning a
+    /// test suite's output and a filesystem server returning a config file are not
+    /// the same question. See `domain::tool_output` for what the default is and
+    /// why a cap exists at all.
+    pub max_output_chars: Option<usize>,
     /// How long one `tools/list` or `tools/call` on this server may take, in
     /// seconds. `None` means the client's default.
     ///

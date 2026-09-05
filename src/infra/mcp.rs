@@ -8,6 +8,7 @@ use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 
 use crate::domain::tool::{Hooks, ToolDef};
 use crate::domain::tool_health::{self, HealthLog, Severity};
+use crate::domain::tool_output;
 use crate::infra::hooks;
 
 /// How long one `tools/list` or `tools/call` may take, for a server that does not
@@ -103,6 +104,10 @@ pub struct McpConnection {
     /// because 60 seconds means "stalled" for `github` and "still compiling" for
     /// `shell`.
     request_timeout: Duration,
+    /// How much of one result from this server reaches the model. See
+    /// `domain::tool_output`: a third-party server has no reason to know about
+    /// anyone's context window, so the limit has to be here.
+    max_output_chars: usize,
     /// What this server has said about its own trouble, waiting to go out with its
     /// next tool result. See `domain::tool_health` for why a result carries this at
     /// all.
@@ -216,6 +221,7 @@ impl McpConnection {
                 .request_timeout_secs
                 .map(Duration::from_secs)
                 .unwrap_or_else(default_request_timeout),
+            max_output_chars: tool_output::resolve_limit(config.max_output_chars),
             health: Arc::new(Mutex::new(HealthLog::default())),
         };
 
@@ -438,6 +444,25 @@ impl McpConnection {
             .unwrap_or(false);
 
         let (content_parts, images) = split_content(result);
+
+        // Bounded before anything else looks at it. A server that returns 72,141
+        // characters -- measured, one file read -- takes a seventh of a 128k window in
+        // one message, and every request after it carries the same.
+        //
+        // Before the annotation below, not after: the annotation is this client's own
+        // sentence about the server's health, and cutting the middle out of a result
+        // must not be able to cut that.
+        let capped = tool_output::cap(&content_parts, self.max_output_chars);
+        if capped.dropped > 0 {
+            tracing::info!(
+                "[MCP:{}] capped '{}' result: {} characters dropped, {} shown",
+                self.name,
+                tool_name,
+                capped.dropped,
+                self.max_output_chars,
+            );
+        }
+        let content_parts = capped.text;
 
         // Everything this server has reported since its last result, attached to
         // this one. A tool's answer includes how well it could answer; the whole

@@ -31,6 +31,10 @@ struct ToolConfig {
     /// means the client's default, which is what nearly every server wants.
     #[serde(default)]
     pub request_timeout_secs: Option<u64>,
+    /// Characters of one tool result that reach the model. Absent means the
+    /// client's default.
+    #[serde(default)]
+    pub max_output_chars: Option<usize>,
 }
 
 #[derive(Deserialize, Default)]
@@ -226,6 +230,9 @@ pub fn load(path: &Path, credentials: &Credentials) -> Result<HashMap<String, To
                 // different source, but the reader is the same person, and a rule
                 // that holds in one place and not the other is worse than either.
                 request_timeout_secs: cfg.request_timeout_secs.filter(|secs| *secs > 0),
+                // Zero means the default here too. One rule about zero across the
+                // whole crate is worth more than a cleverer rule in one place.
+                max_output_chars: cfg.max_output_chars.filter(|chars| *chars > 0),
             };
             Ok((name, def))
         })

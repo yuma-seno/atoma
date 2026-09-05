@@ -74,6 +74,7 @@ impl SingleEntryToolDefPort {
                 env: HashMap::new(),
                 url: None,
                 headers: HashMap::new(),
+                max_output_chars: None,
                 hooks: atoma::domain::tool::Hooks::default(),
                 request_timeout_secs: None,
             },
