@@ -162,7 +162,8 @@ async fn test_single_text_response() {
             template_path: None,
             tools_file: None,
             skills_dir: None,
-            max_iterations: 10,
+            max_iterations: Some(10),
+            max_runtime: None,
         },
         RunDeps {
             llm: &llm,
@@ -218,7 +219,8 @@ async fn test_tool_call_then_text_response() {
             template_path: None,
             tools_file: Some(tools_path),
             skills_dir: None,
-            max_iterations: 10,
+            max_iterations: Some(10),
+            max_runtime: None,
         },
         RunDeps {
             llm: &llm,
@@ -275,7 +277,8 @@ async fn test_skill_load_is_persisted_as_tool_history() {
             template_path: None,
             tools_file: None,
             skills_dir: Some(skills_dir),
-            max_iterations: 10,
+            max_iterations: Some(10),
+            max_runtime: None,
         },
         RunDeps {
             llm: &llm,
@@ -354,7 +357,8 @@ async fn test_max_iterations_exceeded() {
             template_path: None,
             tools_file: Some(tools_path),
             skills_dir: None,
-            max_iterations: 2,
+            max_iterations: Some(2),
+            max_runtime: None,
         },
         RunDeps {
             llm: &llm,
@@ -373,6 +377,78 @@ async fn test_max_iterations_exceeded() {
     assert!(
         msg.contains("maximum iterations"),
         "Expected max iterations error, got: {}",
+        msg
+    );
+}
+
+/// A time limit stops the run, and says so in its own words.
+///
+/// Zero seconds rather than a sleep: the check is `elapsed() >= limit`, and any
+/// elapsed time is at least zero, so the first iteration trips it. A test that waited
+/// for real time to pass would be testing the clock.
+#[tokio::test]
+async fn test_max_runtime_exceeded() {
+    use common::mock_llm::make_tool_call;
+
+    let tool_call = || make_tool_call("c1", "test_tool", "{}");
+    let llm = MockLlmClient::new()
+        .enqueue_tool_calls(vec![tool_call()])
+        .enqueue_tool_calls(vec![tool_call()]);
+
+    let registry = MockMcpRegistry::new()
+        .with_tool("test_tool", "looping tool")
+        .with_response("test_tool", "ok");
+
+    let agent_def = AgentDef {
+        mcp_servers: vec!["srv".to_string()],
+        ..minimal_agent("SlowAgent")
+    };
+
+    let agent_port = StubAgentDefPort { agent_def };
+    let session_port = StubSessionPort;
+    let tool_def_port = SingleEntryToolDefPort::new("srv");
+    let mcp_factory = StubMcpFactory::new(registry);
+
+    let dir = tempdir().unwrap();
+    let agent_path = dir.path().join("agent.md");
+    std::fs::write(&agent_path, "").unwrap();
+    let tools_path = dir.path().join("tools.yaml");
+    std::fs::write(&tools_path, "").unwrap();
+
+    let result = run(
+        RunSettings {
+            agent_def_path: agent_path,
+            in_session: None,
+            prompt_file: None,
+            out_session: None,
+            template_path: None,
+            tools_file: Some(tools_path),
+            skills_dir: None,
+            max_iterations: None,
+            max_runtime: Some(std::time::Duration::from_secs(0)),
+        },
+        RunDeps {
+            llm: &llm,
+            agent_def: &agent_port,
+            session: &session_port,
+            tool_def: &tool_def_port,
+            skill: &atoma::infra::persistence::skill::FileSkillAdapter,
+            template: &atoma::infra::template::FileTemplateAdapter,
+            mcp_factory: &mcp_factory,
+        },
+    )
+    .await;
+
+    let err = result.expect_err("a run past its time limit is an error");
+    assert!(
+        atoma::application::runner::is_limit_stop(&err),
+        "a time limit is a ceiling the caller asked for, not a failure: {}",
+        err
+    );
+    let msg = format!("{}", err);
+    assert!(
+        msg.contains("time limit"),
+        "Expected a time limit error, got: {}",
         msg
     );
 }
@@ -425,7 +501,8 @@ async fn test_identical_failed_tool_calls_abort() {
             template_path: None,
             tools_file: Some(tools_path),
             skills_dir: None,
-            max_iterations: 10,
+            max_iterations: Some(10),
+            max_runtime: None,
         },
         RunDeps {
             llm: &llm,
@@ -473,7 +550,8 @@ async fn test_empty_completion_is_retried_then_succeeds() {
             template_path: None,
             tools_file: None,
             skills_dir: None,
-            max_iterations: 10,
+            max_iterations: Some(10),
+            max_runtime: None,
         },
         RunDeps {
             llm: &llm,
@@ -519,7 +597,8 @@ async fn test_repeated_empty_completions_abort() {
             template_path: None,
             tools_file: None,
             skills_dir: None,
-            max_iterations: 50,
+            max_iterations: Some(50),
+            max_runtime: None,
         },
         RunDeps {
             llm: &llm,
@@ -587,7 +666,8 @@ async fn test_content_filter_returns_error() {
             template_path: None,
             tools_file: None,
             skills_dir: None,
-            max_iterations: 10,
+            max_iterations: Some(10),
+            max_runtime: None,
         },
         RunDeps {
             llm: &ContentFilterLlm,
@@ -652,7 +732,8 @@ async fn test_truncated_response_reports_length_reason() {
             template_path: None,
             tools_file: None,
             skills_dir: None,
-            max_iterations: 10,
+            max_iterations: Some(10),
+            max_runtime: None,
         },
         RunDeps {
             llm: &TruncatedLlm,
@@ -738,7 +819,8 @@ async fn test_prompt_file_is_appended_and_persisted() {
             template_path: None,
             tools_file: None,
             skills_dir: None,
-            max_iterations: 10,
+            max_iterations: Some(10),
+            max_runtime: None,
         },
         RunDeps {
             llm: &llm,

@@ -11,6 +11,7 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::time::Duration;
 
 /// Top-level atoma.toml configuration file.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -34,22 +35,12 @@ pub struct DefaultsConfig {
     pub skills_dir: Option<String>,
     #[serde(default)]
     pub template: Option<String>,
-    #[serde(default = "default_max_iterations")]
-    pub max_iterations: u32,
+    #[serde(default)]
+    pub max_iterations: Option<u32>,
+    #[serde(default)]
+    pub max_runtime_secs: Option<u64>,
     #[serde(default)]
     pub output: OutputFormat,
-}
-
-/// The iteration ceiling when nothing names one.
-///
-/// Written once because it is live in three ways: as the serde default when a config file
-/// exists without the field, as the fallback when no config file exists at all, and in the
-/// template `atoma init` writes. Two of those were separate literals, so changing one gave
-/// a run one ceiling with a config file and another without — both of them "the default".
-pub const DEFAULT_MAX_ITERATIONS: u32 = 50;
-
-fn default_max_iterations() -> u32 {
-    DEFAULT_MAX_ITERATIONS
 }
 
 /// Output format for the `atoma run` command.
@@ -96,6 +87,8 @@ pub struct ProfileConfig {
     #[serde(default)]
     pub max_iterations: Option<u32>,
     #[serde(default)]
+    pub max_runtime_secs: Option<u64>,
+    #[serde(default)]
     pub output: Option<OutputFormat>,
     #[serde(default)]
     pub env: HashMap<String, String>,
@@ -108,7 +101,25 @@ pub struct ResolvedConfig {
     pub tools_file: Option<PathBuf>,
     pub skills_dir: Option<PathBuf>,
     pub template: Option<PathBuf>,
-    pub max_iterations: u32,
+    /// The iteration ceiling, if anything asked for one.
+    ///
+    /// `None` is no ceiling, and that is the default. A count of iterations is a
+    /// proxy for "this run has stopped getting anywhere", and a poor one in both
+    /// directions: it stops a long piece of real work and lets a short useless one
+    /// run. Measured in the delivery template — one task finished in 17 tool calls
+    /// and the same task, framed thirteen times larger, was cut off at 200 having
+    /// made 169 distinct searches and repeated only 6.
+    ///
+    /// What replaces it is `max_runtime`, which is not a proxy: it is the wall the
+    /// job actually has.
+    pub max_iterations: Option<u32>,
+    /// How long the whole inference loop may run.
+    ///
+    /// `None` is no limit. A caller running under something that will kill it — a CI
+    /// job with a timeout — should pass a value below that, so the run ends on its
+    /// own terms and saves its session, instead of being killed with the session
+    /// unwritten.
+    pub max_runtime: Option<Duration>,
     pub output: OutputFormat,
     pub env: HashMap<String, String>,
 }
@@ -137,6 +148,7 @@ pub struct CliOverrides {
     pub skills_dir: Option<PathBuf>,
     pub template: Option<PathBuf>,
     pub max_iterations: Option<u32>,
+    pub max_runtime_secs: Option<u64>,
     pub output: Option<OutputFormat>,
 }
 
@@ -229,8 +241,14 @@ pub fn resolve_run_config(
     let max_iterations = overrides
         .max_iterations
         .or_else(|| profile.as_ref().and_then(|p| p.max_iterations))
-        .or_else(|| defaults.as_ref().map(|d| d.max_iterations))
-        .unwrap_or(DEFAULT_MAX_ITERATIONS);
+        .or_else(|| defaults.as_ref().and_then(|d| d.max_iterations));
+
+    let max_runtime = overrides
+        .max_runtime_secs
+        .or_else(|| profile.as_ref().and_then(|p| p.max_runtime_secs))
+        .or_else(|| defaults.as_ref().and_then(|d| d.max_runtime_secs))
+        .filter(|secs| *secs > 0)
+        .map(Duration::from_secs);
 
     let output = overrides
         .output
@@ -249,19 +267,15 @@ pub fn resolve_run_config(
         skills_dir,
         template,
         max_iterations,
+        max_runtime,
         output,
         env,
     })
 }
 
 /// Generate a default atoma.toml file.
-///
-/// A `format!` rather than one string, so the iteration ceiling it writes is the one the
-/// code uses. It was a third literal `50`: change the default and `atoma init` would keep
-/// writing the old one into every new configuration, which then silently held.
 pub fn generate_default_config() -> String {
-    format!(
-        r#"# Atoma configuration
+    r#"# Atoma configuration
 # See https://github.com/yuma-seno/atoma for documentation.
 
 [defaults]
@@ -269,8 +283,20 @@ pub fn generate_default_config() -> String {
 # tools_file = "tools.yaml"
 # skills_dir = "skills"
 # template = "templates/custom.md"
-max_iterations = {DEFAULT_MAX_ITERATIONS}
 # output = "text"   # "text" or "json"
+
+# Neither ceiling below is set by default, and a run with neither is unbounded: it
+# stops when the agent says it is finished, or when a broken loop is detected.
+#
+# max_runtime_secs is the one to reach for. A caller running under something that
+# will kill it -- a CI job with a timeout -- should set this below that timeout, so
+# the run ends on its own terms and saves its session instead of being killed with
+# the session unwritten.
+# max_runtime_secs = 3000
+#
+# max_iterations counts turns, which is a proxy for "this run is getting nowhere"
+# and a poor one in both directions. Set it only if you want a hard call ceiling.
+# max_iterations = 200
 
 # Profile: overrides defaults when --profile is used
 # [profile.review]
@@ -281,7 +307,7 @@ max_iterations = {DEFAULT_MAX_ITERATIONS}
 # [env]
 # OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 "#
-    )
+    .to_string()
 }
 
 #[cfg(test)]
@@ -311,6 +337,7 @@ output = "json"
                 skills_dir: None,
                 template: None,
                 max_iterations: None,
+                max_runtime_secs: None,
                 output: None,
             },
             Some("review"),
@@ -331,6 +358,7 @@ output = "json"
                 skills_dir: Some(PathBuf::from("cli-skills")),
                 template: Some(PathBuf::from("cli.md")),
                 max_iterations: None,
+                max_runtime_secs: None,
                 output: None,
             },
             Some("review"),
@@ -363,6 +391,7 @@ PROFILE_ONLY = "yes"
                 skills_dir: None,
                 template: None,
                 max_iterations: None,
+                max_runtime_secs: None,
                 output: None,
             },
             Some("review"),
@@ -394,6 +423,7 @@ PROFILE_ONLY = "yes"
                 skills_dir: None,
                 template: None,
                 max_iterations: None,
+                max_runtime_secs: None,
                 output: None,
             },
             Some("typo"),

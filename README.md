@@ -64,7 +64,7 @@ flowchart LR
 - Provider and credential resolution is explicit. See [docs/configuration.md](docs/configuration.md).
 - Tool hooks can fail closed before execution, and fail open after execution. See [docs/tools-and-skills.md](docs/tools-and-skills.md).
 - Session persistence is file-based and opt-in through `--in-session` and `--out-session`. See [docs/runtime.md](docs/runtime.md).
-- `max_iterations` guard exits with status code 2 after saving session when possible. See [docs/runtime.md](docs/runtime.md).
+- A run is unbounded by default; `--max-runtime-secs` and `--max-iterations` are opt-in ceilings that exit with status code 2 after saving the session when possible. See [docs/runtime.md](docs/runtime.md).
 
 ## License
 

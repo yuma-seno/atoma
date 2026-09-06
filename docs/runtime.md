@@ -32,7 +32,37 @@ with empty text. Any productive completion resets the counter.
 For transport-level failures and the request timeout, see
 [configuration.md](configuration.md).
 
-If iteration count exceeds `max_iterations`, Atoma returns an error and the CLI exits with status 2.
+## Where a run stops
+
+A run has no ceiling unless the caller asks for one. It ends when the agent says it
+is finished, when a tool asks for the session to end, or when the loop is detected to
+be broken -- the same tool call failing identically three times in a row.
+
+No default ceiling, because the only one available to a default is a count of turns,
+and a count of turns is a proxy for "this run has stopped getting anywhere" that is
+wrong in both directions. Measured in one repository: a task finished in 17 tool
+calls, and the same task framed thirteen times larger was cut off at 200 turns having
+made 169 distinct searches and repeated only 6 -- working, and stopped for it.
+
+Two opt-in ceilings exist for callers who need one:
+
+| Flag | Meaning |
+| --- | --- |
+| `--max-runtime-secs N` | Stop after N seconds of wall clock. |
+| `--max-iterations N` | Stop after N turns. |
+
+Either can also be set as `max_runtime_secs` or `max_iterations` under `[defaults]`
+or a profile in `atoma.toml`, though a runtime limit usually belongs on the command
+line: it describes the circumstances of one invocation, not the agent.
+
+Reaching either is not a failure. Atoma checks them between exchanges, where the
+conversation is whole and every tool call has its result, saves the session, returns
+the corresponding error, and the CLI exits with status 2. The session is resumable
+with `--in-session`.
+
+`--max-runtime-secs` is the one to reach for under a CI job with its own timeout. Set
+it below that timeout: a run that is killed by the job never reaches the step that
+saves the session, so its work is gone rather than resumable.
 
 ## Tool history and `session_ends`
 

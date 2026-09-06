@@ -4,6 +4,7 @@ use anyhow::{bail, Context, Result};
 use serde_json::Value;
 use std::borrow::Cow;
 use std::collections::HashMap;
+use std::time::{Duration, Instant};
 
 use crate::domain::ports::{FinishReason, LlmPort, LlmUsage, ToolCallResult, ToolPort};
 use crate::domain::session::{Message, Session, ToolCall};
@@ -53,6 +54,43 @@ impl std::fmt::Display for MaxIterationsReached {
 }
 
 impl std::error::Error for MaxIterationsReached {}
+
+/// Sentinel error returned when the inference loop runs out of time.
+///
+/// Separate from `MaxIterationsReached` because the two ceilings mean different
+/// things. A count of iterations is a guess about how much work a task needs; a
+/// runtime is the wall the caller actually has -- a CI job's own timeout -- moved a
+/// little earlier so the run ends on its own terms.
+///
+/// That earlier ending is the whole point. Being killed by the job is not the same as
+/// stopping: the steps that save the session and report never run, so the work is
+/// gone rather than resumable.
+#[derive(Debug)]
+pub struct RunTimeExceeded(pub Duration);
+
+impl std::fmt::Display for RunTimeExceeded {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "Inference loop exceeded its time limit ({}s)",
+            self.0.as_secs()
+        )
+    }
+}
+
+impl std::error::Error for RunTimeExceeded {}
+
+/// Whether an error is a ceiling the caller asked for rather than something going wrong.
+///
+/// Both sentinels mean the same thing downstream: the session is worth saving and the
+/// exit status is the soft-stop one, not a failure. Two call sites -- the runner and
+/// `main` -- ask this question, and each answered it with its own `downcast_ref` for a
+/// single type. Adding a second ceiling to only one of them is exactly the bug this
+/// function exists to make impossible.
+pub fn is_limit_stop(error: &anyhow::Error) -> bool {
+    error.downcast_ref::<MaxIterationsReached>().is_some()
+        || error.downcast_ref::<RunTimeExceeded>().is_some()
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CompletionReason {
@@ -267,20 +305,54 @@ pub async fn inference_loop(
     tool_definitions: Option<&[Value]>,
     extra_body: &HashMap<String, Value>,
     tools: &mut Box<dyn ToolPort + Send>,
-    max_iterations: u32,
+    max_iterations: Option<u32>,
+    max_runtime: Option<Duration>,
     vision: bool,
 ) -> Result<InferenceResult> {
     let mut total_usage = LlmUsage::default();
     let mut failure_tracker = ToolFailureTracker::default();
     let mut consecutive_empty: u8 = 0;
+    let started = Instant::now();
 
-    for iteration in 1..=max_iterations {
-        tracing::info!(
-            "Inference iteration {}/{} ({} messages in session)",
-            iteration,
-            max_iterations,
-            session.messages.len()
-        );
+    let mut iteration: u32 = 0;
+    loop {
+        iteration += 1;
+
+        // Both ceilings are checked here, at the top, and that placement is
+        // load-bearing: the previous iteration appended its tool results before coming
+        // back here, so the conversation is whole. Stopping between exchanges is what
+        // leaves a session another run can resume from -- across 18 cut-off sessions,
+        // every one ended on a tool result with no unanswered call.
+        if let Some(limit) = max_iterations {
+            if iteration > limit {
+                return Err(anyhow::Error::new(MaxIterationsReached(limit)));
+            }
+        }
+        if let Some(limit) = max_runtime {
+            let spent = started.elapsed();
+            if spent >= limit {
+                tracing::warn!(
+                    "Time limit reached after {}s over {} iterations",
+                    spent.as_secs(),
+                    iteration - 1,
+                );
+                return Err(anyhow::Error::new(RunTimeExceeded(limit)));
+            }
+        }
+
+        match max_iterations {
+            Some(limit) => tracing::info!(
+                "Inference iteration {}/{} ({} messages in session)",
+                iteration,
+                limit,
+                session.messages.len()
+            ),
+            None => tracing::info!(
+                "Inference iteration {} ({} messages in session)",
+                iteration,
+                session.messages.len()
+            ),
+        }
 
         let outgoing = messages_for_provider(&session.messages, vision);
         let response = llm_client
@@ -403,13 +475,23 @@ pub async fn inference_loop(
             }
         }
     }
-
-    Err(anyhow::Error::new(MaxIterationsReached(max_iterations)))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Both ceilings, and only the ceilings. Something going wrong must not be
+    /// mistaken for a limit: that would save a session, exit 2 and read as a soft
+    /// stop, which is a failure reported as a pause.
+    #[test]
+    fn a_ceiling_is_a_limit_stop_and_a_failure_is_not() {
+        assert!(is_limit_stop(&anyhow::Error::new(MaxIterationsReached(50))));
+        assert!(is_limit_stop(&anyhow::Error::new(RunTimeExceeded(
+            Duration::from_secs(60)
+        ))));
+        assert!(!is_limit_stop(&anyhow::anyhow!("the provider hung up")));
+    }
 
     #[test]
     fn identical_failures_reach_the_abort_threshold() {

@@ -6,6 +6,7 @@ mod execution;
 use anyhow::{Context, Result};
 use std::io::IsTerminal;
 use std::path::PathBuf;
+use std::time::Duration;
 
 use crate::application::tools::RuntimeTools;
 use crate::domain::ports::{
@@ -15,7 +16,10 @@ use crate::domain::ports::{
 use crate::domain::session::{Message, Session};
 use crate::domain::skill::SkillCatalog;
 
-pub use execution::{inference_loop, CompletionReason, InferenceResult, MaxIterationsReached};
+pub use execution::{
+    inference_loop, is_limit_stop, CompletionReason, InferenceResult, MaxIterationsReached,
+    RunTimeExceeded,
+};
 
 // ── Bundled parameter structs ────────────────────────────────────────────────
 
@@ -28,7 +32,10 @@ pub struct RunSettings {
     pub template_path: Option<PathBuf>,
     pub tools_file: Option<PathBuf>,
     pub skills_dir: Option<PathBuf>,
-    pub max_iterations: u32,
+    /// A ceiling on turns, if the caller asked for one. `None` is unbounded.
+    pub max_iterations: Option<u32>,
+    /// A ceiling on wall-clock time, if the caller asked for one. `None` is unbounded.
+    pub max_runtime: Option<Duration>,
 }
 
 /// Observable outcome of a completed run. Presentation belongs to the caller.
@@ -65,6 +72,7 @@ pub async fn run(settings: RunSettings, deps: RunDeps<'_>) -> Result<RunOutcome>
         tools_file,
         skills_dir,
         max_iterations,
+        max_runtime,
     } = settings;
 
     // 1. Parse agent definition
@@ -222,6 +230,7 @@ pub async fn run(settings: RunSettings, deps: RunDeps<'_>) -> Result<RunOutcome>
         &agent.extra_body,
         &mut runtime_tools,
         max_iterations,
+        max_runtime,
         agent.vision,
     )
     .await;
@@ -242,13 +251,13 @@ pub async fn run(settings: RunSettings, deps: RunDeps<'_>) -> Result<RunOutcome>
             return Ok(RunOutcome::SessionEnded);
         }
         Err(e) => {
-            if e.downcast_ref::<MaxIterationsReached>().is_some() {
+            if is_limit_stop(&e) {
                 tracing::warn!("{}", e);
                 if let Some(ref path) = out_path {
                     if let Err(save_err) = deps.session.save(&session, path) {
-                        tracing::error!("Failed to save session on max-iterations: {}", save_err);
+                        tracing::error!("Failed to save session on soft stop: {}", save_err);
                     } else {
-                        tracing::info!("Session saved to: {:?} (max-iterations soft stop)", path);
+                        tracing::info!("Session saved to: {:?} (soft stop)", path);
                     }
                 }
                 return Err(e);

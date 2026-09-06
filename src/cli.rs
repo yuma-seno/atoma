@@ -133,8 +133,18 @@ pub enum Command {
         #[arg(long, value_name = "DIR")]
         skills_dir: Option<PathBuf>,
 
+        /// Stop after N turns. Absent means no turn ceiling.
         #[arg(long, value_name = "N")]
         max_iterations: Option<u32>,
+
+        /// Stop after N seconds. Absent means no time limit.
+        ///
+        /// Passed per invocation rather than kept in `atoma.toml` because it belongs to
+        /// the run's circumstances, not to the agent: the same agent under a CI job with
+        /// a 60-minute timeout and the same agent on a workstation want different
+        /// answers, and only the caller knows which one it is.
+        #[arg(long, value_name = "SECONDS")]
+        max_runtime_secs: Option<u64>,
     },
 
     /// Validate an agent definition and optional tools file

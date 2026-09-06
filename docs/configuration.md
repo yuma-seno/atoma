@@ -109,12 +109,10 @@ agent_def = "agents/orchestrator.md"
 tools_file = "tools.yaml"
 skills_dir = "skills"
 template = "prompt-template.md"
-max_iterations = 80
 output = "text"
 
 [profile.review]
 agent_def = "agents/reviewer.md"
-max_iterations = 30
 output = "json"
 
 [env]
@@ -130,8 +128,8 @@ ATOMA_PROVIDER = "anthropic"
 - `--profile` requires a discovered `atoma.toml`.
 - Unknown profile names fail fast.
 - Default `agent_def` is `agent.md` when none is supplied.
-- Default `max_iterations` is `50`.
 - Default `output` is `text`.
+- There is no default ceiling on a run. See [runtime.md](runtime.md).
 
 ## Validation workflow
 

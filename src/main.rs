@@ -53,6 +53,7 @@ async fn main() -> Result<()> {
             tools_file,
             skills_dir,
             max_iterations,
+            max_runtime_secs,
         } => {
             let config = config_module::discover_and_load()?.1;
 
@@ -65,6 +66,7 @@ async fn main() -> Result<()> {
                     skills_dir,
                     template,
                     max_iterations,
+                    max_runtime_secs,
                     output: output_override,
                 },
                 profile.as_deref(),
@@ -100,6 +102,7 @@ async fn main() -> Result<()> {
                     tools_file: resolved.tools_file,
                     skills_dir: resolved.skills_dir,
                     max_iterations: resolved.max_iterations,
+                    max_runtime: resolved.max_runtime,
                 },
                 RunDeps {
                     llm: llm.as_ref(),
@@ -115,11 +118,7 @@ async fn main() -> Result<()> {
 
             let outcome = match result {
                 Ok(outcome) => outcome,
-                Err(err)
-                    if err
-                        .downcast_ref::<application::runner::MaxIterationsReached>()
-                        .is_some() =>
-                {
+                Err(err) if application::runner::is_limit_stop(&err) => {
                     std::process::exit(2);
                 }
                 Err(err) => return Err(err),
