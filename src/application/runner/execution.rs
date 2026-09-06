@@ -8,9 +8,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use crate::domain::ports::{FinishReason, LlmPort, LlmUsage, ToolCallResult, ToolPort};
-use crate::domain::session::{
-    answer_unanswered_tool_calls, Message, Session, ToolCall, TOOL_CALL_UNANSWERED,
-};
+use crate::domain::session::{Message, Session, ToolCall};
 
 const MAX_IDENTICAL_TOOL_FAILURES: u8 = 3;
 
