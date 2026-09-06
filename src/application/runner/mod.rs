@@ -16,10 +16,11 @@ use crate::domain::ports::{
 use crate::domain::session::{Message, Session};
 use crate::domain::skill::SkillCatalog;
 
-pub use execution::{
-    inference_loop, is_limit_stop, CompletionReason, InferenceResult, MaxIterationsReached,
-    RunTimeExceeded,
-};
+// The two sentinel types stay unexported on purpose. `is_limit_stop` is the whole
+// question anyone outside asks about them, and exporting the types invites each caller
+// to answer it again with its own `downcast_ref` -- which is how one of the two callers
+// came to know about only one ceiling.
+pub use execution::{inference_loop, is_limit_stop, CompletionReason, InferenceResult};
 
 // ── Bundled parameter structs ────────────────────────────────────────────────
 
