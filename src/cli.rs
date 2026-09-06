@@ -145,6 +145,18 @@ pub enum Command {
         /// answers, and only the caller knows which one it is.
         #[arg(long, value_name = "SECONDS")]
         max_runtime_secs: Option<u64>,
+
+        /// Stop when this file appears. Absent means nothing can interrupt the run.
+        ///
+        /// For a caller that has to be able to change its mind -- a person watching a
+        /// run go the wrong way. Checked at the top of each turn, so the run ends with
+        /// its conversation whole and its session written, which killing the process
+        /// does not do: atoma writes the session once, at the end.
+        ///
+        /// A path, not a signal, because the thing that needs to reach a running agent
+        /// usually comes from another machine.
+        #[arg(long, value_name = "FILE")]
+        stop_file: Option<PathBuf>,
     },
 
     /// Validate an agent definition and optional tools file

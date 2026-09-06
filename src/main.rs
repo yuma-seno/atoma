@@ -54,6 +54,7 @@ async fn main() -> Result<()> {
             skills_dir,
             max_iterations,
             max_runtime_secs,
+            stop_file,
         } => {
             let config = config_module::discover_and_load()?.1;
 
@@ -103,6 +104,10 @@ async fn main() -> Result<()> {
                     skills_dir: resolved.skills_dir,
                     max_iterations: resolved.max_iterations,
                     max_runtime: resolved.max_runtime,
+                    // Straight from the flag, not through `resolve_run_config`: there
+                    // is no config key for it, and there should not be. See
+                    // `RunSettings::stop_file`.
+                    stop_file,
                 },
                 RunDeps {
                     llm: llm.as_ref(),
@@ -118,7 +123,7 @@ async fn main() -> Result<()> {
 
             let outcome = match result {
                 Ok(outcome) => outcome,
-                Err(err) if application::runner::is_limit_stop(&err) => {
+                Err(err) if application::runner::is_soft_stop(&err) => {
                     std::process::exit(2);
                 }
                 Err(err) => return Err(err),

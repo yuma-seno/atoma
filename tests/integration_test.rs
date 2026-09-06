@@ -164,6 +164,7 @@ async fn test_single_text_response() {
             skills_dir: None,
             max_iterations: Some(10),
             max_runtime: None,
+            stop_file: None,
         },
         RunDeps {
             llm: &llm,
@@ -221,6 +222,7 @@ async fn test_tool_call_then_text_response() {
             skills_dir: None,
             max_iterations: Some(10),
             max_runtime: None,
+            stop_file: None,
         },
         RunDeps {
             llm: &llm,
@@ -279,6 +281,7 @@ async fn test_skill_load_is_persisted_as_tool_history() {
             skills_dir: Some(skills_dir),
             max_iterations: Some(10),
             max_runtime: None,
+            stop_file: None,
         },
         RunDeps {
             llm: &llm,
@@ -359,6 +362,7 @@ async fn test_max_iterations_exceeded() {
             skills_dir: None,
             max_iterations: Some(2),
             max_runtime: None,
+            stop_file: None,
         },
         RunDeps {
             llm: &llm,
@@ -426,6 +430,7 @@ async fn test_max_runtime_exceeded() {
             skills_dir: None,
             max_iterations: None,
             max_runtime: Some(std::time::Duration::from_secs(0)),
+            stop_file: None,
         },
         RunDeps {
             llm: &llm,
@@ -441,7 +446,7 @@ async fn test_max_runtime_exceeded() {
 
     let err = result.expect_err("a run past its time limit is an error");
     assert!(
-        atoma::application::runner::is_limit_stop(&err),
+        atoma::application::runner::is_soft_stop(&err),
         "a time limit is a ceiling the caller asked for, not a failure: {}",
         err
     );
@@ -451,6 +456,131 @@ async fn test_max_runtime_exceeded() {
         "Expected a time limit error, got: {}",
         msg
     );
+}
+
+/// A stop file that exists ends the run, and says so in its own words.
+///
+/// The file is created before the run rather than during it: what is under test is
+/// that the loop consults it at all, and at the top, where the conversation is whole.
+/// Racing a real writer against a real loop would test the scheduler.
+#[tokio::test]
+async fn test_stop_file_ends_the_run() {
+    use common::mock_llm::make_tool_call;
+
+    let tool_call = || make_tool_call("c1", "test_tool", "{}");
+    let llm = MockLlmClient::new()
+        .enqueue_tool_calls(vec![tool_call()])
+        .enqueue_tool_calls(vec![tool_call()]);
+
+    let registry = MockMcpRegistry::new()
+        .with_tool("test_tool", "looping tool")
+        .with_response("test_tool", "ok");
+
+    let agent_def = AgentDef {
+        mcp_servers: vec!["srv".to_string()],
+        ..minimal_agent("StoppableAgent")
+    };
+
+    let agent_port = StubAgentDefPort { agent_def };
+    let session_port = StubSessionPort;
+    let tool_def_port = SingleEntryToolDefPort::new("srv");
+    let mcp_factory = StubMcpFactory::new(registry);
+
+    let dir = tempdir().unwrap();
+    let agent_path = dir.path().join("agent.md");
+    std::fs::write(&agent_path, "").unwrap();
+    let tools_path = dir.path().join("tools.yaml");
+    std::fs::write(&tools_path, "").unwrap();
+    let stop_path = dir.path().join("stop");
+    std::fs::write(&stop_path, "").unwrap();
+
+    let result = run(
+        RunSettings {
+            agent_def_path: agent_path,
+            in_session: None,
+            prompt_file: None,
+            out_session: None,
+            template_path: None,
+            tools_file: Some(tools_path),
+            skills_dir: None,
+            max_iterations: None,
+            max_runtime: None,
+            stop_file: Some(stop_path),
+        },
+        RunDeps {
+            llm: &llm,
+            agent_def: &agent_port,
+            session: &session_port,
+            tool_def: &tool_def_port,
+            skill: &atoma::infra::persistence::skill::FileSkillAdapter,
+            template: &atoma::infra::template::FileTemplateAdapter,
+            mcp_factory: &mcp_factory,
+        },
+    )
+    .await;
+
+    let err = result.expect_err("a run asked to stop is an error");
+    assert!(
+        atoma::application::runner::is_soft_stop(&err),
+        "being asked to stop is a hand-back, not a failure: {}",
+        err
+    );
+    assert!(
+        format!("{}", err).contains("Stop requested"),
+        "Expected a stop-requested error, got: {}",
+        err
+    );
+}
+
+/// A stop file that is absent changes nothing.
+///
+/// The guard against the obvious inversion: a run that names a stop file it has not
+/// been asked to use must behave exactly like a run that named none, and a bug that
+/// read absence as presence would stop every run on its first turn.
+#[tokio::test]
+async fn test_an_absent_stop_file_does_not_stop_the_run() {
+    let llm = MockLlmClient::new().enqueue_text("nobody stopped me");
+
+    let agent_port = StubAgentDefPort {
+        agent_def: minimal_agent("UnstoppedAgent"),
+    };
+    let session_port = StubSessionPort;
+    let tool_def_port = StubToolDefPort;
+    let mcp_factory = StubMcpFactory::new(MockMcpRegistry::new());
+
+    let dir = tempdir().unwrap();
+    let agent_path = dir.path().join("agent.md");
+    std::fs::write(&agent_path, "").unwrap();
+
+    let result = run(
+        RunSettings {
+            agent_def_path: agent_path,
+            in_session: None,
+            prompt_file: None,
+            out_session: None,
+            template_path: None,
+            tools_file: None,
+            skills_dir: None,
+            max_iterations: None,
+            max_runtime: None,
+            stop_file: Some(dir.path().join("never-written")),
+        },
+        RunDeps {
+            llm: &llm,
+            agent_def: &agent_port,
+            session: &session_port,
+            tool_def: &tool_def_port,
+            skill: &atoma::infra::persistence::skill::FileSkillAdapter,
+            template: &atoma::infra::template::FileTemplateAdapter,
+            mcp_factory: &mcp_factory,
+        },
+    )
+    .await;
+
+    assert!(matches!(
+        result.expect("a run nobody stopped should complete"),
+        RunOutcome::Completed { .. }
+    ));
 }
 
 /// Identical failed calls abort before consuming the full iteration budget.
@@ -503,6 +633,7 @@ async fn test_identical_failed_tool_calls_abort() {
             skills_dir: None,
             max_iterations: Some(10),
             max_runtime: None,
+            stop_file: None,
         },
         RunDeps {
             llm: &llm,
@@ -552,6 +683,7 @@ async fn test_empty_completion_is_retried_then_succeeds() {
             skills_dir: None,
             max_iterations: Some(10),
             max_runtime: None,
+            stop_file: None,
         },
         RunDeps {
             llm: &llm,
@@ -599,6 +731,7 @@ async fn test_repeated_empty_completions_abort() {
             skills_dir: None,
             max_iterations: Some(50),
             max_runtime: None,
+            stop_file: None,
         },
         RunDeps {
             llm: &llm,
@@ -668,6 +801,7 @@ async fn test_content_filter_returns_error() {
             skills_dir: None,
             max_iterations: Some(10),
             max_runtime: None,
+            stop_file: None,
         },
         RunDeps {
             llm: &ContentFilterLlm,
@@ -734,6 +868,7 @@ async fn test_truncated_response_reports_length_reason() {
             skills_dir: None,
             max_iterations: Some(10),
             max_runtime: None,
+            stop_file: None,
         },
         RunDeps {
             llm: &TruncatedLlm,
@@ -821,6 +956,7 @@ async fn test_prompt_file_is_appended_and_persisted() {
             skills_dir: None,
             max_iterations: Some(10),
             max_runtime: None,
+            stop_file: None,
         },
         RunDeps {
             llm: &llm,

@@ -4,6 +4,7 @@ use anyhow::{bail, Context, Result};
 use serde_json::Value;
 use std::borrow::Cow;
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use crate::domain::ports::{FinishReason, LlmPort, LlmUsage, ToolCallResult, ToolPort};
@@ -80,16 +81,41 @@ impl std::fmt::Display for RunTimeExceeded {
 
 impl std::error::Error for RunTimeExceeded {}
 
-/// Whether an error is a ceiling the caller asked for rather than something going wrong.
+/// Sentinel error returned when something outside the run asked it to stop.
 ///
-/// Both sentinels mean the same thing downstream: the session is worth saving and the
-/// exit status is the soft-stop one, not a failure. Two call sites -- the runner and
-/// `main` -- ask this question, and each answered it with its own `downcast_ref` for a
-/// single type. Adding a second ceiling to only one of them is exactly the bug this
-/// function exists to make impossible.
-pub fn is_limit_stop(error: &anyhow::Error) -> bool {
+/// The third way a run ends on purpose, and the only one that is not a ceiling: a
+/// person changed their mind. A run under an orchestrator is watched by someone who
+/// can see it going the wrong way an hour before any budget would notice, and until
+/// this existed the only thing they could do was kill the job.
+///
+/// Killing the job is not the same as stopping it, and the difference is the reason
+/// this is a file rather than a signal. `atoma` writes the session once, at the end;
+/// a run killed mid-request leaves the previous run's session on disk, so "pause"
+/// would silently mean "discard". Checked at the top of an iteration -- beside the
+/// two ceilings, for the same reason -- the conversation is whole and the session
+/// that gets written is the one the work actually reached.
+#[derive(Debug)]
+pub struct StopRequested(pub PathBuf);
+
+impl std::fmt::Display for StopRequested {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Stop requested via {}", self.0.display())
+    }
+}
+
+impl std::error::Error for StopRequested {}
+
+/// Whether an error is a stop the caller asked for rather than something going wrong.
+///
+/// All three sentinels mean the same thing downstream: the session is worth saving and
+/// the exit status is the soft-stop one, not a failure. Two call sites -- the runner
+/// and `main` -- ask this question, and each answered it with its own `downcast_ref`
+/// for a single type. Adding a third way to stop to only one of them is exactly the
+/// bug this function exists to make impossible.
+pub fn is_soft_stop(error: &anyhow::Error) -> bool {
     error.downcast_ref::<MaxIterationsReached>().is_some()
         || error.downcast_ref::<RunTimeExceeded>().is_some()
+        || error.downcast_ref::<StopRequested>().is_some()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -307,6 +333,7 @@ pub async fn inference_loop(
     tools: &mut Box<dyn ToolPort + Send>,
     max_iterations: Option<u32>,
     max_runtime: Option<Duration>,
+    stop_file: Option<&Path>,
     vision: bool,
 ) -> Result<InferenceResult> {
     let mut total_usage = LlmUsage::default();
@@ -318,11 +345,21 @@ pub async fn inference_loop(
     loop {
         iteration += 1;
 
-        // Both ceilings are checked here, at the top, and that placement is
+        // All three stops are checked here, at the top, and that placement is
         // load-bearing: the previous iteration appended its tool results before coming
         // back here, so the conversation is whole. Stopping between exchanges is what
         // leaves a session another run can resume from -- across 18 cut-off sessions,
         // every one ended on a tool result with no unanswered call.
+        if let Some(path) = stop_file {
+            if path.exists() {
+                tracing::warn!(
+                    "Stop requested ({}) after {} iterations",
+                    path.display(),
+                    iteration - 1,
+                );
+                return Err(anyhow::Error::new(StopRequested(path.to_path_buf())));
+            }
+        }
         if let Some(limit) = max_iterations {
             if iteration > limit {
                 return Err(anyhow::Error::new(MaxIterationsReached(limit)));
@@ -481,16 +518,19 @@ pub async fn inference_loop(
 mod tests {
     use super::*;
 
-    /// Both ceilings, and only the ceilings. Something going wrong must not be
-    /// mistaken for a limit: that would save a session, exit 2 and read as a soft
-    /// stop, which is a failure reported as a pause.
+    /// The three deliberate stops, and only those. Something going wrong must not be
+    /// mistaken for one: that would save a session, exit 2 and read as a pause, which
+    /// is a failure reported as a hand-back.
     #[test]
-    fn a_ceiling_is_a_limit_stop_and_a_failure_is_not() {
-        assert!(is_limit_stop(&anyhow::Error::new(MaxIterationsReached(50))));
-        assert!(is_limit_stop(&anyhow::Error::new(RunTimeExceeded(
+    fn a_deliberate_stop_is_one_and_a_failure_is_not() {
+        assert!(is_soft_stop(&anyhow::Error::new(MaxIterationsReached(50))));
+        assert!(is_soft_stop(&anyhow::Error::new(RunTimeExceeded(
             Duration::from_secs(60)
         ))));
-        assert!(!is_limit_stop(&anyhow::anyhow!("the provider hung up")));
+        assert!(is_soft_stop(&anyhow::Error::new(StopRequested(
+            PathBuf::from("/tmp/stop")
+        ))));
+        assert!(!is_soft_stop(&anyhow::anyhow!("the provider hung up")));
     }
 
     #[test]

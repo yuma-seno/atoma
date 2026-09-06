@@ -44,18 +44,22 @@ wrong in both directions. Measured in one repository: a task finished in 17 tool
 calls, and the same task framed thirteen times larger was cut off at 200 turns having
 made 169 distinct searches and repeated only 6 -- working, and stopped for it.
 
-Two opt-in ceilings exist for callers who need one:
+Three opt-in stops exist for callers who need one:
 
 | Flag | Meaning |
 | --- | --- |
 | `--max-runtime-secs N` | Stop after N seconds of wall clock. |
 | `--max-iterations N` | Stop after N turns. |
+| `--stop-file FILE` | Stop once FILE exists. |
 
-Either can also be set as `max_runtime_secs` or `max_iterations` under `[defaults]`
-or a profile in `atoma.toml`, though a runtime limit usually belongs on the command
-line: it describes the circumstances of one invocation, not the agent.
+The two ceilings can also be set as `max_runtime_secs` or `max_iterations` under
+`[defaults]` or a profile in `atoma.toml`, though a runtime limit usually belongs on
+the command line: it describes the circumstances of one invocation, not the agent.
+`--stop-file` has no configuration key at all — a path fixed in a config file is a
+path that may already exist when a run starts, which would stop every run on its
+first turn.
 
-Reaching either is not a failure. Atoma checks them between exchanges, where the
+None of the three is a failure. Atoma checks all of them between exchanges, where the
 conversation is whole and every tool call has its result, saves the session, returns
 the corresponding error, and the CLI exits with status 2. The session is resumable
 with `--in-session`.
@@ -63,6 +67,15 @@ with `--in-session`.
 `--max-runtime-secs` is the one to reach for under a CI job with its own timeout. Set
 it below that timeout: a run that is killed by the job never reaches the step that
 saves the session, so its work is gone rather than resumable.
+
+`--stop-file` is for a caller that has to be able to change its mind — a person
+watching a run go the wrong way, an hour before any budget would notice. Nothing
+polls it for you: the caller creates the file when it decides, from wherever it is.
+
+A file rather than a signal, for the same reason the ceilings are checked where they
+are. `SIGTERM` arrives in the middle of a request; the file is read at the top of a
+turn. And what needs to reach a running agent usually comes from another machine,
+where a signal cannot go and a shared path or a small poller can.
 
 ## Tool history and `session_ends`
 

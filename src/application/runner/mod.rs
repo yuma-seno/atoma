@@ -16,11 +16,11 @@ use crate::domain::ports::{
 use crate::domain::session::{Message, Session};
 use crate::domain::skill::SkillCatalog;
 
-// The two sentinel types stay unexported on purpose. `is_limit_stop` is the whole
+// The three sentinel types stay unexported on purpose. `is_soft_stop` is the whole
 // question anyone outside asks about them, and exporting the types invites each caller
 // to answer it again with its own `downcast_ref` -- which is how one of the two callers
 // came to know about only one ceiling.
-pub use execution::{inference_loop, is_limit_stop, CompletionReason, InferenceResult};
+pub use execution::{inference_loop, is_soft_stop, CompletionReason, InferenceResult};
 
 // ── Bundled parameter structs ────────────────────────────────────────────────
 
@@ -37,6 +37,13 @@ pub struct RunSettings {
     pub max_iterations: Option<u32>,
     /// A ceiling on wall-clock time, if the caller asked for one. `None` is unbounded.
     pub max_runtime: Option<Duration>,
+    /// A path whose existence means "stop at the next iteration", if the caller wants
+    /// to be able to say so. `None` is a run nothing outside it can interrupt.
+    ///
+    /// Not read from `atoma.toml`, unlike the two ceilings: a path that is fixed in
+    /// configuration is a path that might already exist when a run starts, which would
+    /// stop every run immediately. It belongs to one invocation.
+    pub stop_file: Option<PathBuf>,
 }
 
 /// Observable outcome of a completed run. Presentation belongs to the caller.
@@ -74,6 +81,7 @@ pub async fn run(settings: RunSettings, deps: RunDeps<'_>) -> Result<RunOutcome>
         skills_dir,
         max_iterations,
         max_runtime,
+        stop_file,
     } = settings;
 
     // 1. Parse agent definition
@@ -232,6 +240,7 @@ pub async fn run(settings: RunSettings, deps: RunDeps<'_>) -> Result<RunOutcome>
         &mut runtime_tools,
         max_iterations,
         max_runtime,
+        stop_file.as_deref(),
         agent.vision,
     )
     .await;
@@ -252,7 +261,7 @@ pub async fn run(settings: RunSettings, deps: RunDeps<'_>) -> Result<RunOutcome>
             return Ok(RunOutcome::SessionEnded);
         }
         Err(e) => {
-            if is_limit_stop(&e) {
+            if is_soft_stop(&e) {
                 tracing::warn!("{}", e);
                 if let Some(ref path) = out_path {
                     if let Err(save_err) = deps.session.save(&session, path) {
