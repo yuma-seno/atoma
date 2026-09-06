@@ -110,6 +110,73 @@ impl Message {
     }
 }
 
+/// What a tool call gets when the run ended before it could be answered.
+///
+/// Not a guess at what the tool would have returned. It says the run ended, which is
+/// true and is what a resumed agent needs to know: the call did not happen, so
+/// whatever it was for is still undone.
+pub const TOOL_CALL_UNANSWERED: &str = "Error: the run ended before this tool call completed.";
+
+/// Give every tool call still waiting for a result one that says why it never got one.
+///
+/// # The rule this restores
+///
+/// A `tool` message answers an assistant message's `tool_calls`, and **every provider
+/// rejects a conversation carrying one without the other**. A session with an
+/// unanswered call is not merely untidy: it cannot be resumed at all, and the error
+/// says nothing about the missing pair.
+///
+/// # Why this exists rather than "we fixed the path that caused it"
+///
+/// One path did cause it: aborting a broken run part-way through a batch of parallel
+/// tool calls. That is fixed where it happens, and this still exists, because a fix
+/// closes one path and an invariant closes the shape. Nothing noticed the hole for as
+/// long as it did only because a broken run's session was thrown away; now that every
+/// session is kept, an unanswered call would be written to disk and every later run on
+/// that issue would fail on it.
+///
+/// # Order
+///
+/// A synthetic result is appended to the end of its own call's result block, not to the
+/// end of the session. A result that follows the next assistant turn answers nothing.
+pub fn answer_unanswered_tool_calls(session: &mut Session, reason: &str) -> usize {
+    let mut out: Vec<Message> = Vec::with_capacity(session.messages.len());
+    let mut answered = 0usize;
+    let mut i = 0usize;
+
+    while i < session.messages.len() {
+        let message = session.messages[i].clone();
+        let calls = message.tool_calls.clone();
+        out.push(message);
+        i += 1;
+
+        let Some(calls) = calls else { continue };
+
+        // The run of tool messages that answers this turn. Copied first, so what was
+        // already there keeps its order and the synthetic ones land after it.
+        let mut seen: Vec<String> = Vec::new();
+        while i < session.messages.len() && session.messages[i].role == "tool" {
+            if let Some(id) = &session.messages[i].tool_call_id {
+                seen.push(id.clone());
+            }
+            out.push(session.messages[i].clone());
+            i += 1;
+        }
+
+        for call in &calls {
+            if !seen.iter().any(|id| id == &call.id) {
+                out.push(Message::tool(&call.id, reason));
+                answered += 1;
+            }
+        }
+    }
+
+    if answered > 0 {
+        session.messages = out;
+    }
+    answered
+}
+
 /// An in-memory conversation session.
 ///
 /// Persistence (loading from / saving to disk) is handled by
@@ -126,6 +193,104 @@ pub struct Session {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn call(id: &str) -> ToolCall {
+        ToolCall {
+            id: id.to_string(),
+            type_: "function".to_string(),
+            function: ToolCallFunction {
+                name: "shell_execute".to_string(),
+                arguments: "{}".to_string(),
+            },
+        }
+    }
+
+    fn ids_of_tool_messages(session: &Session) -> Vec<String> {
+        session
+            .messages
+            .iter()
+            .filter(|m| m.role == "tool")
+            .filter_map(|m| m.tool_call_id.clone())
+            .collect()
+    }
+
+    /// The shape that cannot be resumed: a batch abandoned part-way.
+    #[test]
+    fn an_unanswered_call_is_given_a_result() {
+        let mut session = Session {
+            messages: vec![
+                Message::assistant(None, Some(vec![call("a"), call("b"), call("c")])),
+                Message::tool("a", "ok"),
+                Message::tool("b", "Error: no"),
+            ],
+            ..Default::default()
+        };
+
+        assert_eq!(answer_unanswered_tool_calls(&mut session, "gone"), 1);
+        assert_eq!(ids_of_tool_messages(&session), vec!["a", "b", "c"]);
+    }
+
+    /// A result that follows the NEXT assistant turn answers nothing, so the
+    /// synthetic one has to land inside its own block rather than at the end.
+    #[test]
+    fn a_synthetic_result_lands_in_its_own_block() {
+        let mut session = Session {
+            messages: vec![
+                Message::assistant(None, Some(vec![call("a"), call("b")])),
+                Message::tool("a", "ok"),
+                Message::assistant(Some("done"), None),
+            ],
+            ..Default::default()
+        };
+
+        assert_eq!(answer_unanswered_tool_calls(&mut session, "gone"), 1);
+        let roles: Vec<&str> = session.messages.iter().map(|m| m.role.as_str()).collect();
+        assert_eq!(roles, vec!["assistant", "tool", "tool", "assistant"]);
+        assert_eq!(session.messages[2].tool_call_id.as_deref(), Some("b"));
+    }
+
+    /// The common case, and the one that must not be touched: every call answered.
+    #[test]
+    fn a_whole_conversation_is_left_alone() {
+        let before = vec![
+            Message::assistant(None, Some(vec![call("a")])),
+            Message::tool("a", "ok"),
+            Message::assistant(Some("done"), None),
+        ];
+        let mut session = Session {
+            messages: before.clone(),
+            ..Default::default()
+        };
+
+        assert_eq!(answer_unanswered_tool_calls(&mut session, "gone"), 0);
+        assert_eq!(session.messages.len(), before.len());
+        assert_eq!(ids_of_tool_messages(&session), vec!["a"]);
+    }
+
+    #[test]
+    fn several_turns_are_each_repaired_in_place() {
+        let mut session = Session {
+            messages: vec![
+                Message::assistant(None, Some(vec![call("a"), call("b")])),
+                Message::tool("a", "ok"),
+                Message::assistant(None, Some(vec![call("c")])),
+            ],
+            ..Default::default()
+        };
+
+        assert_eq!(answer_unanswered_tool_calls(&mut session, "gone"), 2);
+        assert_eq!(ids_of_tool_messages(&session), vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn a_conversation_with_no_tool_calls_is_untouched() {
+        let mut session = Session {
+            messages: vec![Message::user("hello"), Message::assistant(Some("hi"), None)],
+            ..Default::default()
+        };
+        assert_eq!(answer_unanswered_tool_calls(&mut session, "gone"), 0);
+        assert_eq!(session.messages.len(), 2);
+    }
 
     #[test]
     fn test_message_system() {

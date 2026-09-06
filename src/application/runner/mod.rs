@@ -13,7 +13,9 @@ use crate::domain::ports::{
     AgentDefPort, LlmPort, LlmUsage, McpFactory, PromptContext, SessionPort, SkillPort,
     TemplatePort, ToolDefPort, ToolPort,
 };
-use crate::domain::session::{Message, Session};
+use crate::domain::session::{
+    answer_unanswered_tool_calls, Message, Session, TOOL_CALL_UNANSWERED,
+};
 use crate::domain::skill::SkillCatalog;
 
 // The three sentinel types stay unexported on purpose. `is_soft_stop` is the whole
@@ -67,6 +69,37 @@ pub struct RunDeps<'a> {
     pub skill: &'a dyn SkillPort,
     pub mcp_factory: &'a dyn McpFactory,
     pub template: &'a dyn TemplatePort,
+}
+
+/// Write the session out, whatever ended the run.
+///
+/// Repaired first. A tool call with no result is a conversation every provider refuses,
+/// so writing one would produce a session that cannot be resumed and an error, later,
+/// that says nothing about why. `execute_tool_calls` no longer leaves one; this is here
+/// because a path we have not thought of would otherwise reach the disk.
+///
+/// Nothing here fails the run. It is called on a path that is already reporting
+/// something, and a failure to save is a second problem rather than a replacement for
+/// the first.
+fn save_whatever_was_reached(
+    session: &mut Session,
+    out_path: Option<&std::path::Path>,
+    port: &dyn SessionPort,
+) {
+    let Some(path) = out_path else { return };
+
+    let repaired = answer_unanswered_tool_calls(session, TOOL_CALL_UNANSWERED);
+    if repaired > 0 {
+        tracing::warn!(
+            "{} tool call(s) had no result; answered them so the session can be resumed",
+            repaired
+        );
+    }
+
+    match port.save(session, path) {
+        Ok(()) => tracing::info!("Session saved to: {:?}", path),
+        Err(e) => tracing::error!("Failed to save session to {:?}: {}", path, e),
+    }
 }
 
 /// Run the agent: parse agent def, load session, connect MCP, run inference loop, save session.
@@ -261,17 +294,25 @@ pub async fn run(settings: RunSettings, deps: RunDeps<'_>) -> Result<RunOutcome>
             return Ok(RunOutcome::SessionEnded);
         }
         Err(e) => {
+            // Saved whichever it was. Two questions used to be one, and answering
+            // them together was throwing work away: whether this was the ending
+            // somebody asked for decides the exit status and what gets said, and
+            // whether the conversation is whole decides whether it is worth keeping.
+            //
+            // A provider that hangs up three times used to take the whole run's
+            // history with it. The next run started from nothing, on an issue where
+            // the work had already been done once.
+            //
+            // Discarding was never the machinery's decision to make, either: the
+            // person has `--session-mode recover`, which archives the session and
+            // starts fresh. Keeping it leaves them both options; discarding takes
+            // one away, silently, and cannot be undone.
             if is_soft_stop(&e) {
                 tracing::warn!("{}", e);
-                if let Some(ref path) = out_path {
-                    if let Err(save_err) = deps.session.save(&session, path) {
-                        tracing::error!("Failed to save session on soft stop: {}", save_err);
-                    } else {
-                        tracing::info!("Session saved to: {:?} (soft stop)", path);
-                    }
-                }
-                return Err(e);
+            } else {
+                tracing::error!("Run failed: {}", e);
             }
+            save_whatever_was_reached(&mut session, out_path.as_deref(), deps.session);
             return Err(e);
         }
     };

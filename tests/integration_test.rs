@@ -48,6 +48,25 @@ impl SessionPort for StubSessionPort {
     }
 }
 
+/// A session port that keeps what it was handed.
+///
+/// For the question `StubSessionPort` cannot answer: not "did saving work" but "was
+/// anything saved at all, and was it resumable".
+#[derive(Default)]
+struct RecordingSessionPort {
+    saved: Arc<Mutex<Option<Session>>>,
+}
+
+impl SessionPort for RecordingSessionPort {
+    fn load(&self, _path: &Path) -> Result<Session> {
+        Ok(Session::default())
+    }
+    fn save(&self, session: &Session, _path: &Path) -> Result<()> {
+        *self.saved.lock().unwrap() = Some(session.clone());
+        Ok(())
+    }
+}
+
 /// Returns an empty tool map.
 struct StubToolDefPort;
 
@@ -456,6 +475,114 @@ async fn test_max_runtime_exceeded() {
         "Expected a time limit error, got: {}",
         msg
     );
+}
+
+/// A run that fails still keeps its work, and keeps it resumable.
+///
+/// Two things at once, because they are one change. The abort fires in the middle of a
+/// batch of three parallel calls, which used to walk out of the loop and leave the
+/// third with no result -- a conversation every provider refuses. And the session was
+/// thrown away, so nobody found out.
+#[tokio::test]
+async fn test_a_failed_run_saves_a_resumable_session() {
+    use common::mock_llm::make_tool_call;
+
+    // Four identical failing calls in ONE turn. The third trips the counter, so the
+    // fourth is reached only if the batch is finished rather than abandoned -- which
+    // is the whole property under test.
+    //
+    // One turn, and every call in it failing, because of a second gap in the same
+    // detector (atoma#17): any successful call resets the counter, so a batch with a
+    // working call beside the failing one can never reach three at all.
+    let failing = |id: &str| make_tool_call(id, "failer", r#"{"input":"same"}"#);
+    let llm = MockLlmClient::new().enqueue_tool_calls(vec![
+        failing("c1"),
+        failing("c2"),
+        failing("c3"),
+        failing("c4"),
+    ]);
+
+    let registry = MockMcpRegistry::new().with_tool("failer", "a tool with no response");
+
+    let agent_port = StubAgentDefPort {
+        agent_def: AgentDef {
+            mcp_servers: vec!["srv".to_string()],
+            ..minimal_agent("DoomedAgent")
+        },
+    };
+    let session_port = RecordingSessionPort::default();
+    let saved = session_port.saved.clone();
+    let tool_def_port = SingleEntryToolDefPort::new("srv");
+    let mcp_factory = StubMcpFactory::new(registry);
+
+    let dir = tempdir().unwrap();
+    let agent_path = dir.path().join("agent.md");
+    std::fs::write(&agent_path, "").unwrap();
+    let tools_path = dir.path().join("tools.yaml");
+    std::fs::write(&tools_path, "").unwrap();
+
+    let error = run(
+        RunSettings {
+            agent_def_path: agent_path,
+            in_session: None,
+            prompt_file: None,
+            out_session: Some(dir.path().join("session.json")),
+            template_path: None,
+            tools_file: Some(tools_path),
+            skills_dir: None,
+            max_iterations: Some(10),
+            max_runtime: None,
+            stop_file: None,
+        },
+        RunDeps {
+            llm: &llm,
+            agent_def: &agent_port,
+            session: &session_port,
+            tool_def: &tool_def_port,
+            skill: &atoma::infra::persistence::skill::FileSkillAdapter,
+            template: &atoma::infra::template::FileTemplateAdapter,
+            mcp_factory: &mcp_factory,
+        },
+    )
+    .await
+    .unwrap_err();
+
+    assert!(
+        error.to_string().contains("3 identical failed calls"),
+        "{error}"
+    );
+    assert!(
+        !atoma::application::runner::is_soft_stop(&error),
+        "an abort is a failure, and saying otherwise would report it as a pause"
+    );
+
+    let session = saved
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("a failed run must still save what it reached");
+
+    // Every call answered. This is the property a provider enforces, and the reason
+    // the session is worth saving at all.
+    let calls: Vec<String> = session
+        .messages
+        .iter()
+        .filter_map(|m| m.tool_calls.as_ref())
+        .flatten()
+        .map(|c| c.id.clone())
+        .collect();
+    let answers: Vec<String> = session
+        .messages
+        .iter()
+        .filter_map(|m| m.tool_call_id.clone())
+        .collect();
+    for id in &calls {
+        assert!(
+            answers.contains(id),
+            "tool call '{id}' has no result; this session cannot be resumed"
+        );
+    }
+    assert_eq!(calls.len(), 4, "all four calls belong in the session");
 }
 
 /// A stop file that exists ends the run, and says so in its own words.

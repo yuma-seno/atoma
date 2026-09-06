@@ -8,7 +8,9 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use crate::domain::ports::{FinishReason, LlmPort, LlmUsage, ToolCallResult, ToolPort};
-use crate::domain::session::{Message, Session, ToolCall};
+use crate::domain::session::{
+    answer_unanswered_tool_calls, Message, Session, ToolCall, TOOL_CALL_UNANSWERED,
+};
 
 const MAX_IDENTICAL_TOOL_FAILURES: u8 = 3;
 
@@ -155,8 +157,24 @@ async fn execute_tool_calls(
         .push(Message::assistant(None, Some(tool_calls.to_vec())));
 
     let mut session_ends = false;
+    // Set instead of returned, so the batch this turn asked for is finished before the
+    // run is. Walking out of the middle of it left the assistant's `tool_calls` with
+    // some of its results missing, which no provider will accept -- so the session that
+    // recorded the most work was the one session that could not be resumed.
+    //
+    // The remaining calls are NOT executed. Once the run is over, taking further
+    // actions is doing work that has already been decided against; they are answered
+    // instead, which keeps the conversation whole without committing anything.
+    let mut abort: Option<String> = None;
 
     for tool_call in tool_calls {
+        if abort.is_some() {
+            session.messages.push(Message::tool(
+                &tool_call.id,
+                "Error: not executed. The run was aborted before this call was reached.",
+            ));
+            continue;
+        }
         let tool_name = &tool_call.function.name;
 
         let arguments = match serde_json::from_str::<Value>(&tool_call.function.arguments) {
@@ -170,11 +188,10 @@ async fn execute_tool_calls(
                 session.messages.push(Message::tool(&tool_call.id, &msg));
                 let signature = format!("{}:{}", tool_name, tool_call.function.arguments);
                 if failure_tracker.record_failure(signature) >= MAX_IDENTICAL_TOOL_FAILURES {
-                    bail!(
+                    abort = Some(format!(
                         "Aborting after {} identical failed calls to '{}'. Change the tool or arguments before retrying.",
-                        MAX_IDENTICAL_TOOL_FAILURES,
-                        tool_name,
-                    );
+                        MAX_IDENTICAL_TOOL_FAILURES, tool_name,
+                    ));
                 }
                 continue;
             }
@@ -212,15 +229,17 @@ async fn execute_tool_calls(
                 tracing::error!("Tool '{}' failed: {}", tool_name, e);
                 session.messages.push(Message::tool(&tool_call.id, &msg));
                 if failure_tracker.record_failure(signature) >= MAX_IDENTICAL_TOOL_FAILURES {
-                    bail!(
+                    abort = Some(format!(
                         "Aborting after {} identical failed calls to '{}'. Change the tool or arguments before retrying. Last error: {}",
-                        MAX_IDENTICAL_TOOL_FAILURES,
-                        tool_name,
-                        e,
-                    );
+                        MAX_IDENTICAL_TOOL_FAILURES, tool_name, e,
+                    ));
                 }
             }
         }
+    }
+
+    if let Some(reason) = abort {
+        bail!(reason);
     }
 
     Ok(session_ends)
