@@ -9,8 +9,7 @@ use std::time::{Duration, Instant};
 
 use crate::domain::ports::{FinishReason, LlmPort, LlmUsage, ToolCallResult, ToolPort};
 use crate::domain::session::{Message, Session, ToolCall};
-
-const MAX_IDENTICAL_TOOL_FAILURES: u8 = 3;
+use crate::domain::tool_loop::{CallOutcome, LoopTracker};
 
 /// How many consecutive degenerate (contentless) completions to re-request
 /// before giving up.
@@ -22,28 +21,6 @@ const MAX_IDENTICAL_TOOL_FAILURES: u8 = 3;
 /// otherwise silently consume the whole iteration budget.
 const MAX_EMPTY_COMPLETION_RETRIES: u8 = 2;
 
-#[derive(Default)]
-struct ToolFailureTracker {
-    last_signature: Option<String>,
-    consecutive: u8,
-}
-
-impl ToolFailureTracker {
-    fn record_failure(&mut self, signature: String) -> u8 {
-        if self.last_signature.as_deref() == Some(signature.as_str()) {
-            self.consecutive = self.consecutive.saturating_add(1);
-        } else {
-            self.last_signature = Some(signature);
-            self.consecutive = 1;
-        }
-        self.consecutive
-    }
-
-    fn record_success(&mut self) {
-        self.last_signature = None;
-        self.consecutive = 0;
-    }
-}
 /// Sentinel error returned when the inference loop runs out of iterations.
 #[derive(Debug)]
 pub struct MaxIterationsReached(pub u32);
@@ -148,7 +125,7 @@ async fn execute_tool_calls(
     tool_calls: &[ToolCall],
     session: &mut Session,
     tools: &mut Box<dyn ToolPort + Send>,
-    failure_tracker: &mut ToolFailureTracker,
+    loop_tracker: &mut LoopTracker,
 ) -> Result<bool> {
     session
         .messages
@@ -185,12 +162,7 @@ async fn execute_tool_calls(
                 tracing::error!("{}", msg);
                 session.messages.push(Message::tool(&tool_call.id, &msg));
                 let signature = format!("{}:{}", tool_name, tool_call.function.arguments);
-                if failure_tracker.record_failure(signature) >= MAX_IDENTICAL_TOOL_FAILURES {
-                    abort = Some(format!(
-                        "Aborting after {} identical failed calls to '{}'. Change the tool or arguments before retrying.",
-                        MAX_IDENTICAL_TOOL_FAILURES, tool_name,
-                    ));
-                }
+                abort = loop_tracker.record(&signature, CallOutcome::Failed);
                 continue;
             }
         };
@@ -205,7 +177,15 @@ async fn execute_tool_calls(
 
         match tools.call_tool(agent_name, tool_name, &arguments).await {
             Ok(result) => {
-                failure_tracker.record_success();
+                // The result's own text, because the rule that matters is whether the
+                // answer changed -- see `domain::tool_loop`. A call carrying only
+                // images or metadata answered with something, just not with words.
+                abort = if result.content.is_empty() && !result.images.is_empty() {
+                    loop_tracker.record_informative();
+                    None
+                } else {
+                    loop_tracker.record(&signature, CallOutcome::Answered(&result.content))
+                };
                 tracing::debug!(
                     "Tool '{}' result ({} chars)",
                     tool_name,
@@ -226,14 +206,17 @@ async fn execute_tool_calls(
                 let msg = format!("Error: {}", e);
                 tracing::error!("Tool '{}' failed: {}", tool_name, e);
                 session.messages.push(Message::tool(&tool_call.id, &msg));
-                if failure_tracker.record_failure(signature) >= MAX_IDENTICAL_TOOL_FAILURES {
-                    abort = Some(format!(
-                        "Aborting after {} identical failed calls to '{}'. Change the tool or arguments before retrying. Last error: {}",
-                        MAX_IDENTICAL_TOOL_FAILURES, tool_name, e,
-                    ));
-                }
+                abort = loop_tracker
+                    .record(&signature, CallOutcome::Failed)
+                    .map(|reason| format!("{reason} Last error: {e}"));
             }
         }
+    }
+
+    // An explicit request beats an inference. A tool that asked for the session to end
+    // said so on purpose; a loop verdict is this module's guess about a pattern.
+    if session_ends {
+        return Ok(true);
     }
 
     if let Some(reason) = abort {
@@ -354,7 +337,7 @@ pub async fn inference_loop(
     vision: bool,
 ) -> Result<InferenceResult> {
     let mut total_usage = LlmUsage::default();
-    let mut failure_tracker = ToolFailureTracker::default();
+    let mut loop_tracker = LoopTracker::default();
     let mut consecutive_empty: u8 = 0;
     let started = Instant::now();
 
@@ -459,7 +442,7 @@ pub async fn inference_loop(
 
             tracing::info!("LLM requested {} tool call(s)", calls.len());
             let session_ends =
-                execute_tool_calls(agent_name, &calls, session, tools, &mut failure_tracker)
+                execute_tool_calls(agent_name, &calls, session, tools, &mut loop_tracker)
                     .await?;
 
             if session_ends {
@@ -548,23 +531,6 @@ mod tests {
             PathBuf::from("/tmp/stop")
         ))));
         assert!(!is_soft_stop(&anyhow::anyhow!("the provider hung up")));
-    }
-
-    #[test]
-    fn identical_failures_reach_the_abort_threshold() {
-        let mut tracker = ToolFailureTracker::default();
-        assert_eq!(tracker.record_failure("tool:{\"x\":1}".into()), 1);
-        assert_eq!(tracker.record_failure("tool:{\"x\":1}".into()), 2);
-        assert_eq!(tracker.record_failure("tool:{\"x\":1}".into()), 3);
-    }
-
-    #[test]
-    fn changed_call_or_success_resets_the_failure_streak() {
-        let mut tracker = ToolFailureTracker::default();
-        assert_eq!(tracker.record_failure("tool:{\"x\":1}".into()), 1);
-        assert_eq!(tracker.record_failure("tool:{\"x\":2}".into()), 1);
-        tracker.record_success();
-        assert_eq!(tracker.record_failure("tool:{\"x\":2}".into()), 1);
     }
 
     fn user_with_image(url: &str) -> Message {
