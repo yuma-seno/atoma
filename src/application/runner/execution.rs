@@ -442,8 +442,7 @@ pub async fn inference_loop(
 
             tracing::info!("LLM requested {} tool call(s)", calls.len());
             let session_ends =
-                execute_tool_calls(agent_name, &calls, session, tools, &mut loop_tracker)
-                    .await?;
+                execute_tool_calls(agent_name, &calls, session, tools, &mut loop_tracker).await?;
 
             if session_ends {
                 tracing::info!("Tool requested session suspension; ending inference loop");

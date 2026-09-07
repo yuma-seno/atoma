@@ -172,7 +172,8 @@ impl LoopTracker {
                 self.answered_hash = Some(hash);
 
                 if text.trim().len() <= EMPTY_RESULT_CHARS {
-                    self.consecutive_empty_results = self.consecutive_empty_results.saturating_add(1);
+                    self.consecutive_empty_results =
+                        self.consecutive_empty_results.saturating_add(1);
                 } else {
                     self.consecutive_empty_results = 0;
                 }
@@ -288,7 +289,8 @@ mod tests {
         for i in 0..40 {
             let answer = format!("run {i} of the test suite");
             assert!(
-                t.record("shell:{\"cmd\":\"bun test\"}", ok(&answer)).is_none(),
+                t.record("shell:{\"cmd\":\"bun test\"}", ok(&answer))
+                    .is_none(),
                 "the world moved, so the call was worth making"
             );
         }
@@ -301,7 +303,11 @@ mod tests {
         let mut t = LoopTracker::default();
         let mut last = None;
         for i in 0..8 {
-            let sig = if i % 2 == 0 { "read:{\"path\":\"a\"}" } else { "read:{\"path\":\"b\"}" };
+            let sig = if i % 2 == 0 {
+                "read:{\"path\":\"a\"}"
+            } else {
+                "read:{\"path\":\"b\"}"
+            };
             let answer = format!("answer {i}");
             last = t.record(sig, ok(&answer));
             if last.is_some() {
@@ -362,7 +368,11 @@ mod tests {
         let mut t = LoopTracker::default();
         for i in 0..20 {
             let sig = format!("shell:{{\"cmd\":\"grep x{i}\"}}");
-            let answer = if i % 4 == 3 { "src/foo.ts:12: match" } else { "" };
+            let answer = if i % 4 == 3 {
+                "src/foo.ts:12: match"
+            } else {
+                ""
+            };
             assert!(t.record(&sig, ok(answer)).is_none(), "call {i}");
         }
     }
