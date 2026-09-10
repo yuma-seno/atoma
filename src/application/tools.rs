@@ -8,6 +8,37 @@ use crate::domain::skill::SkillCatalog;
 pub use crate::domain::skill::LOAD_SKILL_TOOL;
 const BUILTIN_PREFIX: &str = "atoma_builtin__";
 
+/// What the model is told about skills, at the moment it is choosing a tool.
+///
+/// The catalog in the system prompt is read once, at the start of a run. This is read
+/// every time a tool is chosen, which is why the wording that has to survive a long run
+/// lives here rather than there.
+///
+/// It opens by saying what a skill is and who wrote it, because the previous wording --
+/// "Load the full instructions for an available skill before applying it" -- said neither,
+/// and "instructions" without an author reads as reference material. Measured: a run that
+/// needed `research/web-search` found the file and read it with `sed -n '1,60p'` instead of
+/// loading it, then spent 240 shell searches inside a repository that did not hold the
+/// answer. It treated the skill as a document to consult rather than a decision to adopt,
+/// which is what the description had described.
+///
+/// The last sentence is the other half of that failure. Every wording here, and every one
+/// in the shipped templates, said "before the work" and none said "again". Skills were
+/// loaded twice in that run, both times in its first minute, and nothing invited a second
+/// look when the work turned into something else.
+const SKILL_TOOL_DESCRIPTION: &str = concat!(
+    "A skill is a set of instructions this project has written for a particular kind of ",
+    "work -- how a change is delivered here, how a failure is diagnosed, how to reach ",
+    "something that is not in this repository. When the work in front of you is of a kind ",
+    "a listed skill covers, call this first and follow what it says in place of your own ",
+    "approach: it is what this project has decided, not advice to weigh. The Available ",
+    "Skills catalog in your instructions carries names and one-line descriptions only. A ",
+    "description is not the instructions and nothing in it can be applied without loading ",
+    "it, so load it with this tool rather than reading the file yourself. Loading counts ",
+    "toward no limit. Check the catalog again whenever the work changes shape: a skill ",
+    "that was irrelevant when the run started becomes relevant the moment the work ",
+    "reaches it.",
+);
 /// Combines Atoma's unconfigurable built-in tools with configured MCP tools.
 pub struct RuntimeTools {
     skills: SkillCatalog,
@@ -40,7 +71,7 @@ impl RuntimeTools {
             "type": "function",
             "function": {
                 "name": LOAD_SKILL_TOOL,
-                "description": "Load the full instructions for an available skill before applying it.",
+                "description": SKILL_TOOL_DESCRIPTION,
                 "parameters": {
                     "type": "object",
                     "properties": {

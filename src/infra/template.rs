@@ -45,7 +45,9 @@ Each tool runs as its own process and receives only the credentials its own conf
 {{AVAILABLE_TOOLS}}
 
 # Available Skills
-Skills are reusable instructions loaded on demand. Call `{{LOAD_SKILL_TOOL}}` before work covered by a relevant skill.
+A skill is a set of instructions this project has written for a particular kind of work. When the work in front of you is of a kind a skill below covers, call `{{LOAD_SKILL_TOOL}}` and follow it in place of your own approach -- it is what this project has decided, not advice to weigh.
+
+The list carries names and descriptions only. A description is not the instructions, so load the skill rather than reconstructing it from the line or reading the file yourself; loading counts toward no limit. Check the list again whenever the work changes shape, because a skill that was irrelevant when the run started becomes relevant the moment the work reaches it.
 
 {{AVAILABLE_SKILLS}}
 
