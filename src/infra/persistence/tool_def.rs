@@ -37,6 +37,24 @@ struct ToolConfig {
     pub max_output_chars: Option<usize>,
 }
 
+/// The whole tools file: one reserved key, and a server under every other.
+///
+/// `hooks` at the top level applies to every server. It exists because the thing a
+/// repository most often wants to watch is not a tool but the run -- how much has been
+/// written where, how long a search has gone on -- and attaching that to one server
+/// only watches the agent while it happens to be using that server.
+///
+/// `#[serde(flatten)]` over a map is what makes `hooks` reserved: it is taken first, and
+/// every remaining key is a server. A server actually named `hooks` is the cost, and it
+/// fails loudly at load rather than quietly at run time.
+#[derive(Deserialize)]
+struct ToolsFile {
+    #[serde(default)]
+    hooks: HooksConfig,
+    #[serde(flatten)]
+    servers: HashMap<String, ToolConfig>,
+}
+
 #[derive(Deserialize, Default)]
 struct HooksConfig {
     #[serde(default)]
@@ -147,7 +165,7 @@ fn transport_of(name: &str, cfg: &ToolConfig) -> Result<()> {
 pub fn load(path: &Path, credentials: &Credentials) -> Result<HashMap<String, ToolDef>> {
     let content = fs::read_to_string(path)
         .with_context(|| format!("Failed to read tools file: {:?}", path))?;
-    let configs: HashMap<String, ToolConfig> = serde_yaml::from_str(&content)
+    let file: ToolsFile = serde_yaml::from_str(&content)
         .with_context(|| format!("Failed to parse tools YAML: {:?}", path))?;
 
     let base_dir = path.parent().unwrap_or(Path::new("."));
@@ -170,15 +188,31 @@ pub fn load(path: &Path, credentials: &Credentials) -> Result<HashMap<String, To
         Ok(Some(resolved))
     };
 
-    configs
+    // Resolved once, then cloned onto every server: the paths are the same paths, and
+    // a missing file should be reported once rather than once per server.
+    let file_wide_before = resolve(file.hooks.before_tool)?;
+    let file_wide_after = resolve(file.hooks.after_tool)?;
+
+    file.servers
         .into_iter()
         .map(|(name, cfg)| {
             transport_of(&name, &cfg)?;
+            // File-wide first, so a repository-wide rule cannot be skipped by a server
+            // hook that refuses before it, and a repository-wide notice is read before
+            // whatever the server itself has to add.
             let hooks = Hooks {
                 tool_allowlist: cfg.hooks.tool_allowlist,
                 tool_denylist: cfg.hooks.tool_denylist,
-                before_tool: resolve(cfg.hooks.before_tool)?,
-                after_tool: resolve(cfg.hooks.after_tool)?,
+                before_tool: file_wide_before
+                    .iter()
+                    .cloned()
+                    .chain(resolve(cfg.hooks.before_tool)?)
+                    .collect(),
+                after_tool: file_wide_after
+                    .iter()
+                    .cloned()
+                    .chain(resolve(cfg.hooks.after_tool)?)
+                    .collect(),
             };
             let def = ToolDef {
                 name: name.clone(),

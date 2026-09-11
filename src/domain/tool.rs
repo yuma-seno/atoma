@@ -9,17 +9,30 @@ pub struct Hooks {
     pub tool_allowlist: Vec<String>,
     /// Glob patterns for blocked tools. Checked before the allowlist.
     pub tool_denylist: Vec<String>,
-    /// Path to a script invoked before each tool call.
+    /// Scripts invoked before each tool call, in order.
     ///
     /// Receives JSON on stdin: `{"agent": "...", "tool": "...", "arguments": {...}}`
     /// Must respond with JSON: `{"allow": true}` or `{"allow": false, "reason": "..."}`
     /// Non-zero exit or invalid JSON is treated as a deny (fail-closed).
-    pub before_tool: Option<String>,
-    /// Path to a script invoked after each successful tool call.
+    ///
+    /// A list rather than one script because a tools file may declare hooks that apply
+    /// to every server as well as hooks that apply to one. They are concatenated at
+    /// load time, the file-wide ones first, so nothing downstream has to know which
+    /// kind it is running. The first refusal wins and the rest do not run.
+    pub before_tool: Vec<String>,
+    /// Scripts invoked after each successful tool call, in order.
     ///
     /// Receives JSON on stdin: `{"agent": "...", "tool": "...", "arguments": {...}, "result": "..."}`
-    /// Output is ignored. Non-zero exit is logged but does not fail the run.
-    pub after_tool: Option<String>,
+    ///
+    /// May answer with `{"notice": "..."}`, which is appended to the result the agent
+    /// reads -- the one place it is certainly looking. Anything else on stdout, including
+    /// nothing, adds nothing. A non-zero exit is logged and the run continues: an
+    /// after-hook reports, and a report that fails must not fail the work it describes.
+    ///
+    /// The point of the notice is that it arrives while the agent can still act. A
+    /// condition discovered after the run -- when the workspace is saved, say -- is
+    /// discovered too late to be fixed by the run that caused it.
+    pub after_tool: Vec<String>,
 }
 
 /// A fully resolved tool server definition.

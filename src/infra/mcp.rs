@@ -1164,7 +1164,13 @@ impl McpRegistry {
 
     /// Call a tool by its prefixed name, running access-control hooks.
     ///
-    /// Order: denylist/allowlist → before_tool hook → MCP call → after_tool hook.
+    /// Order: denylist/allowlist → before_tool hooks → MCP call → after_tool hooks.
+    ///
+    /// Each list holds the tools file's file-wide hooks first and the server's own
+    /// after them, concatenated at load time. A before-hook that refuses ends the call
+    /// and the rest do not run. Every after-hook runs, and whatever they have to say is
+    /// appended to the result -- see `domain::tool::Hooks::after_tool` for why that is
+    /// where it goes.
     pub async fn call_tool_with_hooks(
         &mut self,
         agent_name: &str,
@@ -1177,7 +1183,7 @@ impl McpRegistry {
         if let Some(ref h) = hooks {
             hooks::check_access(h, prefixed_name)?;
 
-            if let Some(ref script) = h.before_tool {
+            for script in &h.before_tool {
                 let payload = serde_json::json!({
                     "agent": agent_name,
                     "tool": prefixed_name,
@@ -1187,17 +1193,23 @@ impl McpRegistry {
             }
         }
 
-        let (content, images, session_ends) = self.call_tool(prefixed_name, arguments).await?;
+        let (mut content, images, session_ends) = self.call_tool(prefixed_name, arguments).await?;
 
         if let Some(ref h) = hooks {
-            if let Some(ref script) = h.after_tool {
+            for script in &h.after_tool {
                 let payload = serde_json::json!({
                     "agent": agent_name,
                     "tool": prefixed_name,
                     "arguments": arguments,
                     "result": content,
                 });
-                hooks::run_after_hook(script, payload).await;
+                if let Some(notice) = hooks::run_after_hook(script, payload).await {
+                    // Appended rather than replacing anything: the result is the answer
+                    // the agent asked for, and the notice is a second thing to know. A
+                    // server that reports a problem about itself already arrives this way,
+                    // so the shape is one the agent has been told how to read.
+                    content.push_str(&format!("\n\n{}", notice));
+                }
             }
         }
 

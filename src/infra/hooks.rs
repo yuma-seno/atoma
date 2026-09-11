@@ -156,21 +156,30 @@ pub async fn run_before_hook(script: &str, payload: Value) -> Result<()> {
     Ok(())
 }
 
-/// Invoke the `after_tool` hook (best-effort; failures are logged, not propagated).
-pub async fn run_after_hook(script: &str, payload: Value) {
-    if let Err(e) = run_after_hook_inner(script, payload).await {
-        tracing::warn!("after_tool hook '{}' error: {}", script, e);
+/// What an after-hook had to say, if anything.
+///
+/// `None` covers every way of saying nothing: no output, output that is not JSON, JSON
+/// without a `notice`, a crash, a timeout. An after-hook reports on a call that already
+/// happened, so the failure to report must not become a failure of the call -- which
+/// is the opposite of the before-hook's fail-closed rule, and for the opposite reason.
+pub async fn run_after_hook(script: &str, payload: Value) -> Option<String> {
+    match run_after_hook_inner(script, payload).await {
+        Ok(notice) => notice,
+        Err(e) => {
+            tracing::warn!("after_tool hook '{}' error: {}", script, e);
+            None
+        }
     }
 }
 
-async fn run_after_hook_inner(script: &str, payload: Value) -> Result<()> {
+async fn run_after_hook_inner(script: &str, payload: Value) -> Result<Option<String>> {
     use tokio::io::AsyncWriteExt;
 
     let input = serde_json::to_vec(&payload)?;
 
     let mut child = tokio::process::Command::new(script)
         .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::inherit())
         .spawn()
         .with_context(|| format!("Failed to spawn after_tool hook: {}", script))?;
@@ -183,7 +192,7 @@ async fn run_after_hook_inner(script: &str, payload: Value) -> Result<()> {
     drop(stdin);
 
     let timeout = hook_timeout();
-    let status = tokio::time::timeout(timeout, child.wait())
+    let output = tokio::time::timeout(timeout, child.wait_with_output())
         .await
         .with_context(|| {
             format!(
@@ -194,11 +203,29 @@ async fn run_after_hook_inner(script: &str, payload: Value) -> Result<()> {
         })?
         .with_context(|| format!("Failed to wait for after_tool hook: {}", script))?;
 
-    if !status.success() {
-        tracing::warn!("after_tool hook '{}' exited with status {}", script, status);
+    if !output.status.success() {
+        tracing::warn!(
+            "after_tool hook '{}' exited with status {}",
+            script,
+            output.status
+        );
     }
 
-    Ok(())
+    // Anything unreadable is nothing to say, not an error to raise: see the doc
+    // comment. A hook that wants to report a problem with itself has stderr, which
+    // is inherited and lands in the run log.
+    let parsed: Value = match serde_json::from_slice(&output.stdout) {
+        Ok(value) => value,
+        Err(_) => return Ok(None),
+    };
+    let notice = parsed
+        .get("notice")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+
+    Ok(notice)
 }
 
 #[cfg(test)]
@@ -233,8 +260,8 @@ mod tests {
         let hooks = Hooks {
             tool_allowlist: vec![],
             tool_denylist: vec![],
-            before_tool: None,
-            after_tool: None,
+            before_tool: vec![],
+            after_tool: vec![],
         };
         assert!(check_access(&hooks, "any_tool").is_ok());
     }
@@ -244,8 +271,8 @@ mod tests {
         let hooks = Hooks {
             tool_allowlist: vec![],
             tool_denylist: vec!["dangerous_*".to_string()],
-            before_tool: None,
-            after_tool: None,
+            before_tool: vec![],
+            after_tool: vec![],
         };
         assert!(check_access(&hooks, "dangerous_rm").is_err());
         assert!(check_access(&hooks, "safe_read").is_ok());
@@ -256,8 +283,8 @@ mod tests {
         let hooks = Hooks {
             tool_allowlist: vec!["read_*".to_string()],
             tool_denylist: vec![],
-            before_tool: None,
-            after_tool: None,
+            before_tool: vec![],
+            after_tool: vec![],
         };
         assert!(check_access(&hooks, "read_file").is_ok());
         assert!(check_access(&hooks, "write_file").is_err());
@@ -284,8 +311,8 @@ mod tests {
         let hooks = Hooks {
             tool_allowlist: vec!["*".to_string()],
             tool_denylist: vec!["rm_*".to_string()],
-            before_tool: None,
-            after_tool: None,
+            before_tool: vec![],
+            after_tool: vec![],
         };
         assert!(check_access(&hooks, "rm_all").is_err());
         assert!(check_access(&hooks, "read_file").is_ok());
