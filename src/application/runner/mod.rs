@@ -22,6 +22,13 @@ use crate::domain::skill::SkillCatalog;
 // question anyone outside asks about them, and exporting the types invites each caller
 // to answer it again with its own `downcast_ref` -- which is how one of the two callers
 // came to know about only one ceiling.
+use serde_json::Value;
+
+// The three sentinels `ending_of` names. Imported rather than re-exported: naming an
+// ending is this module's own business, and exporting them again would invite a caller
+// to downcast a second time -- which is the duplication `is_soft_stop` exists to end.
+use execution::{MaxIterationsReached, RunTimeExceeded, StopRequested};
+
 pub use execution::{inference_loop, is_soft_stop, CompletionReason, InferenceResult};
 
 // ── Bundled parameter structs ────────────────────────────────────────────────
@@ -81,12 +88,160 @@ pub struct RunDeps<'a> {
 /// Nothing here fails the run. It is called on a path that is already reporting
 /// something, and a failure to save is a second problem rather than a replacement for
 /// the first.
+const RUNS_KEY: &str = "atoma_runs";
+
+/// What a run leaves behind about itself, appended to the session it saved.
+///
+/// A session records what was said and nothing about the saying of it. That gap is why a
+/// delivery template measuring its own agents can count tools and skills but not how long
+/// anything took or why it stopped -- and the second is the more useful, because every
+/// ending except a finished one is a mechanism giving up.
+///
+/// Appended rather than replaced: a session is resumed, so one file holds several runs
+/// and the interesting questions are about the sequence. The whole array is rewritten on
+/// each save, which is what delta compression is good at.
+///
+/// Beside `metadata` rather than inside it, because `metadata` is whatever the caller put
+/// there and this is atoma's own.
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
+pub struct RunRecord {
+    /// RFC 3339, UTC. When the run began, not when the job did -- atoma cannot see the
+    /// queue it waited in, and a number that silently mixed the two would be worse than
+    /// no number at all.
+    pub started: String,
+    pub ended: String,
+    /// Whole seconds. Derivable from the two above and written anyway: every reader wants
+    /// it, and every reader computing it is a place to get it wrong.
+    pub seconds: u64,
+    /// How the run ended, in the terms the runner decides them.
+    ///
+    /// `completed` is the only one that is not a mechanism giving up. `iterations`,
+    /// `runtime` and `stopped` are the three soft stops; `failed` is everything else,
+    /// including a provider hanging up and a broken loop being cut short.
+    pub ended_because: String,
+    /// Messages in the session when it was saved: the cheapest proxy for how much work
+    /// the run did.
+    pub messages: usize,
+}
+
+/// Now, as RFC 3339 in UTC.
+///
+/// Formatted from a Unix timestamp rather than by adding a date crate for two calls. The
+/// civil-date arithmetic is Howard Hinnant's `civil_from_days`, exact for every date this
+/// will see.
+fn now_rfc3339() -> String {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let days = secs.div_euclid(86_400);
+    let time = secs.rem_euclid(86_400);
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = if m <= 2 { y + 1 } else { y };
+    format!(
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
+        year,
+        m,
+        d,
+        time / 3_600,
+        (time % 3_600) / 60,
+        time % 60
+    )
+}
+
+/// Whole seconds between two stamps this module produced, or 0.
+///
+/// Only ever given its own output, so it parses by position. Zero rather than an error
+/// for anything unexpected: a duration nobody can compute is not a reason to lose a
+/// session.
+fn seconds_between(started: &str, ended: &str) -> u64 {
+    fn epoch(s: &str) -> Option<i64> {
+        if s.len() < 20 {
+            return None;
+        }
+        let num = |from: usize, to: usize| s.get(from..to)?.parse::<i64>().ok();
+        let (y, m, d) = (num(0, 4)?, num(5, 7)?, num(8, 10)?);
+        let (hh, mm, ss) = (num(11, 13)?, num(14, 16)?, num(17, 19)?);
+        let y2 = if m <= 2 { y - 1 } else { y };
+        let era = y2.div_euclid(400);
+        let yoe = y2 - era * 400;
+        let mp = if m > 2 { m - 3 } else { m + 9 };
+        let doy = (153 * mp + 2) / 5 + d - 1;
+        let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+        Some((era * 146_097 + doe - 719_468) * 86_400 + hh * 3_600 + mm * 60 + ss)
+    }
+    match (epoch(started), epoch(ended)) {
+        (Some(a), Some(b)) if b >= a => (b - a) as u64,
+        _ => 0,
+    }
+}
+
+/// Append this run to the session's own record of its runs.
+///
+/// Never fails the save. A session that could not be described is still a session worth
+/// keeping, and this runs immediately before a run that may already be failing writes
+/// whatever it reached.
+fn record_run(session: &mut Session, started: &str, ended_because: &str) {
+    let ended = now_rfc3339();
+    let record = RunRecord {
+        seconds: seconds_between(started, &ended),
+        started: started.to_string(),
+        ended,
+        ended_because: ended_because.to_string(),
+        messages: session.messages.len(),
+    };
+
+    let mut runs: Vec<Value> = session
+        .extra
+        .get(RUNS_KEY)
+        .and_then(|v| v.as_array().cloned())
+        .unwrap_or_default();
+    match serde_json::to_value(&record) {
+        Ok(value) => runs.push(value),
+        Err(e) => {
+            tracing::warn!("could not describe this run: {}", e);
+            return;
+        }
+    }
+    session.extra.insert(RUNS_KEY.to_string(), Value::Array(runs));
+}
+
+/// Which word describes an ending, from the error that produced it.
+///
+/// The three soft stops are somebody's decision -- a ceiling that was configured, or a
+/// person asking. Everything else is `failed`, which includes the loop guards: a run cut
+/// short for repeating itself did not complete, and a report that said it had would hide
+/// the thing most worth seeing.
+fn ending_of(error: &anyhow::Error) -> &'static str {
+    if error.downcast_ref::<MaxIterationsReached>().is_some() {
+        "iterations"
+    } else if error.downcast_ref::<RunTimeExceeded>().is_some() {
+        "runtime"
+    } else if error.downcast_ref::<StopRequested>().is_some() {
+        "stopped"
+    } else {
+        "failed"
+    }
+}
+
 fn save_whatever_was_reached(
     session: &mut Session,
     out_path: Option<&std::path::Path>,
     port: &dyn SessionPort,
+    started: &str,
+    ended_because: &str,
 ) {
     let Some(path) = out_path else { return };
+
+    record_run(session, started, ended_because);
 
     let repaired = answer_unanswered_tool_calls(session, TOOL_CALL_UNANSWERED);
     if repaired > 0 {
@@ -116,6 +271,11 @@ pub async fn run(settings: RunSettings, deps: RunDeps<'_>) -> Result<RunOutcome>
         max_runtime,
         stop_file,
     } = settings;
+
+    // Before anything else, so the duration covers what the run actually spent --
+    // including parsing an agent definition and starting every tool server, which is
+    // fixed overhead anybody looking at a slow run wants counted.
+    let started = now_rfc3339();
 
     // 1. Parse agent definition
     let parsed_agent = deps
@@ -312,7 +472,13 @@ pub async fn run(settings: RunSettings, deps: RunDeps<'_>) -> Result<RunOutcome>
             } else {
                 tracing::error!("Run failed: {}", e);
             }
-            save_whatever_was_reached(&mut session, out_path.as_deref(), deps.session);
+            save_whatever_was_reached(
+                &mut session,
+                out_path.as_deref(),
+                deps.session,
+                &started,
+                ending_of(&e),
+            );
             return Err(e);
         }
     };
@@ -324,11 +490,15 @@ pub async fn run(settings: RunSettings, deps: RunDeps<'_>) -> Result<RunOutcome>
         total_usage.total_tokens,
     );
 
-    // 8. Save session
-    if let Some(ref path) = out_path {
-        deps.session.save(&session, path)?;
-        tracing::info!("Session saved to: {:?}", path);
-    }
+    // 8. Save session, through the helper the failing path already used -- which is what
+    // puts every ending in `atoma_runs` rather than only the unhappy ones.
+    save_whatever_was_reached(
+        &mut session,
+        out_path.as_deref(),
+        deps.session,
+        &started,
+        "completed",
+    );
 
     Ok(RunOutcome::Completed {
         text: response_text,
