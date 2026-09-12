@@ -211,7 +211,9 @@ fn record_run(session: &mut Session, started: &str, ended_because: &str) {
             return;
         }
     }
-    session.extra.insert(RUNS_KEY.to_string(), Value::Array(runs));
+    session
+        .extra
+        .insert(RUNS_KEY.to_string(), Value::Array(runs));
 }
 
 /// Which word describes an ending, from the error that produced it.
