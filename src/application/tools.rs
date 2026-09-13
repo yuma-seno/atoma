@@ -60,6 +60,35 @@ impl RuntimeTools {
         Ok(Self { skills, external })
     }
 
+    fn load_skill_definition(&self) -> Value {
+        let names: Vec<String> = self
+            .skills
+            .metadata()
+            .into_iter()
+            .map(|metadata| metadata.name)
+            .collect();
+        serde_json::json!({
+            "type": "function",
+            "function": {
+                "name": LOAD_SKILL_TOOL,
+                "description": SKILL_TOOL_DESCRIPTION,
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "name": {
+                            "type": "string",
+                            "description": "Exact skill name from the Available Skills catalog.",
+                            "enum": names,
+                        }
+                    },
+                    "required": ["name"],
+                    "additionalProperties": false,
+                }
+            }
+        })
+    }
+}
+
 /// What to say when a skill call names its argument something else.
 ///
 /// Measured over 169 calls in one repository, **75 failed** -- all of them with the same
@@ -114,35 +143,6 @@ fn unknown_skill_message(asked: &str, available: &[String]) -> String {
     )
 }
 
-    fn load_skill_definition(&self) -> Value {
-        let names: Vec<String> = self
-            .skills
-            .metadata()
-            .into_iter()
-            .map(|metadata| metadata.name)
-            .collect();
-        serde_json::json!({
-            "type": "function",
-            "function": {
-                "name": LOAD_SKILL_TOOL,
-                "description": SKILL_TOOL_DESCRIPTION,
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "name": {
-                            "type": "string",
-                            "description": "Exact skill name from the Available Skills catalog.",
-                            "enum": names,
-                        }
-                    },
-                    "required": ["name"],
-                    "additionalProperties": false,
-                }
-            }
-        })
-    }
-}
-
 fn tool_name(definition: &Value) -> Option<&str> {
     definition.pointer("/function/name").and_then(Value::as_str)
 }
@@ -168,12 +168,8 @@ impl ToolPort for RuntimeTools {
                 .get("name")
                 .and_then(Value::as_str)
                 .ok_or_else(|| anyhow::anyhow!(skill_argument_message(arguments)))?;
-            let available: Vec<String> = self
-                .skills
-                .metadata()
-                .into_iter()
-                .map(|m| m.name)
-                .collect();
+            let available: Vec<String> =
+                self.skills.metadata().into_iter().map(|m| m.name).collect();
             let skill = self
                 .skills
                 .get(skill_name)
