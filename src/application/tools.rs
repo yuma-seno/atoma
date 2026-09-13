@@ -237,6 +237,48 @@ mod tests {
             )
             .await
             .unwrap_err();
-        assert!(error.to_string().contains("Unknown skill: 'missing'"));
+        // The property rather than the sentence: it names what was asked for, and it
+        // names what exists. The old assertion pinned "Unknown skill: 'missing'" word
+        // for word, which said nothing about why that wording had to be there.
+        let message = error.to_string();
+        assert!(message.contains("'missing'"), "{}", message);
+        assert!(message.contains("engineering/tdd"), "{}", message);
+    }
+
+    /// The failure this replaced: 75 of 169 calls in one repository, every one of them
+    /// passing the skill under a key that was not `name`. A message that restates the
+    /// schema is a message the caller has already read past.
+    #[tokio::test]
+    async fn a_wrongly_named_argument_is_told_what_to_call_instead() {
+        let mut tools = RuntimeTools::new(catalog(), None).unwrap();
+        let error = tools
+            .call_tool(
+                "engineer",
+                LOAD_SKILL_TOOL,
+                &serde_json::json!({"skill_name": "engineering/tdd"}),
+            )
+            .await
+            .unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains("skill_name"), "{}", message);
+        // The corrected call, in full, so following it needs no interpretation.
+        assert!(
+            message.contains(r#"{"name": "engineering/tdd"}"#),
+            "{}",
+            message
+        );
+    }
+
+    /// With nothing to guess from, it says what the argument is and stops.
+    #[tokio::test]
+    async fn no_arguments_at_all_is_said_plainly() {
+        let mut tools = RuntimeTools::new(catalog(), None).unwrap();
+        let error = tools
+            .call_tool("engineer", LOAD_SKILL_TOOL, &serde_json::json!({}))
+            .await
+            .unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains("no arguments"), "{}", message);
+        assert!(message.contains("'name'"), "{}", message);
     }
 }
