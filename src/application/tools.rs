@@ -60,6 +60,60 @@ impl RuntimeTools {
         Ok(Self { skills, external })
     }
 
+/// What to say when a skill call names its argument something else.
+///
+/// Measured over 169 calls in one repository, **75 failed** -- all of them with the same
+/// error, and all of them because the argument was called `skill_name` (56), `skill` (15)
+/// or `skill_id`. The schema says `name`, is marked required, and carries an `enum` of
+/// every skill; none of that stopped it.
+///
+/// So the message stops restating the schema and hands back the call that would have
+/// worked. Measured elsewhere in this project, a refusal naming the next action is taken
+/// and one that only states a rule is not -- twice, on two different guards.
+fn skill_argument_message(arguments: &Value) -> String {
+    let mut keys: Vec<&str> = arguments
+        .as_object()
+        .map(|o| o.keys().map(String::as_str).collect())
+        .unwrap_or_default();
+    keys.sort_unstable();
+
+    // A value under the wrong key is almost certainly the skill that was wanted, so the
+    // corrected call can be written out in full rather than described.
+    let guess = arguments
+        .as_object()
+        .and_then(|o| o.values().find_map(Value::as_str));
+
+    let received = if keys.is_empty() {
+        "no arguments".to_string()
+    } else {
+        format!("{{{}}}", keys.join(", "))
+    };
+
+    match guess {
+        Some(value) => format!(
+            "This tool takes its argument as 'name'. You passed {}. Call it again with {{\"name\": \"{}\"}}.",
+            received, value
+        ),
+        None => format!(
+            "This tool takes its argument as 'name', a string naming one skill from the Available Skills catalog. You passed {}.",
+            received
+        ),
+    }
+}
+
+/// What to say when the skill named does not exist.
+///
+/// Lists what does. The catalog is in the system prompt, but a run that got here read it
+/// and still missed, so repeating the names at the moment of the mistake costs a line and
+/// removes the guess.
+fn unknown_skill_message(asked: &str, available: &[String]) -> String {
+    format!(
+        "No skill is called '{}'. The ones that exist are: {}.",
+        asked,
+        available.join(", ")
+    )
+}
+
     fn load_skill_definition(&self) -> Value {
         let names: Vec<String> = self
             .skills
@@ -113,11 +167,17 @@ impl ToolPort for RuntimeTools {
             let skill_name = arguments
                 .get("name")
                 .and_then(Value::as_str)
-                .context("Skill tool requires a string 'name' argument")?;
+                .ok_or_else(|| anyhow::anyhow!(skill_argument_message(arguments)))?;
+            let available: Vec<String> = self
+                .skills
+                .metadata()
+                .into_iter()
+                .map(|m| m.name)
+                .collect();
             let skill = self
                 .skills
                 .get(skill_name)
-                .with_context(|| format!("Unknown skill: '{}'", skill_name))?;
+                .ok_or_else(|| anyhow::anyhow!(unknown_skill_message(skill_name, &available)))?;
             return Ok(ToolCallResult {
                 content: format!("# Skill: {}\n\n{}", skill.metadata.name, skill.instructions),
                 ..Default::default()
