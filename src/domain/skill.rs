@@ -11,6 +11,33 @@ use std::collections::BTreeMap;
 /// build time.
 pub const LOAD_SKILL_TOOL: &str = "atoma_builtin__load_skill";
 
+/// What to say when a tool call names a skill instead of a tool.
+///
+/// A reviewer called `engineering/environment` as a tool and was told only "Invalid tool
+/// name format (expected server__tool)". It did not call the loader afterwards -- it
+/// reported to the pull request that it HAD run the skill, which was read by a person.
+///
+/// It reached for that name because the prompt hands it one: skills are listed as
+/// ``- `engineering/environment`: ...`` and the prose says "Load `engineering/environment`",
+/// in the same backticked shape a tool name takes. Presenting them so they cannot be
+/// confused is the better fix and belongs in the prompt; this is the message for when
+/// the confusion happens anyway, and it names the call that works rather than the rule
+/// that was broken -- measured three times in this project as the difference between a
+/// refusal that is followed and one that is not.
+///
+/// Only for a name shaped like a skill path. Anything else keeps the format error,
+/// which is the honest answer for a tool name that is simply wrong.
+pub fn skill_called_as_tool_message(name: &str) -> Option<String> {
+    let (head, tail) = name.split_once('/')?;
+    if head.is_empty() || tail.is_empty() || tail.contains('/') {
+        return None;
+    }
+    Some(format!(
+        "'{name}' is a skill, not a tool. A skill is loaded, not called: use {LOAD_SKILL_TOOL} \
+         with {{\"name\": \"{name}\"}}, then follow what it returns. Nothing has run yet."
+    ))
+}
+
 /// Metadata exposed in the system prompt before a skill is loaded.
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 pub struct SkillMetadata {
@@ -52,5 +79,40 @@ impl SkillCatalog {
 
     pub fn get(&self, name: &str) -> Option<&Skill> {
         self.skills.get(name)
+    }
+}
+
+#[cfg(test)]
+mod skill_called_as_tool_tests {
+    use super::{skill_called_as_tool_message, LOAD_SKILL_TOOL};
+
+    /// The property is that the message names the call that works. A reviewer that saw
+    /// only "expected server__tool" went on to tell a pull request it had run the skill.
+    #[test]
+    fn a_skill_path_is_told_which_tool_loads_it() {
+        let message = skill_called_as_tool_message("engineering/environment").expect("a skill path");
+        assert!(message.contains(LOAD_SKILL_TOOL));
+        assert!(message.contains("engineering/environment"));
+    }
+
+    /// It has to say that nothing happened, because the failure this came from was an
+    /// agent reporting the skill as having run.
+    #[test]
+    fn the_message_says_nothing_has_run() {
+        let message = skill_called_as_tool_message("review/quick-quality-gate").expect("a skill path");
+        assert!(message.to_lowercase().contains("nothing has run"));
+    }
+
+    /// A tool name that is simply wrong keeps the format error. Widening this to every
+    /// unrecognised name would answer "did you mean a skill?" to a hallucinated tool,
+    /// which reads as confirmation that the skill exists.
+    #[test]
+    fn a_name_that_is_not_a_skill_path_is_left_alone() {
+        for name in ["github", "create_pr", "a/b/c", "/leading", "trailing/"] {
+            assert!(
+                skill_called_as_tool_message(name).is_none(),
+                "{name} should keep the format error"
+            );
+        }
     }
 }

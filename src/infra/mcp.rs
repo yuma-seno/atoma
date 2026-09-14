@@ -1225,9 +1225,19 @@ impl McpRegistry {
         prefixed_name: &str,
         arguments: &Value,
     ) -> Result<(String, Vec<Value>, bool)> {
-        let (server_name, tool_name) = prefixed_name
-            .split_once("__")
-            .context("Invalid tool name format (expected server__tool)")?;
+        let (server_name, tool_name) = match prefixed_name.split_once("__") {
+            Some(pair) => pair,
+            // Before the format complaint, because "expected server__tool" is true and
+            // useless to a caller that meant a skill. See `skill_called_as_tool_message`.
+            None => {
+                if let Some(message) =
+                    crate::domain::skill::skill_called_as_tool_message(prefixed_name)
+                {
+                    anyhow::bail!(message);
+                }
+                anyhow::bail!("Invalid tool name format (expected server__tool)");
+            }
+        };
 
         let conn = self
             .connections
