@@ -90,7 +90,8 @@ mod skill_called_as_tool_tests {
     /// only "expected server__tool" went on to tell a pull request it had run the skill.
     #[test]
     fn a_skill_path_is_told_which_tool_loads_it() {
-        let message = skill_called_as_tool_message("engineering/environment").expect("a skill path");
+        let message =
+            skill_called_as_tool_message("engineering/environment").expect("a skill path");
         assert!(message.contains(LOAD_SKILL_TOOL));
         assert!(message.contains("engineering/environment"));
     }
@@ -99,7 +100,8 @@ mod skill_called_as_tool_tests {
     /// agent reporting the skill as having run.
     #[test]
     fn the_message_says_nothing_has_run() {
-        let message = skill_called_as_tool_message("review/quick-quality-gate").expect("a skill path");
+        let message =
+            skill_called_as_tool_message("review/quick-quality-gate").expect("a skill path");
         assert!(message.to_lowercase().contains("nothing has run"));
     }
 
