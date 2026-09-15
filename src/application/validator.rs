@@ -5,7 +5,6 @@ use crate::domain::ports::{AgentDefPort, ToolDefPort};
 use crate::infra::llm::check_provider_name;
 use crate::infra::template::unknown_placeholders;
 
-
 /// Validate an agent definition file and optional tools file.
 ///
 /// Checks:
@@ -52,7 +51,6 @@ pub fn validate(
         let agent_def_dir = agent_def_path
             .parent()
             .unwrap_or_else(|| std::path::Path::new("."));
-
 
         for name in &agent.knows_about {
             let candidate = agent_def_dir.join(format!("{}.md", name));
