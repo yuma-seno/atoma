@@ -5,7 +5,6 @@ use crate::domain::ports::{AgentDefPort, ToolDefPort};
 use crate::infra::llm::check_provider_name;
 use crate::infra::template::unknown_placeholders;
 
-const VALID_CALLABLE_BY: &[&str] = &["user", "agent"];
 
 /// Validate an agent definition file and optional tools file.
 ///
@@ -54,29 +53,16 @@ pub fn validate(
             .parent()
             .unwrap_or_else(|| std::path::Path::new("."));
 
-        for c in &agent.callable_by {
-            if !VALID_CALLABLE_BY.contains(&c.as_str()) {
-                errors.push(format!(
-                    "callable_by contains unknown value '{}' (expected one of: {})",
-                    c,
-                    VALID_CALLABLE_BY.join(", ")
-                ));
-            }
-        }
 
         for name in &agent.knows_about {
             let candidate = agent_def_dir.join(format!("{}.md", name));
             if candidate.exists() {
                 println!("  ✓ knows_about '{}' → {:?}", name, candidate);
                 match agent_def_port.parse(&candidate) {
-                    Ok(target) => {
-                        if !target.frontmatter.callable_by.iter().any(|c| c == "agent") {
-                            errors.push(format!(
-                                "knows_about '{}': target agent's callable_by does not include \"agent\", so delegation from '{}' is not a supported invocation path",
-                                name, agent.name
-                            ));
-                        }
-                    }
+                    // Parsing it is the check. A `knows_about` entry naming a file that
+                    // exists and reads as an agent definition is a delegation that can
+                    // happen; there is no second declaration to agree with.
+                    Ok(_) => {}
                     Err(e) => {
                         errors.push(format!(
                             "knows_about '{}': failed to parse target definition: {}",

@@ -33,13 +33,18 @@ pub struct AgentDef {
     pub vision: bool,
     #[serde(default)]
     pub knows_about: Vec<String>,
-    /// Who may invoke this agent: `"user"` (human entry point, e.g. a slash-command
-    /// or new-issue trigger) and/or `"agent"` (delegated to by another agent via
-    /// `knows_about` / orchestration tooling). Purely advisory metadata checked by
-    /// `atoma validate`; the atoma binary itself does not enforce it (any real
-    /// invocation-time access control lives in the calling automation).
-    #[serde(default)]
-    pub callable_by: Vec<String>,
+    // `callable_by` was here. It listed who may invoke an agent -- `"user"`,
+    // `"agent"` -- and nothing enforced it. Its own documentation said so: "the
+    // atoma binary itself does not enforce it".
+    //
+    // What it did was let `atoma validate` check that a `knows_about` target had
+    // declared `callable_by: ["agent"]`. That is one declaration checking another
+    // declaration of the same fact: listing an agent in `knows_about` IS saying an
+    // agent may call it. The check passed whenever both were written and failed
+    // whenever one was forgotten, which made it a spelling test rather than a rule.
+    //
+    // Removed rather than enforced, because there was nothing to enforce: invocation
+    // happens in the calling automation, which never read this field.
     /// Names of MCP tool servers used by this agent.
     /// Each name must correspond to an entry in the tools file (--tools-file).
     #[serde(default)]

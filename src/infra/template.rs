@@ -289,7 +289,6 @@ mod tests {
                 provider: None,
                 vision: false,
                 knows_about: vec!["ReviewAgent".to_string()],
-                callable_by: vec![],
                 mcp_servers: vec![],
                 extra_body: HashMap::default(),
             },
