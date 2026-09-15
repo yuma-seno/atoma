@@ -9,15 +9,16 @@ use crate::infra::template::unknown_placeholders;
 ///
 /// Checks:
 ///   1. Agent definition parses without error (YAML, required fields).
-///   2. Each `knows_about` entry has a corresponding `<name>.md` in the same directory.
-///   3. Each `knows_about` target's own `callable_by` includes `"agent"` — otherwise
-///      it does not accept agent-to-agent delegation and the reference is dead.
-///   4. `callable_by` only contains recognized values (`"user"`, `"agent"`).
-///   5. `extra_body` does not override the reserved keys `model` or `messages`.
-///   6. If a tools file is provided:
+///   2. Each `knows_about` entry has a corresponding `<name>.md` in the same
+///      directory, and it parses. That is the whole check: naming an agent in
+///      `knows_about` IS saying it may be delegated to, so there is no second
+///      declaration to agree with. `callable_by` used to be that second
+///      declaration and is gone.
+///   3. `extra_body` does not override the reserved keys `model` or `messages`.
+///   4. If a tools file is provided:
 ///      a. The tools file parses without error.
 ///      b. Each `mcp_servers` entry is present in the tools file.
-///   7. `provider`, when named, is one this build has.
+///   5. `provider`, when named, is one this build has.
 ///   8. If a template is provided: every `{{...}}` in it is one that gets
 ///      substituted.
 ///
@@ -282,8 +283,11 @@ mod tests {
         assert!(result.is_ok(), "{:?}", result.err());
     }
 
+    /// A definition that still carries `callable_by` is accepted and the value
+    /// ignored, rather than refused. Nothing enforced it when it was read, so an
+    /// adopter who kept it in a file has not asked for anything they are not getting.
     #[test]
-    fn callable_by_rejects_unknown_values() {
+    fn a_leftover_callable_by_is_ignored_rather_than_refused() {
         let dir = tempfile::tempdir().unwrap();
         let path = write_agent(dir.path(), "solo", "callable_by:\n  - human\n");
         let result = validate(
@@ -293,21 +297,7 @@ mod tests {
             &FileAgentDefAdapter,
             &FileToolDefAdapter::default(),
         );
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn callable_by_accepts_known_values() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = write_agent(dir.path(), "solo", "callable_by:\n  - user\n  - agent\n");
-        let result = validate(
-            path,
-            None,
-            None,
-            &FileAgentDefAdapter,
-            &FileToolDefAdapter::default(),
-        );
-        assert!(result.is_ok());
+        assert!(result.is_ok(), "{:?}", result.err());
     }
 
     // A non-array `tools` is TOLERATED: `reconcile_tools` keeps the runtime definitions
@@ -371,16 +361,30 @@ mod tests {
         .is_ok());
     }
 
+    /// Naming a target is the whole declaration. These two used to assert that a
+    /// `knows_about` target had separately written `callable_by: ["agent"]`, which
+    /// tested only that two declarations of one fact agreed.
     #[test]
-    fn knows_about_target_must_accept_agent_delegation() {
+    fn knows_about_passes_when_the_target_exists_and_parses() {
         let dir = tempfile::tempdir().unwrap();
-        // "helper" does not list "agent" in callable_by, so it cannot be delegated to.
-        write_agent(dir.path(), "helper", "callable_by:\n  - user\n");
-        let caller = write_agent(
-            dir.path(),
-            "caller",
-            "callable_by:\n  - user\nknows_about:\n  - helper\n",
+        write_agent(dir.path(), "helper", "");
+        let caller = write_agent(dir.path(), "caller", "knows_about:\n  - helper\n");
+        let result = validate(
+            caller,
+            None,
+            None,
+            &FileAgentDefAdapter,
+            &FileToolDefAdapter::default(),
         );
+        assert!(result.is_ok(), "{:?}", result.err());
+    }
+
+    /// The check that still means something: a name with no file behind it is a
+    /// delegation that cannot happen.
+    #[test]
+    fn knows_about_fails_when_the_target_is_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let caller = write_agent(dir.path(), "caller", "knows_about:\n  - absent\n");
         let result = validate(
             caller,
             None,
@@ -389,24 +393,5 @@ mod tests {
             &FileToolDefAdapter::default(),
         );
         assert!(result.is_err());
-    }
-
-    #[test]
-    fn knows_about_target_accepting_agent_delegation_passes() {
-        let dir = tempfile::tempdir().unwrap();
-        write_agent(dir.path(), "helper", "callable_by:\n  - agent\n");
-        let caller = write_agent(
-            dir.path(),
-            "caller",
-            "callable_by:\n  - user\nknows_about:\n  - helper\n",
-        );
-        let result = validate(
-            caller,
-            None,
-            None,
-            &FileAgentDefAdapter,
-            &FileToolDefAdapter::default(),
-        );
-        assert!(result.is_ok());
     }
 }

@@ -145,7 +145,6 @@ fn minimal_agent(name: &str) -> AgentDef {
         provider: None,
         vision: false,
         knows_about: vec![],
-        callable_by: vec![],
         mcp_servers: vec![],
         extra_body: HashMap::new(),
     }
