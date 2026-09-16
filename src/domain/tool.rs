@@ -118,7 +118,10 @@ pub fn unknown_server_message<'a>(asked: &str, available: impl Iterator<Item = &
     let mut names: Vec<&str> = available.collect();
     names.sort_unstable();
     if names.is_empty() {
-        return format!("mcp_servers '{}': the tools file declares no servers at all.", asked);
+        return format!(
+            "mcp_servers '{}': the tools file declares no servers at all.",
+            asked
+        );
     }
     format!(
         "mcp_servers '{}': no server by that name. The tools file declares: {}.",
@@ -135,7 +138,10 @@ mod unknown_server_message_tests {
     fn it_names_what_exists() {
         let have = ["shell", "github"];
         let message = unknown_server_message("githbu", have.iter().copied());
-        assert!(message.contains("githbu"), "it says what was asked for: {message}");
+        assert!(
+            message.contains("githbu"),
+            "it says what was asked for: {message}"
+        );
         assert!(message.contains("github"), "and what exists: {message}");
     }
 
