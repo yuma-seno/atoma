@@ -55,6 +55,36 @@ struct ToolsFile {
     servers: HashMap<String, ToolConfig>,
 }
 
+/// One hook script, or several.
+///
+/// `Hooks` has always held a `Vec`, and the loader has always concatenated the
+/// file-wide scripts with each server's. Only this file's shape was singular, which
+/// meant a tools file could declare at most one hook per level even though
+/// everything downstream was built to run a list.
+///
+/// That narrowing is felt by whoever generates the file. A delivery that ships a
+/// required hook of its own and wants to let a project add theirs had, with one slot,
+/// no way to express both -- and the workaround is a dispatcher script that
+/// re-implements ordering, spawning and error handling the loader already does.
+///
+/// Both spellings, because `after_tool: ./guard.ts` is the common case and reads
+/// better than a one-element list.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum HookScripts {
+    One(String),
+    Many(Vec<String>),
+}
+
+impl HookScripts {
+    fn into_vec(self) -> Vec<String> {
+        match self {
+            HookScripts::One(script) => vec![script],
+            HookScripts::Many(scripts) => scripts,
+        }
+    }
+}
+
 #[derive(Deserialize, Default)]
 struct HooksConfig {
     #[serde(default)]
@@ -62,9 +92,9 @@ struct HooksConfig {
     #[serde(default)]
     pub tool_denylist: Vec<String>,
     #[serde(default)]
-    pub before_tool: Option<String>,
+    pub before_tool: Option<HookScripts>,
     #[serde(default)]
-    pub after_tool: Option<String>,
+    pub after_tool: Option<HookScripts>,
 }
 
 /// Which of the four combinations of `command` and `url` this entry is, or an
@@ -170,22 +200,33 @@ pub fn load(path: &Path, credentials: &Credentials) -> Result<HashMap<String, To
 
     let base_dir = path.parent().unwrap_or(Path::new("."));
 
-    let resolve = |s: Option<String>| -> Result<Option<String>> {
-        let Some(script) = s else { return Ok(None) };
-        let p = Path::new(&script);
-        let resolved = if p.is_absolute() {
-            script.clone()
-        } else {
-            base_dir.join(p).to_string_lossy().into_owned()
+    // Every script the entry names, in the order it named them. Order is the whole
+    // contract for `before_tool` -- the first refusal wins and the rest do not run --
+    // so it is preserved rather than sorted or deduplicated.
+    let resolve = |s: Option<HookScripts>| -> Result<Vec<String>> {
+        let Some(scripts) = s else {
+            return Ok(Vec::new());
         };
-        if !Path::new(&resolved).exists() {
-            anyhow::bail!(
-                "Hook script not found: '{}' (resolved from '{}')",
-                resolved,
-                script
-            );
-        }
-        Ok(Some(resolved))
+        scripts
+            .into_vec()
+            .into_iter()
+            .map(|script| {
+                let p = Path::new(&script);
+                let resolved = if p.is_absolute() {
+                    script.clone()
+                } else {
+                    base_dir.join(p).to_string_lossy().into_owned()
+                };
+                if !Path::new(&resolved).exists() {
+                    anyhow::bail!(
+                        "Hook script not found: '{}' (resolved from '{}')",
+                        resolved,
+                        script
+                    );
+                }
+                Ok(resolved)
+            })
+            .collect()
     };
 
     // Resolved once, then cloned onto every server: the paths are the same paths, and
@@ -318,6 +359,64 @@ mod tests {
         let mut file = tempfile::NamedTempFile::new().expect("temp file");
         file.write_all(body.as_bytes()).expect("write");
         load(file.path(), &Credentials::from_environment()).expect("load")
+    }
+
+    /// A hook script file, and the path to it as YAML will carry it.
+    ///
+    /// Single-quoted, because a Windows path holds backslashes and a plain scalar
+    /// would leave them for the parser to interpret.
+    fn hook_in(dir: &std::path::Path, name: &str) -> (String, String) {
+        let path = dir.join(name);
+        std::fs::write(&path, "").expect("write hook");
+        let path = path.to_string_lossy().into_owned();
+        let quoted = format!("'{}'", path);
+        (path, quoted)
+    }
+
+    /// The narrowing this widened. `Hooks` has always held a `Vec`, and the loader has
+    /// always concatenated the file-wide scripts with each server own list; only this
+    /// file shape was singular. A delivery that ships a required hook AND lets a project
+    /// add one had, with a single slot, no way to say both.
+    #[test]
+    fn a_list_of_hooks_is_kept_in_the_order_it_was_written() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let (first, first_yaml) = hook_in(dir.path(), "first.ts");
+        let (second, second_yaml) = hook_in(dir.path(), "second.ts");
+        let body = format!(
+            "hooks:\n  after_tool:\n    - {}\n    - {}\nshell:\n  command: bun\n  args: []\n",
+            first_yaml, second_yaml
+        );
+        let tools = load_yaml(&body);
+        assert_eq!(tools["shell"].after_tool, vec![first, second]);
+    }
+
+    /// The common case, and the spelling every existing tools file uses. One script
+    /// reads better as a scalar than as a one-element list, so both are accepted.
+    #[test]
+    fn a_single_hook_is_still_a_bare_string() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let (only, only_yaml) = hook_in(dir.path(), "only.ts");
+        let body = format!(
+            "hooks:\n  after_tool: {}\nshell:\n  command: bun\n  args: []\n",
+            only_yaml
+        );
+        let tools = load_yaml(&body);
+        assert_eq!(tools["shell"].after_tool, vec![only]);
+    }
+
+    /// File-wide first, then the server own -- the order the loader already promised,
+    /// now that each side can be several.
+    #[test]
+    fn file_wide_hooks_run_before_the_servers_own() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let (wide, wide_yaml) = hook_in(dir.path(), "wide.ts");
+        let (mine, mine_yaml) = hook_in(dir.path(), "mine.ts");
+        let body = format!(
+            "hooks:\n  before_tool: {}\nshell:\n  command: bun\n  args: []\n  hooks:\n    before_tool:\n      - {}\n",
+            wide_yaml, mine_yaml
+        );
+        let tools = load_yaml(&body);
+        assert_eq!(tools["shell"].before_tool, vec![wide, mine]);
     }
 
     #[test]
