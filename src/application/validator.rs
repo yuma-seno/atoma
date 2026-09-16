@@ -2,6 +2,7 @@ use anyhow::{bail, Result};
 use std::path::PathBuf;
 
 use crate::domain::ports::{AgentDefPort, ToolDefPort};
+use crate::domain::tool::unknown_server_message;
 use crate::infra::llm::check_provider_name;
 use crate::infra::template::unknown_placeholders;
 
@@ -120,8 +121,12 @@ pub fn validate(
                             println!("  ✓ mcp_servers '{}' found in tools file", server);
                         } else {
                             errors.push(format!(
-                                "mcp_servers '{}': not found in tools file {:?}",
-                                server, tools_path
+                                "{} (tools file: {:?})",
+                                unknown_server_message(
+                                    server,
+                                    tools_map.keys().map(String::as_str)
+                                ),
+                                tools_path
                             ));
                         }
                     }

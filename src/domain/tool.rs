@@ -99,3 +99,61 @@ pub struct ToolDef {
     /// default, and why a server that answers quickly should not set it.
     pub request_timeout_secs: Option<u64>,
 }
+
+/// What to say when `mcp_servers` names a server the tools file has not got.
+///
+/// Lists the ones it has. The names are right there in the map both callers already
+/// hold, and withholding them leaves a person to guess at a spelling -- or to go and
+/// read the tools file, which under Atoma Autonomous Delivery is generated per run
+/// into a temp directory and is not somewhere they can look.
+///
+/// This is the treatment `application::tools::unknown_skill_message` already gives an
+/// unknown skill, and `validator` gives an unknown provider, for the same reason each
+/// states: repeating the names at the moment of the mistake costs a line and removes
+/// the guess. The MCP-server check is the one that never got it.
+///
+/// Sorted, because a `HashMap` iterates in whatever order it likes and an error
+/// message that reshuffles itself between runs reads as a different error.
+pub fn unknown_server_message<'a>(asked: &str, available: impl Iterator<Item = &'a str>) -> String {
+    let mut names: Vec<&str> = available.collect();
+    names.sort_unstable();
+    if names.is_empty() {
+        return format!("mcp_servers '{}': the tools file declares no servers at all.", asked);
+    }
+    format!(
+        "mcp_servers '{}': no server by that name. The tools file declares: {}.",
+        asked,
+        names.join(", ")
+    )
+}
+
+#[cfg(test)]
+mod unknown_server_message_tests {
+    use super::unknown_server_message;
+
+    #[test]
+    fn it_names_what_exists() {
+        let have = ["shell", "github"];
+        let message = unknown_server_message("githbu", have.iter().copied());
+        assert!(message.contains("githbu"), "it says what was asked for: {message}");
+        assert!(message.contains("github"), "and what exists: {message}");
+    }
+
+    /// A `HashMap` iterates in whatever order it likes. Two runs of the same mistake
+    /// producing two different messages is how a reader concludes something changed.
+    #[test]
+    fn the_order_does_not_depend_on_the_map() {
+        let one = unknown_server_message("x", ["web", "atoma", "shell"].iter().copied());
+        let two = unknown_server_message("x", ["shell", "web", "atoma"].iter().copied());
+        assert_eq!(one, two);
+        assert!(one.contains("atoma, shell, web"), "sorted: {one}");
+    }
+
+    /// An empty tools file is a different mistake, and "the ones that exist are: ."
+    /// is not a sentence.
+    #[test]
+    fn an_empty_tools_file_says_so() {
+        let message = unknown_server_message("shell", std::iter::empty());
+        assert!(message.contains("no servers at all"), "{message}");
+    }
+}

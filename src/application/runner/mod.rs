@@ -17,6 +17,7 @@ use crate::domain::session::{
     answer_unanswered_tool_calls, Message, Session, TOOL_CALL_UNANSWERED,
 };
 use crate::domain::skill::SkillCatalog;
+use crate::domain::tool::unknown_server_message;
 
 // The three sentinel types stay unexported on purpose. `is_soft_stop` is the whole
 // question anyone outside asks about them, and exporting the types invites each caller
@@ -310,7 +311,11 @@ pub async fn run(settings: RunSettings, deps: RunDeps<'_>) -> Result<RunOutcome>
             .iter()
             .map(|name| {
                 tools_map.get(name).cloned().with_context(|| {
-                    format!("Tool '{}' not found in tools file: {:?}", name, tools_path)
+                    format!(
+                        "{} (tools file: {:?})",
+                        unknown_server_message(name, tools_map.keys().map(String::as_str)),
+                        tools_path
+                    )
                 })
             })
             .collect::<Result<Vec<_>>>()?;
