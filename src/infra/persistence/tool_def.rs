@@ -387,7 +387,7 @@ mod tests {
             first_yaml, second_yaml
         );
         let tools = load_yaml(&body);
-        assert_eq!(tools["shell"].after_tool, vec![first, second]);
+        assert_eq!(tools["shell"].hooks.after_tool, vec![first, second]);
     }
 
     /// The common case, and the spelling every existing tools file uses. One script
@@ -401,7 +401,7 @@ mod tests {
             only_yaml
         );
         let tools = load_yaml(&body);
-        assert_eq!(tools["shell"].after_tool, vec![only]);
+        assert_eq!(tools["shell"].hooks.after_tool, vec![only]);
     }
 
     /// File-wide first, then the server own -- the order the loader already promised,
@@ -416,7 +416,7 @@ mod tests {
             wide_yaml, mine_yaml
         );
         let tools = load_yaml(&body);
-        assert_eq!(tools["shell"].before_tool, vec![wide, mine]);
+        assert_eq!(tools["shell"].hooks.before_tool, vec![wide, mine]);
     }
 
     #[test]
