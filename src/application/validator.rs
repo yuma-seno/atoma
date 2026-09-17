@@ -19,6 +19,7 @@ use crate::infra::template::unknown_placeholders;
 ///   4. If a tools file is provided:
 ///      a. The tools file parses without error.
 ///      b. Each `mcp_servers` entry is present in the tools file.
+///      c. No server sets both `tool_allowlist` and `tool_denylist`.
 ///   5. `provider`, when named, is one this build has.
 ///   8. If a template is provided: every `{{...}}` in it is one that gets
 ///      substituted.
@@ -116,6 +117,31 @@ pub fn validate(
             match tool_def_port.load(tools_path) {
                 Ok(tools_map) => {
                     println!("✓ Tools file parsed: {} server(s) defined", tools_map.len());
+                    // Both lists has a defined meaning -- the denylist is checked
+                    // first -- and no defined intent. Which one the author meant is
+                    // not recoverable from the file, so the file is the thing to fix.
+                    //
+                    // Here rather than at startup: the runtime check runs after every
+                    // server has been spawned, which is too late to be worth failing
+                    // over, and it is not reached by validation at all. This is the
+                    // check a delivery runs over every pull request.
+                    let mut both: Vec<&str> = tools_map
+                        .iter()
+                        .filter(|(_, def)| {
+                            !def.hooks.tool_allowlist.is_empty()
+                                && !def.hooks.tool_denylist.is_empty()
+                        })
+                        .map(|(name, _)| name.as_str())
+                        .collect();
+                    both.sort_unstable();
+                    for server in both {
+                        errors.push(format!(
+                            "Server '{}' sets both tool_allowlist and tool_denylist. \
+                             Keep one: an allowlist says what may be called, a denylist says \
+                             what may not, and a tool named in both is blocked.",
+                            server
+                        ));
+                    }
                     for server in &agent.mcp_servers {
                         if tools_map.contains_key(server.as_str()) {
                             println!("  ✓ mcp_servers '{}' found in tools file", server);
@@ -203,6 +229,55 @@ mod tests {
         path
     }
 
+    fn write_tools(dir: &std::path::Path, body: &str) -> PathBuf {
+        let path = dir.join("tools.yaml");
+        fs::write(&path, body).unwrap();
+        path
+    }
+
+    /// Both lists on one server, refused where refusing it helps.
+    ///
+    /// It was fatal once and became a warning, and the reason recorded was placement
+    /// rather than the rule: the check sat inside the registry, after every server had
+    /// been spawned, and validation never reached it -- so a tools file that would have
+    /// been rejected passed clean. Nothing is spawned here, and this is the check a
+    /// delivery runs over every pull request.
+    #[test]
+    fn a_server_setting_both_lists_is_a_validation_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let agent = write_agent(dir.path(), "solo", "mcp_servers: [fs]\n");
+        let tools = write_tools(
+            dir.path(),
+            "fs:\n  command: true\n  hooks:\n    tool_allowlist: [\"fs__read\"]\n    tool_denylist: [\"fs__write\"]\n",
+        );
+        let result = validate(
+            agent,
+            Some(tools),
+            None,
+            &FileAgentDefAdapter,
+            &FileToolDefAdapter::default(),
+        );
+        assert!(result.is_err());
+    }
+
+    /// One list is the ordinary case and stays ordinary.
+    #[test]
+    fn a_server_setting_one_list_passes() {
+        let dir = tempfile::tempdir().unwrap();
+        let agent = write_agent(dir.path(), "solo", "mcp_servers: [fs]\n");
+        let tools = write_tools(
+            dir.path(),
+            "fs:\n  command: true\n  hooks:\n    tool_allowlist: [\"fs__read\"]\n",
+        );
+        let result = validate(
+            agent,
+            Some(tools),
+            None,
+            &FileAgentDefAdapter,
+            &FileToolDefAdapter::default(),
+        );
+        assert!(result.is_ok(), "{:?}", result.err());
+    }
     /// The error the run would have produced, produced earlier. A definition naming
     /// a provider that does not exist used to fail at `build_llm_client` -- after the
     /// tool servers had started and the prompt had been assembled.

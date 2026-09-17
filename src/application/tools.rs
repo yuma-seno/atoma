@@ -281,22 +281,6 @@ mod tests {
         }
     }
 
-    /// Forgiveness stops where the reading would have to be guessed at. Two strings
-    /// under two unexpected keys is a call this cannot read, and saying so is the
-    /// honest answer -- the message that names the call which works is still there.
-    #[tokio::test]
-    async fn two_unexpected_strings_are_still_refused() {
-        let mut tools = RuntimeTools::new(catalog(), None).unwrap();
-        let error = tools
-            .call_tool(
-                "engineer",
-                LOAD_SKILL_TOOL,
-                &serde_json::json!({"a": "engineering/tdd", "b": "engineering/tdd"}),
-            )
-            .await
-            .unwrap_err();
-        assert!(error.to_string().contains("name"), "{error}");
-    }
     #[tokio::test]
     async fn unknown_skill_is_rejected() {
         let mut tools = RuntimeTools::new(catalog(), None).unwrap();
@@ -319,19 +303,24 @@ mod tests {
     /// The failure this replaced: 75 of 169 calls in one repository, every one of them
     /// passing the skill under a key that was not `name`. A message that restates the
     /// schema is a message the caller has already read past.
+    /// A call this cannot read still names the call that works.
+    ///
+    /// `skill_name` used to land here and loads now. What is left is a call carrying no
+    /// string at all, or several with nothing to choose between them -- and the message
+    /// has the same job to do for those.
     #[tokio::test]
-    async fn a_wrongly_named_argument_is_told_what_to_call_instead() {
+    async fn an_unreadable_argument_is_told_what_to_call_instead() {
         let mut tools = RuntimeTools::new(catalog(), None).unwrap();
         let error = tools
             .call_tool(
                 "engineer",
                 LOAD_SKILL_TOOL,
-                &serde_json::json!({"skill_name": "engineering/tdd"}),
+                &serde_json::json!({"first": "engineering/tdd", "second": "engineering/tdd"}),
             )
             .await
             .unwrap_err();
         let message = error.to_string();
-        assert!(message.contains("skill_name"), "{}", message);
+        assert!(message.contains("first"), "{}", message);
         // The corrected call, in full, so following it needs no interpretation.
         assert!(
             message.contains(r#"{"name": "engineering/tdd"}"#),
