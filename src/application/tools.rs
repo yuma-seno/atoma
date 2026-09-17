@@ -89,16 +89,48 @@ impl RuntimeTools {
     }
 }
 
-/// What to say when a skill call names its argument something else.
+/// The skill a call names, whatever key it used.
 ///
-/// Measured over 169 calls in one repository, **75 failed** -- all of them with the same
-/// error, and all of them because the argument was called `skill_name` (56), `skill` (15)
-/// or `skill_id`. The schema says `name`, is marked required, and carries an `enum` of
-/// every skill; none of that stopped it.
+/// `name` first, because that is the schema and the only key the model is told
+/// about. Then the names it reaches for instead, then -- when the object holds one
+/// string and nothing else -- that string, because a single value under a single
+/// unexpected key is not ambiguous.
 ///
-/// So the message stops restating the schema and hands back the call that would have
-/// worked. Measured elsewhere in this project, a refusal naming the next action is taken
-/// and one that only states a rule is not -- twice, on two different guards.
+/// Measured over 169 calls in one repository, 75 failed, all of them here, all of
+/// them because the argument was called `skill_name` (56), `skill` (15) or
+/// `skill_id`. The schema says `name`, is marked required, and carries an `enum` of
+/// every skill; none of that stopped it, and a second measurement in a different
+/// repository found the same share again -- 77 of 187.
+///
+/// The refusal below already read the value out to write the corrected call. Having
+/// recovered it, spending a round trip and a model turn to hand it back was a cost
+/// with nothing bought: the tool takes one required string, so there was never a
+/// second reading to choose between.
+fn named_skill(arguments: &Value) -> Option<&str> {
+    const ALIASES: [&str; 3] = ["skill", "skill_name", "skill_id"];
+    let object = arguments.as_object()?;
+    if let Some(name) = object.get("name").and_then(Value::as_str) {
+        return Some(name);
+    }
+    for alias in ALIASES {
+        if let Some(name) = object.get(alias).and_then(Value::as_str) {
+            return Some(name);
+        }
+    }
+    let mut strings = object.values().filter_map(Value::as_str);
+    let only = strings.next()?;
+    strings.next().is_none().then_some(only)
+}
+
+/// What to say when a skill call carries no skill at all.
+///
+/// Only reached once [`named_skill`] has failed to find one, which is a call carrying
+/// no string, or several with nothing to choose between them. The keys models reach
+/// for instead of `name` are read rather than refused; see there for the measurement.
+///
+/// The message hands back the call that would have worked rather than restating the
+/// schema. Measured elsewhere in this project, a refusal naming the next action is
+/// taken and one that only states a rule is not -- twice, on two different guards.
 fn skill_argument_message(arguments: &Value) -> String {
     let mut keys: Vec<&str> = arguments
         .as_object()
@@ -164,9 +196,7 @@ impl ToolPort for RuntimeTools {
         arguments: &Value,
     ) -> Result<ToolCallResult> {
         if name == LOAD_SKILL_TOOL {
-            let skill_name = arguments
-                .get("name")
-                .and_then(Value::as_str)
+            let skill_name = named_skill(arguments)
                 .ok_or_else(|| anyhow::anyhow!(skill_argument_message(arguments)))?;
             let available: Vec<String> =
                 self.skills.metadata().into_iter().map(|m| m.name).collect();
@@ -226,6 +256,47 @@ mod tests {
         assert!(!result.session_ends);
     }
 
+    /// The keys the models actually used, in the order the measurement found them.
+    ///
+    /// 56 of 75 failures were `skill_name`, 15 were `skill`. Each of these was a run
+    /// that had chosen the right skill, named it correctly, and got nothing.
+    #[tokio::test]
+    async fn a_skill_named_under_another_key_still_loads() {
+        for key in ["name", "skill", "skill_name", "skill_id", "unexpected"] {
+            let mut tools = RuntimeTools::new(catalog(), None).unwrap();
+            let mut arguments = serde_json::Map::new();
+            arguments.insert(
+                key.to_string(),
+                serde_json::Value::String("engineering/tdd".to_string()),
+            );
+            let result = tools
+                .call_tool(
+                    "engineer",
+                    LOAD_SKILL_TOOL,
+                    &serde_json::Value::Object(arguments),
+                )
+                .await
+                .unwrap_or_else(|e| panic!("{key}: {e}"));
+            assert!(result.content.contains("# Skill: engineering/tdd"), "{key}");
+        }
+    }
+
+    /// Forgiveness stops where the reading would have to be guessed at. Two strings
+    /// under two unexpected keys is a call this cannot read, and saying so is the
+    /// honest answer -- the message that names the call which works is still there.
+    #[tokio::test]
+    async fn two_unexpected_strings_are_still_refused() {
+        let mut tools = RuntimeTools::new(catalog(), None).unwrap();
+        let error = tools
+            .call_tool(
+                "engineer",
+                LOAD_SKILL_TOOL,
+                &serde_json::json!({"a": "engineering/tdd", "b": "engineering/tdd"}),
+            )
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("name"), "{error}");
+    }
     #[tokio::test]
     async fn unknown_skill_is_rejected() {
         let mut tools = RuntimeTools::new(catalog(), None).unwrap();
