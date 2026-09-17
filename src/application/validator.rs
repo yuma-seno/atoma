@@ -242,13 +242,19 @@ mod tests {
     /// been spawned, and validation never reached it -- so a tools file that would have
     /// been rejected passed clean. Nothing is spawned here, and this is the check a
     /// delivery runs over every pull request.
+    ///
+    /// `validate` reports its findings to stderr and returns only that it failed, so
+    /// this cannot read the message. What isolates the rule is the PAIR: the same file
+    /// with one list passes. The first version of both wrote `command: true`, which is
+    /// a boolean to YAML and a string to `ToolDef` -- so this one passed on the parse
+    /// error and never reached the rule at all, and only its partner said so.
     #[test]
     fn a_server_setting_both_lists_is_a_validation_error() {
         let dir = tempfile::tempdir().unwrap();
         let agent = write_agent(dir.path(), "solo", "mcp_servers: [fs]\n");
         let tools = write_tools(
             dir.path(),
-            "fs:\n  command: true\n  hooks:\n    tool_allowlist: [\"fs__read\"]\n    tool_denylist: [\"fs__write\"]\n",
+            "fs:\n  command: \"/bin/true\"\n  hooks:\n    tool_allowlist: [\"fs__read\"]\n    tool_denylist: [\"fs__write\"]\n",
         );
         let result = validate(
             agent,
@@ -267,7 +273,7 @@ mod tests {
         let agent = write_agent(dir.path(), "solo", "mcp_servers: [fs]\n");
         let tools = write_tools(
             dir.path(),
-            "fs:\n  command: true\n  hooks:\n    tool_allowlist: [\"fs__read\"]\n",
+            "fs:\n  command: \"/bin/true\"\n  hooks:\n    tool_allowlist: [\"fs__read\"]\n",
         );
         let result = validate(
             agent,
