@@ -598,7 +598,12 @@ mod tests {
             "input_tokens_details": {"cached_tokens": 800}
         }))
         .unwrap();
-        let reply = ResponsesReply { output: vec![], status: None, incomplete_details: None, usage: Some(raw) };
+        let reply = ResponsesReply {
+            output: vec![],
+            status: None,
+            incomplete_details: None,
+            usage: Some(raw),
+        };
         let usage = reply_to_llm_response(reply).usage.expect("usage");
         assert_eq!(usage.prompt_tokens, 1000);
         // A part of the prompt, not extra beside it.
@@ -618,7 +623,12 @@ mod tests {
             "total_tokens": 1050
         }))
         .unwrap();
-        let reply = ResponsesReply { output: vec![], status: None, incomplete_details: None, usage: Some(raw) };
+        let reply = ResponsesReply {
+            output: vec![],
+            status: None,
+            incomplete_details: None,
+            usage: Some(raw),
+        };
         let usage = reply_to_llm_response(reply).usage.expect("usage");
         assert_eq!(usage.cached_prompt_tokens, None);
     }
