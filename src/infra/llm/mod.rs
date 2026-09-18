@@ -349,20 +349,39 @@ fn no_headers() -> Vec<(String, String)> {
     Vec::new()
 }
 
-/// The headers OpenRouter reads to attribute a request to an application.
+/// What this application calls itself, for a router that attributes requests.
 ///
 /// `ATOMA_APP_*`, not `OPENAI_APP_*` as before: the value identifies this application,
 /// and naming it after one vendor is what made it look like OpenAI's business.
-fn openrouter_attribution() -> Vec<(String, String)> {
+fn app_identity() -> (String, String) {
     let name =
         std::env::var("ATOMA_APP_NAME").unwrap_or_else(|_| env!("CARGO_PKG_NAME").to_string());
     let url =
         std::env::var("ATOMA_APP_URL").unwrap_or_else(|_| env!("CARGO_PKG_REPOSITORY").to_string());
+    (name, url)
+}
+
+/// The two headers a router reads to attribute a request to an application.
+///
+/// Both routers in this table read exactly these, and they are the whole of what a
+/// router needs: a name to show and a URL to link. Anything beyond them is one
+/// vendor's own, and belongs to that vendor's function rather than to this one --
+/// which is the shape the table already wanted, since sending a vendor's header to
+/// somebody else is the mistake it was built to stop.
+fn router_attribution() -> Vec<(String, String)> {
+    let (name, url) = app_identity();
     vec![
-        ("X-Title".to_string(), name.clone()),
-        ("X-OpenRouter-Title".to_string(), name),
+        ("X-Title".to_string(), name),
         ("HTTP-Referer".to_string(), url),
     ]
+}
+
+/// OpenRouter's: the two above, and one of its own.
+fn openrouter_attribution() -> Vec<(String, String)> {
+    let (name, _) = app_identity();
+    let mut headers = router_attribution();
+    headers.push(("X-OpenRouter-Title".to_string(), name));
+    headers
 }
 
 /// Every provider Atoma speaks to. One line each.
@@ -410,19 +429,14 @@ static PROVIDERS: &[&dyn Provider] = &[
         credential: "ORCAROUTER_API_KEY",
         default_base_url: "https://api.orcarouter.ai/v1",
         base_url_var: "ORCAROUTER_BASE_URL",
-        headers: no_headers,
+        headers: router_attribution,
     },
     &Responses {
         name: "orcarouter-responses",
         credential: "ORCAROUTER_API_KEY",
         default_base_url: "https://api.orcarouter.ai/v1",
         base_url_var: "ORCAROUTER_BASE_URL",
-        // `no_headers`, matching its chat-completions sibling, and unverified rather
-        // than decided: whether OrcaRouter reads `X-Title`/`HTTP-Referer` has not been
-        // checked against its documentation. Sending OpenRouter's names on a guess is
-        // the mistake this table already made once, when the generic client attached
-        // `X-OpenRouter-Title` to real OpenAI.
-        headers: no_headers,
+        headers: router_attribution,
     },
     &Anthropic,
     &GitHubCopilot,
@@ -875,6 +889,30 @@ mod tests {
             "{names:?}"
         );
         assert!(names.contains(&"HTTP-Referer".to_string()), "{names:?}");
+    }
+
+    /// What every router reads, and what only one of them does.
+    ///
+    /// `X-Title` and `HTTP-Referer` are the convention; `X-OpenRouter-Title` is
+    /// OpenRouter's own. Giving the second router all three would repeat, one table row
+    /// over, the mistake of sending a vendor's header to somebody who never asked.
+    #[test]
+    fn a_vendors_own_header_goes_only_to_that_vendor() {
+        let shared: Vec<String> = router_attribution()
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect();
+        assert_eq!(shared, vec!["X-Title", "HTTP-Referer"]);
+
+        for name in ["orcarouter", "orcarouter-responses"] {
+            let sent: Vec<String> = by_name(PROVIDERS, name)
+                .expect(name)
+                .headers()
+                .into_iter()
+                .map(|(header, _)| header)
+                .collect();
+            assert_eq!(sent, shared, "{name}");
+        }
     }
 
     /// The two dialects of one provider are attributed the same.
