@@ -405,6 +405,9 @@ fn anthropic_to_chat_response(raw: AnthropicResponse) -> ChatResponse {
                     cached_tokens: Some(cached),
                 }
             }),
+            // This API does not speak DeepSeek's dialect; the line above is where
+            // Anthropic says it.
+            prompt_cache_hit_tokens: None,
         }),
     }
 }

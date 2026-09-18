@@ -144,6 +144,18 @@ pub struct Usage {
     /// through.
     #[serde(default)]
     pub prompt_tokens_details: Option<PromptTokensDetails>,
+    /// DeepSeek's own spelling of the same measurement, which it reports beside
+    /// `prompt_tokens` instead of inside `prompt_tokens_details`.
+    ///
+    /// Read because it is the default provider here: a router passing the upstream
+    /// body through unchanged would otherwise leave every run on the default model
+    /// reporting no cache at all -- honestly, but uselessly, since that is the one
+    /// provider the figure was added to answer questions about.
+    ///
+    /// Unlike Anthropic's, this one IS a part of `prompt_tokens` already: DeepSeek
+    /// documents hit + miss as summing to the prompt, so nothing is added here.
+    #[serde(default)]
+    pub prompt_cache_hit_tokens: Option<u64>,
 }
 
 /// What a provider says about the cached part of a prompt.
@@ -438,10 +450,14 @@ pub fn chat_response_to_llm(resp: ChatResponse) -> LlmResponse {
             prompt_tokens: u.prompt_tokens,
             completion_tokens: u.completion_tokens,
             total_tokens: u.total_tokens,
-            // A provider that sends no cache breakdown stays `None` here. Zero would
-            // be a claim that the cache did nothing, indistinguishable afterwards
-            // from a provider that never reports.
-            cached_prompt_tokens: u.prompt_tokens_details.and_then(|d| d.cached_tokens),
+            // The canonical spelling first, then DeepSeek's, which is the default
+            // provider here. A provider that sends neither stays `None`: zero would be
+            // a claim that the cache did nothing, indistinguishable afterwards from a
+            // provider that never reports.
+            cached_prompt_tokens: u
+                .prompt_tokens_details
+                .and_then(|d| d.cached_tokens)
+                .or(u.prompt_cache_hit_tokens),
         }),
     }
 }
@@ -751,6 +767,52 @@ mod tests {
 
         let usage = chat_response_to_llm(resp).usage.expect("usage");
         assert_eq!(usage.cached_prompt_tokens, None);
+    }
+
+    /// DeepSeek reports the same measurement under its own name, and it is the
+    /// default provider here -- so a router that passes the upstream body through
+    /// unchanged would otherwise leave every run on the default model reporting no
+    /// cache at all: honest, and useless, since that is the provider the figure was
+    /// added to answer questions about.
+    #[test]
+    fn deepseeks_own_name_for_the_cached_prompt_is_read_too() {
+        let resp: ChatResponse = serde_json::from_value(serde_json::json!({
+            "choices": [{"message": {"role": "assistant", "content": "hi"}, "finish_reason": "stop"}],
+            "usage": {
+                "prompt_tokens": 1000,
+                "completion_tokens": 50,
+                "total_tokens": 1050,
+                "prompt_cache_hit_tokens": 768,
+                "prompt_cache_miss_tokens": 232
+            }
+        }))
+        .unwrap();
+
+        let usage = chat_response_to_llm(resp).usage.expect("usage");
+        // Hit + miss is the prompt, so this is already a part of it.
+        assert_eq!(usage.prompt_tokens, 1000);
+        assert_eq!(usage.cached_prompt_tokens, Some(768));
+    }
+
+    /// A provider sending both is taken at the canonical spelling rather than being
+    /// added up: they are two names for one measurement, and summing them would
+    /// report a cache larger than the prompt it served.
+    #[test]
+    fn two_names_for_one_measurement_are_not_added_together() {
+        let resp: ChatResponse = serde_json::from_value(serde_json::json!({
+            "choices": [{"message": {"role": "assistant", "content": "hi"}, "finish_reason": "stop"}],
+            "usage": {
+                "prompt_tokens": 1000,
+                "completion_tokens": 50,
+                "total_tokens": 1050,
+                "prompt_tokens_details": {"cached_tokens": 800},
+                "prompt_cache_hit_tokens": 800
+            }
+        }))
+        .unwrap();
+
+        let usage = chat_response_to_llm(resp).usage.expect("usage");
+        assert_eq!(usage.cached_prompt_tokens, Some(800));
     }
 
     /// The mapping is one function because every adapter speaking this dialect must
