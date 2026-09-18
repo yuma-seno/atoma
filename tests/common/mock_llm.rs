@@ -46,6 +46,7 @@ impl MockLlmClient {
             tool_call_id: None,
             name: None,
             atoma_metadata: None,
+            provider_items: None,
         };
         let response = LlmResponse {
             choices: vec![LlmChoice {

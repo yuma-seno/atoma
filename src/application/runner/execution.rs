@@ -543,6 +543,7 @@ mod tests {
             tool_call_id: None,
             name: None,
             atoma_metadata: None,
+            provider_items: None,
         }
     }
 
@@ -638,6 +639,7 @@ mod tests {
             tool_call_id: None,
             name: None,
             atoma_metadata: None,
+            provider_items: None,
         };
         let messages = [anthropic];
         let sent = messages_for_provider(&messages, false);

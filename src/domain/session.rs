@@ -33,6 +33,20 @@ pub struct Message {
     /// Stored in session.json but stripped before sending to the LLM API.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub atoma_metadata: Option<Value>,
+    /// What the provider said that only the provider understands, kept to hand back.
+    ///
+    /// The opposite of `atoma_metadata`, which is stripped before sending. These are
+    /// items a dialect requires in the NEXT request, and dropping them is not a lost
+    /// nicety but a failed call: the Responses API in thinking mode answers
+    /// `400 The reasoning_text in the thinking mode must be passed back to the API`
+    /// once the conversation carries one. Measured on atomaton #766 -- an engineer run
+    /// died that way after 49 minutes and 122 tool calls, and lost all of it.
+    ///
+    /// Opaque on purpose. Nothing here reads them and nothing should: they are one
+    /// dialect's own items, and the only correct thing to do is return them in the
+    /// order they arrived. Every other dialect ignores the field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_items: Option<Vec<Value>>,
 }
 
 impl Message {
@@ -44,6 +58,7 @@ impl Message {
             tool_call_id: None,
             name: None,
             atoma_metadata: None,
+            provider_items: None,
         }
     }
 
@@ -55,6 +70,7 @@ impl Message {
             tool_call_id: None,
             name: None,
             atoma_metadata: None,
+            provider_items: None,
         }
     }
 
@@ -66,6 +82,7 @@ impl Message {
             tool_call_id: None,
             name: None,
             atoma_metadata: None,
+            provider_items: None,
         }
     }
 
@@ -77,6 +94,7 @@ impl Message {
             tool_call_id: Some(tool_call_id.to_string()),
             name: None,
             atoma_metadata: None,
+            provider_items: None,
         }
     }
 
@@ -96,6 +114,7 @@ impl Message {
             tool_call_id: Some(tool_call_id.to_string()),
             name: None,
             atoma_metadata: None,
+            provider_items: None,
         }
     }
 

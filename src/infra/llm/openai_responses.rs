@@ -189,6 +189,9 @@ fn messages_to_input(messages: &[Message]) -> Vec<Value> {
                 }));
             }
             "assistant" => {
+                // First, because that is the order they arrived in: the model reasons,
+                // then says something or calls something. The API checks the order.
+                out.extend(msg.provider_items.iter().flatten().cloned());
                 if let Some(text) = msg.content.as_ref().and_then(Value::as_str) {
                     if !text.is_empty() {
                         out.push(serde_json::json!({
@@ -286,6 +289,14 @@ fn tool_output(content: Option<&Value>) -> Value {
 fn reply_to_llm_response(raw: ResponsesReply) -> LlmResponse {
     let mut text = String::new();
     let mut tool_calls: Vec<ToolCall> = Vec::new();
+    // Everything this adapter does NOT turn into text or a tool call. `reasoning` is
+    // the one that matters -- the API requires it back in the next request's `input`
+    // and answers 400 without it -- but the rule is the general one rather than that
+    // name: an item kind nobody here has heard of is exactly the kind that must be
+    // handed back untouched. `message` and `function_call` are excluded because they
+    // are re-emitted from `text` and `tool_calls`, and keeping both would send each
+    // of them twice.
+    let mut carried: Vec<Value> = Vec::new();
 
     for item in &raw.output {
         match item.get("type").and_then(Value::as_str) {
@@ -323,7 +334,7 @@ fn reply_to_llm_response(raw: ResponsesReply) -> LlmResponse {
                     },
                 });
             }
-            _ => {}
+            _ => carried.push(item.clone()),
         }
     }
 
@@ -350,10 +361,13 @@ fn reply_to_llm_response(raw: ResponsesReply) -> LlmResponse {
 
     LlmResponse {
         choices: vec![LlmChoice {
-            message: Message::assistant(
-                (!text.is_empty()).then_some(text.as_str()),
-                (!tool_calls.is_empty()).then_some(tool_calls),
-            ),
+            message: Message {
+                provider_items: (!carried.is_empty()).then_some(carried),
+                ..Message::assistant(
+                    (!text.is_empty()).then_some(text.as_str()),
+                    (!tool_calls.is_empty()).then_some(tool_calls),
+                )
+            },
             finish_reason: Some(finish_reason),
         }],
         usage: raw.usage.map(|u| LlmUsage {
@@ -486,6 +500,77 @@ mod tests {
 
     // The runner reports a truncated completion, so the two APIs' names for it
     // have to meet somewhere.
+    /// What the model thought, kept so it can be handed back.
+    ///
+    /// The Responses API in thinking mode requires its `reasoning` items in the next
+    /// request and answers 400 without them. Dropping them cost an engineer run 49
+    /// minutes and 122 tool calls on atomaton #766, and the failure arrives late: the
+    /// conversation has to be long enough to carry one first.
+    #[test]
+    fn reasoning_is_carried_on_the_message_it_came_with() {
+        let raw: ResponsesReply = serde_json::from_value(json!({
+            "output": [
+                {"type": "reasoning", "id": "rs_1", "summary": [], "encrypted_content": "abc"},
+                {"type": "message", "content": [{"text": "done"}]},
+                {"type": "function_call", "call_id": "c1", "name": "read", "arguments": "{}"}
+            ]
+        }))
+        .unwrap();
+        let message = reply_to_llm_response(raw).choices.remove(0).message;
+
+        let carried = message.provider_items.expect("the reasoning item is kept");
+        assert_eq!(carried.len(), 1, "{carried:?}");
+        assert_eq!(carried[0]["type"], "reasoning");
+
+        // The two this adapter reads are NOT carried: they go back out of `content` and
+        // `tool_calls`, and keeping them here would send each of them twice.
+        assert_eq!(message.content.as_ref().and_then(Value::as_str), Some("done"));
+        assert_eq!(message.tool_calls.as_ref().map(Vec::len), Some(1));
+    }
+
+    /// And handed back ahead of the turn it belongs to, because that is the order it
+    /// arrived in and the API checks it.
+    #[test]
+    fn reasoning_goes_back_before_the_turn_it_belongs_to() {
+        let message = Message {
+            provider_items: Some(vec![json!({"type": "reasoning", "id": "rs_1"})]),
+            ..Message::assistant(
+                Some("here"),
+                Some(vec![ToolCall {
+                    id: "c1".to_string(),
+                    type_: "function".to_string(),
+                    function: ToolCallFunction {
+                        name: "read".to_string(),
+                        arguments: "{}".to_string(),
+                    },
+                }]),
+            )
+        };
+
+        let input = messages_to_input(&[message]);
+        let kinds: Vec<&str> = input
+            .iter()
+            .map(|item| {
+                item.get("type")
+                    .and_then(Value::as_str)
+                    .unwrap_or_else(|| item.get("role").and_then(Value::as_str).unwrap_or("?"))
+            })
+            .collect();
+        assert_eq!(kinds, vec!["reasoning", "assistant", "function_call"]);
+    }
+
+    /// A reply with nothing to carry carries nothing, rather than an empty list that
+    /// would be serialised into every session for ever.
+    #[test]
+    fn a_reply_with_no_extra_items_carries_none() {
+        let raw: ResponsesReply = serde_json::from_value(json!({
+            "output": [{"type": "message", "content": [{"text": "hello"}]}]
+        }))
+        .unwrap();
+        let message = reply_to_llm_response(raw).choices.remove(0).message;
+        assert!(message.provider_items.is_none());
+    }
+
     #[test]
     fn a_truncated_reply_reports_length() {
         let raw: ResponsesReply = serde_json::from_value(json!({
