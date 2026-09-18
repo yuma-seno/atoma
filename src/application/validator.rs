@@ -2,7 +2,7 @@ use anyhow::{bail, Result};
 use std::path::{Path, PathBuf};
 
 use crate::domain::ports::{AgentDefPort, ToolDefPort};
-use crate::domain::tool::unknown_server_message;
+use crate::domain::tool::{unknown_server_message, ToolDef};
 use crate::infra::llm::{check_credentials, check_provider_name};
 use crate::infra::template::unknown_placeholders;
 
@@ -236,6 +236,51 @@ pub fn validate_credentials(
         .filter(|name| !name.is_empty());
     println!("  ✓ {}", check_credentials(hint, present)?);
     Ok(())
+}
+
+/// What starting this definition's servers says about the tools file.
+///
+/// Opt-in for the same reason as the credential check: it needs more than a pull
+/// request has. The servers must be installed and startable, and the default check
+/// deliberately requires neither -- it reads a file, and this runs a program.
+///
+/// Worth the cost because the default check cannot see a tool name at all. An
+/// allowlist is a list of strings to it, so `filesystem__reed_text_file` passes and
+/// then refuses every read at run time. This repository has already paid that once,
+/// in the other direction: a list written as five names refused 64 calls that were
+/// all reads, and nothing in validation could have known.
+pub async fn validate_live_tools(
+    agent_def_path: &Path,
+    tools_file: &Path,
+    agent_def_port: &dyn AgentDefPort,
+    tool_def_port: &dyn ToolDefPort,
+) -> Result<()> {
+    let parsed = agent_def_port.parse(agent_def_path)?;
+    let tools_map = tool_def_port.load(tools_file)?;
+
+    // Only the servers this definition declares. A tools file may describe others,
+    // and one this agent never reaches is not this agent's problem. A name that is
+    // not in the file is already an error from `validate`; a second one here would
+    // say the same thing twice.
+    let defs: Vec<ToolDef> = parsed
+        .frontmatter
+        .mcp_servers
+        .iter()
+        .filter_map(|name| tools_map.get(name.as_str()).cloned())
+        .collect();
+
+    let found = crate::infra::mcp::inspect(&defs).await?;
+    if found.is_empty() {
+        println!(
+            "  ✓ {} server(s) started and answered; nothing wrong with their tools",
+            defs.len()
+        );
+        return Ok(());
+    }
+    for finding in &found {
+        eprintln!("  ✗ {}", finding.message);
+    }
+    bail!("{} problem(s) found by starting the tool servers", found.len())
 }
 
 /// The credential names a caller says are set, from one comma-separated argument.

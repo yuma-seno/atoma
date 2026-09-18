@@ -164,12 +164,13 @@ async fn main() -> Result<()> {
             tools_file,
             template,
             credentials_present,
+            with_live_tools,
         } => {
             let agent_def_port = infra::persistence::agent_def::FileAgentDefAdapter;
             let tool_def_port = infra::persistence::tool_def::FileToolDefAdapter::default();
             application::validator::validate(
                 agent_def.clone(),
-                tools_file,
+                tools_file.clone(),
                 template,
                 &agent_def_port,
                 &tool_def_port,
@@ -182,6 +183,25 @@ async fn main() -> Result<()> {
                     &application::validator::credentials_from_arg(&raw),
                     &agent_def_port,
                 )?;
+            }
+            // Also opt-in, and for the same reason: it needs more than the default
+            // check has. See `validate_live_tools`.
+            if with_live_tools {
+                match tools_file {
+                    Some(path) => {
+                        application::validator::validate_live_tools(
+                            &agent_def,
+                            &path,
+                            &agent_def_port,
+                            &tool_def_port,
+                        )
+                        .await?
+                    }
+                    None => anyhow::bail!(
+                        "--with-live-tools needs --tools-file: the servers it starts are \
+                         the ones that file declares."
+                    ),
+                }
             }
             Ok(())
         }

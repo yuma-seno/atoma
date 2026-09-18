@@ -1112,6 +1112,93 @@ fn end_of_event(messages: &mut Vec<Value>, data: &mut String) {
     data.clear();
 }
 
+/// Something wrong with a set of servers, found by asking them.
+///
+/// `fatal` is whether a run may proceed past it, and it is the only thing the two
+/// callers disagree about. A guard that guards nothing does not stop a run and does
+/// stop a pull request.
+#[derive(Debug, Clone)]
+pub struct Finding {
+    pub fatal: bool,
+    pub message: String,
+}
+
+/// What these servers, having said what they have, are wrong about.
+///
+/// Pure, and the only place either check lives, so registration and
+/// `atoma validate --with-live-tools` cannot come to different conclusions about the
+/// same tools file. The one before it could not exist at all: until a server has
+/// answered, a pattern is a string and a name is a guess.
+pub fn findings(configs: &[ToolDef], offered: &[(String, Vec<RegisteredTool>)]) -> Vec<Finding> {
+    let mut out = Vec::new();
+    let mut claimed: HashMap<String, String> = HashMap::new();
+
+    for (config, (_, tools)) in configs.iter().zip(offered.iter()) {
+        // Before the access filter, not after: a pattern is dead because it matches
+        // nothing the server has, and the filter removing a tool is that pattern
+        // working.
+        let names: Vec<String> = tools.iter().map(|t| t.prefixed_name.clone()).collect();
+        for pattern in hooks::unmatched_patterns(&config.hooks, &names) {
+            out.push(Finding {
+                fatal: false,
+                message: format!(
+                    "[{}] allow/deny pattern '{}' matches none of this server's tools \
+                     ({}). It is guarding nothing.",
+                    config.name,
+                    pattern,
+                    names.join(", "),
+                ),
+            });
+        }
+
+        // After it, here: a tool a server denies is not a name it claims, and counting
+        // it would report a clash that cannot happen.
+        for tool in tools {
+            if hooks::access_denial_reason(&config.hooks, &tool.prefixed_name).is_some() {
+                continue;
+            }
+            if let Some(first) = claimed.get(&tool.prefixed_name) {
+                out.push(Finding {
+                    fatal: true,
+                    message: format!(
+                        "Two servers offer a tool named '{}': '{}' and '{}'. A server \
+                         with `unprefixed: true` gives its tools their own names, so two \
+                         of them cannot offer the same one. Take the flag off one, or \
+                         deny the tool on one.",
+                        tool.prefixed_name, first, config.name,
+                    ),
+                });
+                continue;
+            }
+            claimed.insert(tool.prefixed_name.clone(), config.name.clone());
+        }
+    }
+
+    // Fatal first, so a caller that stops at the first one stops at the worst.
+    out.sort_by_key(|finding| !finding.fatal);
+    out
+}
+
+/// Start every server, ask what it has, and say what is wrong. Nothing is kept.
+///
+/// For a caller that wants the answer without running anything -- `atoma validate
+/// --with-live-tools`. A server that will not start, or will not answer inside its
+/// own timeout, is an error rather than a server with no tools: a check whose input
+/// never arrived has not passed.
+pub async fn inspect(configs: &[ToolDef]) -> Result<Vec<Finding>> {
+    let mut offered = Vec::new();
+    for config in configs {
+        let mut conn = McpConnection::connect(config)
+            .await
+            .with_context(|| format!("MCP server '{}' did not start", config.name))?;
+        let tools = conn.list_tools().await.with_context(|| {
+            format!("MCP server '{}' did not answer tools/list", config.name)
+        })?;
+        offered.push((config.name.clone(), tools));
+    }
+    Ok(findings(configs, &offered))
+}
+
 /// Manages multiple MCP connections and routes tool calls by tool prefix.
 pub struct McpRegistry {
     connections: HashMap<String, McpConnection>,
@@ -1133,50 +1220,31 @@ impl McpRegistry {
             }
         }
 
+        // Gather first, then check, then build. The checks need every server's answer,
+        // and `findings` is what `atoma validate --with-live-tools` runs over the same
+        // data -- so neither can be right while the other is wrong.
         let mut connections = HashMap::new();
-        let mut all_tools = Vec::new();
-        let mut routes: HashMap<String, Route> = HashMap::new();
-
+        let mut offered: Vec<(String, Vec<RegisteredTool>)> = Vec::new();
         for config in configs {
             let mut conn = McpConnection::connect(config).await?;
-            let advertised = conn.list_tools().await?;
+            let tools = conn.list_tools().await?;
+            connections.insert(config.name.clone(), conn);
+            offered.push((config.name.clone(), tools));
+        }
 
-            // Before the access filter, not after: a pattern is dead because it matches
-            // nothing the server has, and the filter removing a tool is that pattern
-            // working. Checked here because this is the only moment both the patterns
-            // and the real names exist.
-            let names: Vec<String> = advertised
-                .iter()
-                .map(|tool| tool.prefixed_name.clone())
-                .collect();
-            for pattern in hooks::unmatched_patterns(&config.hooks, &names) {
-                tracing::warn!(
-                    "[MCP:{}] allow/deny pattern '{}' matches none of this server's tools \
-                     ({}). It is guarding nothing.",
-                    config.name,
-                    pattern,
-                    names.join(", "),
-                );
+        for finding in findings(configs, &offered) {
+            if finding.fatal {
+                anyhow::bail!("{}", finding.message);
             }
+            tracing::warn!("{}", finding.message);
+        }
 
-            for tool in advertised {
+        let mut all_tools = Vec::new();
+        let mut routes: HashMap<String, Route> = HashMap::new();
+        for (config, (_, tools)) in configs.iter().zip(offered) {
+            for tool in tools {
                 if hooks::access_denial_reason(&config.hooks, &tool.prefixed_name).is_some() {
                     continue;
-                }
-                // Only reachable when a server sets `unprefixed`: server names are
-                // unique and a prefixed name carries one, so two prefixed tools cannot
-                // collide. Refused rather than resolved, because every way of choosing
-                // a winner is a guard silently replaced by somebody else's tool.
-                if let Some(other) = routes.get(&tool.prefixed_name) {
-                    anyhow::bail!(
-                        "Two servers offer a tool named '{}': '{}' and '{}'. A server with \
-                         `unprefixed: true` gives its tools their own names, so two of them \
-                         cannot offer the same one. Take the flag off one of them, or deny \
-                         the tool on one.",
-                        tool.prefixed_name,
-                        other.server,
-                        config.name,
-                    );
                 }
                 routes.insert(
                     tool.prefixed_name.clone(),
@@ -1187,9 +1255,7 @@ impl McpRegistry {
                 );
                 all_tools.push(tool);
             }
-            connections.insert(config.name.clone(), conn);
         }
-
         let hooks: HashMap<String, Hooks> = configs
             .iter()
             .map(|c| (c.name.clone(), c.hooks.clone()))

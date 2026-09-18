@@ -189,6 +189,14 @@ pub enum Command {
         /// a missing credential is not a defect in the file.
         #[arg(long, value_name = "NAMES")]
         credentials_present: Option<String>,
+        /// Start the tool servers and check what they actually advertise
+        ///
+        /// Needs `--tools-file`, and needs the servers to be installed and startable,
+        /// which is why it is opt-in: the default check reads a file and this one runs
+        /// a program. Off, an allowlist is a list of strings -- a misspelt entry passes
+        /// here and refuses every call at run time.
+        #[arg(long)]
+        with_live_tools: bool,
     },
 
     /// Generate a default atoma.toml configuration file
