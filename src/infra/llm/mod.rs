@@ -564,15 +564,31 @@ fn credentials_checked<'a>(
     provider_hint: Option<&str>,
     present: &[String],
 ) -> Result<&'a dyn Provider> {
+    // Resolution keys on the advertised name, which is what `detect` does and what the
+    // auto-detection rule is written in terms of.
     let provider = resolve_provider(providers, provider_hint, |name| {
         present.iter().any(|set| set.as_str() == name)
     })?;
-    if present
+
+    // Satisfaction does not. `api_key` is what this is predicting, and for GitHub
+    // Copilot that accepts `GITHUB_TOKEN` and `GH_TOKEN` as well as the name it
+    // advertises -- so keying this on `credential()` alone refused a run that would
+    // have authenticated perfectly well. Refusing a healthy run is the worse direction
+    // for this check to be wrong in: the cost of not catching a missing credential is
+    // one wasted runner, and the cost of this is a run that never starts.
+    //
+    // Found in review of the delivery template's pull request #793, by reading what
+    // `api_key` accepts rather than what this function assumed it accepted.
+    if provider
+        .credential_names()
         .iter()
-        .any(|set| set.as_str() == provider.credential())
+        .any(|name| present.iter().any(|set| set.as_str() == *name))
     {
         return Ok(provider);
     }
+    // Named as the one to set, not as the list that would work: an adopter setting the
+    // provider's own credential is right every time, and offering three names invites
+    // the question of which.
     anyhow::bail!(
         "{}",
         credential_missing(provider.credential(), provider.name())
@@ -928,6 +944,38 @@ mod tests {
             .expect("the credential it names is present");
         assert_eq!(provider.name(), "orcarouter-responses");
         assert_eq!(provider.credential(), "ORCAROUTER_API_KEY");
+    }
+
+    /// A provider that takes more than one name is satisfied by any of them.
+    ///
+    /// Copilot advertises `ATOMA_COPILOT_TOKEN` and `api_key` also accepts
+    /// `GITHUB_TOKEN` and `GH_TOKEN`. Keying this check on the advertised name alone
+    /// refused a run that would have authenticated -- the wrong direction to be wrong
+    /// in, since the cost of missing a real absence is one wasted runner and the cost
+    /// of this is a run that never starts.
+    #[test]
+    fn a_provider_that_takes_several_names_is_satisfied_by_any_of_them() {
+        let provider = by_name(PROVIDERS, "github-copilot").expect("github-copilot");
+        // The premise: it accepts more than it advertises.
+        assert!(provider.credential_names().len() > 1);
+
+        for name in provider.credential_names() {
+            let present = vec![name.to_string()];
+            credentials_checked(PROVIDERS, Some("github-copilot"), &present)
+                .unwrap_or_else(|e| panic!("{name} should satisfy github-copilot: {e}"));
+        }
+    }
+
+    /// And is still refused by none of them, naming the one to set rather than the
+    /// three that would work.
+    #[test]
+    fn a_provider_with_none_of_its_names_is_refused_by_the_one_it_advertises() {
+        let present = vec!["OPENAI_API_KEY".to_string()];
+        let error = credentials_checked(PROVIDERS, Some("github-copilot"), &present)
+            .unwrap_err()
+            .to_string();
+        let provider = by_name(PROVIDERS, "github-copilot").expect("github-copilot");
+        assert!(error.contains(provider.credential()), "{error}");
     }
 
     /// The whole point: the name to add, before a runner is spent finding out.
