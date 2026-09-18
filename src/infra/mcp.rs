@@ -1191,9 +1191,10 @@ pub async fn inspect(configs: &[ToolDef]) -> Result<Vec<Finding>> {
         let mut conn = McpConnection::connect(config)
             .await
             .with_context(|| format!("MCP server '{}' did not start", config.name))?;
-        let tools = conn.list_tools().await.with_context(|| {
-            format!("MCP server '{}' did not answer tools/list", config.name)
-        })?;
+        let tools = conn
+            .list_tools()
+            .await
+            .with_context(|| format!("MCP server '{}' did not answer tools/list", config.name))?;
         offered.push((config.name.clone(), tools));
     }
     Ok(findings(configs, &offered))

@@ -280,7 +280,10 @@ pub async fn validate_live_tools(
     for finding in &found {
         eprintln!("  ✗ {}", finding.message);
     }
-    bail!("{} problem(s) found by starting the tool servers", found.len())
+    bail!(
+        "{} problem(s) found by starting the tool servers",
+        found.len()
+    )
 }
 
 /// The credential names a caller says are set, from one comma-separated argument.
