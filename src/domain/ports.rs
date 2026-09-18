@@ -42,6 +42,17 @@ pub struct LlmUsage {
     /// of an uncached one. Without this the bill is not derivable from the counts, and
     /// `is this cheaper` cannot be answered about any change to what gets resent.
     pub cached_prompt_tokens: Option<u64>,
+    /// How much of `prompt_tokens` the provider WROTE into its cache.
+    ///
+    /// Kept apart from `cached_prompt_tokens` because the two move the bill in
+    /// opposite directions: Anthropic charges a cache read at a tenth of an input
+    /// token and a cache write at 1.25 times one. Summed into a single `cache`
+    /// figure there is no price to apply to the result, which is the whole reason
+    /// these counts are kept.
+    ///
+    /// `None` on the same terms as `cached_prompt_tokens`: no chat-completions
+    /// provider read here reports a write, and Anthropic is the one that does.
+    pub written_prompt_tokens: Option<u64>,
 }
 
 /// Port for LLM chat completion.
