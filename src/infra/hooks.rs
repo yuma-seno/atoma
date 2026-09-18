@@ -272,7 +272,10 @@ mod tests {
     fn a_pattern_that_matches_no_tool_is_reported() {
         let advertised = vec!["read".to_string(), "grep".to_string()];
         let hooks = lists(&[], &["filesystem__*"]);
-        assert_eq!(unmatched_patterns(&hooks, &advertised), vec!["filesystem__*"]);
+        assert_eq!(
+            unmatched_patterns(&hooks, &advertised),
+            vec!["filesystem__*"]
+        );
     }
 
     /// A pattern that matches is not reported, even when the filter then removes the
