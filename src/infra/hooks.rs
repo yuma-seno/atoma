@@ -65,6 +65,28 @@ pub fn access_denial_reason(hooks: &Hooks, tool_name: &str) -> Option<String> {
     None
 }
 
+/// The patterns in a server's lists that match none of the tools it advertises.
+///
+/// A pattern matching nothing is a guard that is not guarding, and nothing says so.
+/// `filesystem__*` on a server that sets `unprefixed: true` blocks exactly nothing
+/// while reading, in the file, as though it blocks everything.
+///
+/// The same defect with the sign flipped is already measured here: an allowlist
+/// written as five names refused 64 calls that were all reads, because the names
+/// nobody thought of on the day were not in it. One list said too little, this one
+/// says nothing at all, and neither announced itself.
+///
+/// Both lists together, because a dead pattern is dead whichever list it is in.
+pub fn unmatched_patterns(hooks: &Hooks, advertised: &[String]) -> Vec<String> {
+    hooks
+        .tool_denylist
+        .iter()
+        .chain(hooks.tool_allowlist.iter())
+        .filter(|pattern| !advertised.iter().any(|tool| glob_matches(pattern, tool)))
+        .cloned()
+        .collect()
+}
+
 /// Say what both lists together will do, at registration time.
 ///
 /// This used to REFUSE that configuration as "ambiguous", and it is not: `check_access`
@@ -232,6 +254,54 @@ async fn run_after_hook_inner(script: &str, payload: Value) -> Result<Option<Str
 mod tests {
     use super::*;
     use crate::domain::tool::Hooks;
+
+    fn lists(allow: &[&str], deny: &[&str]) -> Hooks {
+        Hooks {
+            tool_allowlist: allow.iter().map(|s| s.to_string()).collect(),
+            tool_denylist: deny.iter().map(|s| s.to_string()).collect(),
+            ..Default::default()
+        }
+    }
+
+    /// The case `unprefixed` creates: the pattern was right until the names moved.
+    ///
+    /// `filesystem__*` blocked everything on a prefixed server. The same line on a
+    /// server that gives its tools their own names blocks nothing, and reads exactly
+    /// as it did before. Nothing else in the run will mention it.
+    #[test]
+    fn a_pattern_that_matches_no_tool_is_reported() {
+        let advertised = vec!["read".to_string(), "grep".to_string()];
+        let hooks = lists(&[], &["filesystem__*"]);
+        assert_eq!(unmatched_patterns(&hooks, &advertised), vec!["filesystem__*"]);
+    }
+
+    /// A pattern that matches is not reported, even when the filter then removes the
+    /// only tool it matched. Removing a tool is the pattern working.
+    #[test]
+    fn a_pattern_that_matches_is_not_reported() {
+        let advertised = vec!["read".to_string(), "directory_tree".to_string()];
+        assert!(unmatched_patterns(&lists(&[], &["directory_tree"]), &advertised).is_empty());
+        assert!(unmatched_patterns(&lists(&["read"], &[]), &advertised).is_empty());
+    }
+
+    /// Both lists, because a dead pattern is dead whichever one it is in. The measured
+    /// failure was an allowlist: five names on a server whose whole purpose is reading,
+    /// which refused 64 calls that were all reads.
+    #[test]
+    fn both_lists_are_checked_and_every_dead_pattern_is_named() {
+        let advertised = vec!["read".to_string()];
+        let hooks = lists(&["read", "read_text_file"], &["write_*"]);
+        let dead = unmatched_patterns(&hooks, &advertised);
+        assert!(dead.contains(&"read_text_file".to_string()), "{dead:?}");
+        assert!(dead.contains(&"write_*".to_string()), "{dead:?}");
+        assert_eq!(dead.len(), 2, "{dead:?}");
+    }
+
+    /// A server that declares no list has no dead pattern, rather than every tool.
+    #[test]
+    fn no_lists_means_nothing_to_report() {
+        assert!(unmatched_patterns(&lists(&[], &[]), &["read".to_string()]).is_empty());
+    }
 
     #[test]
     fn test_glob_matches_exact() {

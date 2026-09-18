@@ -87,12 +87,27 @@ fn split_content(result: &Value) -> (String, Vec<Value>) {
 
 #[derive(Debug, Clone)]
 pub struct RegisteredTool {
+    /// The name the model calls it by: `server__tool`, or `tool` when the server
+    /// sets `unprefixed`.
     pub prefixed_name: String,
+    /// The name the server itself knows it by, which is what goes back on the wire.
+    /// Derived from the other one by splitting, until a name had nothing to split.
+    pub tool_name: String,
     pub schema: Value,
+}
+
+/// Where a tool name goes. Built once at registration, because the name no longer
+/// carries its own destination.
+#[derive(Debug, Clone)]
+struct Route {
+    server: String,
+    tool: String,
 }
 
 pub struct McpConnection {
     pub name: String,
+    /// Whether this server's tools keep their own names. See `ToolDef::unprefixed`.
+    unprefixed: bool,
     /// How this server is reached. Everything else here reads the same for a child
     /// process and for something already running at a url.
     transport: Transport,
@@ -214,6 +229,7 @@ impl McpConnection {
 
         let mut conn = McpConnection {
             name: config.name.clone(),
+            unprefixed: config.unprefixed,
             transport,
             process,
             next_id: 1,
@@ -384,9 +400,14 @@ impl McpConnection {
                     .and_then(|n| n.as_str())
                     .unwrap_or("unknown")
                     .to_string();
-                let prefixed = format!("{}__{}", self.name, tool_name);
+                let prefixed = if self.unprefixed {
+                    tool_name.clone()
+                } else {
+                    format!("{}__{}", self.name, tool_name)
+                };
                 RegisteredTool {
                     prefixed_name: prefixed,
+                    tool_name,
                     schema: tool.clone(),
                 }
             })
@@ -1094,6 +1115,8 @@ fn end_of_event(messages: &mut Vec<Value>, data: &mut String) {
 /// Manages multiple MCP connections and routes tool calls by tool prefix.
 pub struct McpRegistry {
     connections: HashMap<String, McpConnection>,
+    /// Tool name to where it goes. Replaces splitting the name on `__`.
+    routes: HashMap<String, Route>,
     tools: Vec<RegisteredTool>,
     hooks: HashMap<String, Hooks>,
 }
@@ -1112,13 +1135,58 @@ impl McpRegistry {
 
         let mut connections = HashMap::new();
         let mut all_tools = Vec::new();
+        let mut routes: HashMap<String, Route> = HashMap::new();
 
         for config in configs {
             let mut conn = McpConnection::connect(config).await?;
-            let tools = conn.list_tools().await?.into_iter().filter(|tool| {
-                hooks::access_denial_reason(&config.hooks, &tool.prefixed_name).is_none()
-            });
-            all_tools.extend(tools);
+            let advertised = conn.list_tools().await?;
+
+            // Before the access filter, not after: a pattern is dead because it matches
+            // nothing the server has, and the filter removing a tool is that pattern
+            // working. Checked here because this is the only moment both the patterns
+            // and the real names exist.
+            let names: Vec<String> = advertised
+                .iter()
+                .map(|tool| tool.prefixed_name.clone())
+                .collect();
+            for pattern in hooks::unmatched_patterns(&config.hooks, &names) {
+                tracing::warn!(
+                    "[MCP:{}] allow/deny pattern '{}' matches none of this server's tools \
+                     ({}). It is guarding nothing.",
+                    config.name,
+                    pattern,
+                    names.join(", "),
+                );
+            }
+
+            for tool in advertised {
+                if hooks::access_denial_reason(&config.hooks, &tool.prefixed_name).is_some() {
+                    continue;
+                }
+                // Only reachable when a server sets `unprefixed`: server names are
+                // unique and a prefixed name carries one, so two prefixed tools cannot
+                // collide. Refused rather than resolved, because every way of choosing
+                // a winner is a guard silently replaced by somebody else's tool.
+                if let Some(other) = routes.get(&tool.prefixed_name) {
+                    anyhow::bail!(
+                        "Two servers offer a tool named '{}': '{}' and '{}'. A server with \
+                         `unprefixed: true` gives its tools their own names, so two of them \
+                         cannot offer the same one. Take the flag off one of them, or deny \
+                         the tool on one.",
+                        tool.prefixed_name,
+                        other.server,
+                        config.name,
+                    );
+                }
+                routes.insert(
+                    tool.prefixed_name.clone(),
+                    Route {
+                        server: config.name.clone(),
+                        tool: tool.tool_name.clone(),
+                    },
+                );
+                all_tools.push(tool);
+            }
             connections.insert(config.name.clone(), conn);
         }
 
@@ -1135,6 +1203,7 @@ impl McpRegistry {
 
         Ok(McpRegistry {
             connections,
+            routes,
             tools: all_tools,
             hooks,
         })
@@ -1225,9 +1294,13 @@ impl McpRegistry {
         prefixed_name: &str,
         arguments: &Value,
     ) -> Result<(String, Vec<Value>, bool)> {
-        let (server_name, tool_name) = match prefixed_name.split_once("__") {
-            Some(pair) => pair,
-            // Before the format complaint, because "expected server__tool" is true and
+        // The table, not the name: a tool on a server that set `unprefixed` has no
+        // `__` to split, and splitting one that does would route `read_text_file` on a
+        // server called `filesystem` to a server called `filesystem_readonly` the day
+        // somebody names one with an underscore pair in it.
+        let route = match self.routes.get(prefixed_name) {
+            Some(route) => route.clone(),
+            // Before the unknown-tool complaint, because "unknown tool" is true and
             // useless to a caller that meant a skill. See `skill_called_as_tool_message`.
             None => {
                 if let Some(message) =
@@ -1235,14 +1308,19 @@ impl McpRegistry {
                 {
                     anyhow::bail!(message);
                 }
-                anyhow::bail!("Invalid tool name format (expected server__tool)");
+                anyhow::bail!(
+                    "Unknown tool '{prefixed_name}'. A tool is named as its server \
+                     advertises it, with `server__` in front unless that server sets \
+                     `unprefixed: true`."
+                );
             }
         };
+        let tool_name = route.tool.as_str();
 
         let conn = self
             .connections
-            .get_mut(server_name)
-            .with_context(|| format!("Unknown MCP server: {}", server_name))?;
+            .get_mut(&route.server)
+            .with_context(|| format!("Unknown MCP server: {}", route.server))?;
 
         conn.call_tool(tool_name, arguments).await
     }

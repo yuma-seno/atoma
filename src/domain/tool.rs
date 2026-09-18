@@ -75,6 +75,20 @@ pub struct ToolDef {
     /// there as a header or not at all.
     pub headers: HashMap<String, String>,
     pub hooks: Hooks,
+    /// Whether this server's tools keep their own names, with no `server__` prefix.
+    ///
+    /// The prefix is how a tool call is routed, so switching it off moves that job to
+    /// a name table built at startup -- and makes two servers able to claim one name,
+    /// which `McpRegistry::from_configs` refuses. It is off by default because a
+    /// server that has not asked for it cannot collide with anything.
+    ///
+    /// It exists because the names a model has seen most are `read`, `grep`, `bash`.
+    /// `filesystem_readonly__read_text_file` is none of them, and a run measured in
+    /// this project spent 37 of 63 shell calls re-implementing `read` with a line
+    /// range and `grep` by hand. Mature harnesses give their own tools bare names and
+    /// prefix everything plugged in; this is that arrangement, made a setting because
+    /// here every tool arrives over MCP and none of them is native.
+    pub unprefixed: bool,
     /// How much of one tool result from this server reaches the model, in
     /// characters. `None` means the client's default.
     ///

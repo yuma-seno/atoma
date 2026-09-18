@@ -27,6 +27,11 @@ struct ToolConfig {
     pub headers: HashMap<String, String>,
     #[serde(default)]
     pub hooks: HooksConfig,
+    /// Name this server's tools as they are, with no `server__` prefix.
+    ///
+    /// One meaning only: what the model sees. See `domain::tool::ToolDef`.
+    #[serde(default)]
+    pub unprefixed: bool,
     /// Seconds one `tools/list` or `tools/call` on this server may take. Absent
     /// means the client's default, which is what nearly every server wants.
     #[serde(default)]
@@ -257,6 +262,7 @@ pub fn load(path: &Path, credentials: &Credentials) -> Result<HashMap<String, To
             };
             let def = ToolDef {
                 name: name.clone(),
+                unprefixed: cfg.unprefixed,
                 command: cfg.command,
                 // `${NAME}` here resolves against the ENVIRONMENT, not the
                 // credentials. These are program paths: the delivery runner uses
