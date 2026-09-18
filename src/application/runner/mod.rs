@@ -119,6 +119,12 @@ pub struct RunRecord {
     /// `completed` is the only one that is not a mechanism giving up. `iterations`,
     /// `runtime` and `stopped` are the three soft stops; `failed` is everything else,
     /// including a provider hanging up and a broken loop being cut short.
+    ///
+    /// Two endings are `completed`: the agent returning text, and a tool ending the
+    /// session — which is how a run that opened a pull request ends. The second used to
+    /// be recorded as nothing at all, so this list held the failures and the
+    /// interruptions and left out the successes, and every rate taken over it was taken
+    /// over the wrong population.
     pub ended_because: String,
     /// Messages in the session when it was saved: the cheapest proxy for how much work
     /// the run did.
@@ -488,11 +494,23 @@ pub async fn run(settings: RunSettings, deps: RunDeps<'_>) -> Result<RunOutcome>
         }) => (text, usage, reason),
         Ok(InferenceResult::SessionEnded) => {
             tracing::info!("Session suspended by tool request");
-            // Save session and exit cleanly — no output needed
-            if let Some(ref path) = out_path {
-                deps.session.save(&session, path)?;
-                tracing::info!("Session saved to: {:?} (suspended)", path);
-            }
+            // Through the same door as every other ending, which it was not before:
+            // this arm saved the session itself and returned, so it never reached
+            // `record_run`. A tool ending the session is how a run that FINISHED ends --
+            // `create_pr` does it -- so the runs missing from `atoma_runs` were the
+            // successful ones, and every rate computed over that list was computed over
+            // the failures alone. Measured: a session with 426 messages carried one run
+            // record, for the run that had been interrupted.
+            //
+            // `completed`, because nothing gave up here. The mechanism did not stop this
+            // run; the agent reached an outcome and said so with a tool.
+            save_whatever_was_reached(
+                &mut session,
+                out_path.as_deref(),
+                deps.session,
+                &started,
+                "completed",
+            );
             return Ok(RunOutcome::SessionEnded);
         }
         Err(e) => {
