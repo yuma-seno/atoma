@@ -1,9 +1,9 @@
 use anyhow::{bail, Result};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::domain::ports::{AgentDefPort, ToolDefPort};
 use crate::domain::tool::unknown_server_message;
-use crate::infra::llm::check_provider_name;
+use crate::infra::llm::{check_credentials, check_provider_name};
 use crate::infra::template::unknown_placeholders;
 
 /// Validate an agent definition file and optional tools file.
@@ -208,8 +208,72 @@ pub fn validate(
     }
 }
 
+/// Whether the environment about to run this definition holds the credential it needs.
+///
+/// Separate from `validate` rather than a flag inside it, because it is a different
+/// question and the two must not be confused. `validate` asks whether the definition
+/// is correct, and runs where no credential exists -- a pull request checking a file
+/// -- which is why `a_known_provider_passes_without_its_credential` exists. This asks
+/// whether the runner is equipped, and only a caller that says so gets it.
+///
+/// Reported by `atomaton` #766: switching provider without adding the matching secret
+/// is silent until the run has checked out, installed dependencies and started tool
+/// servers. The information needed to say so earlier is all in this crate, and this is
+/// the door to it.
+pub fn validate_credentials(
+    agent_def_path: &Path,
+    present: &[String],
+    agent_def_port: &dyn AgentDefPort,
+) -> Result<()> {
+    let parsed = agent_def_port.parse(agent_def_path)?;
+    // The same precedence a run uses: an empty `provider:` is no hint rather than a
+    // hint to nothing, which is what `validate` already reports as its own error.
+    let hint = parsed
+        .frontmatter
+        .provider
+        .as_deref()
+        .map(str::trim)
+        .filter(|name| !name.is_empty());
+    println!("  ✓ {}", check_credentials(hint, present)?);
+    Ok(())
+}
+
+/// The credential names a caller says are set, from one comma-separated argument.
+///
+/// Empty entries are dropped rather than kept as a name, so a caller reporting that
+/// none are set -- an empty string -- produces a list of none rather than a list of
+/// one thing called nothing. That is a real state: a repository that has added no
+/// credential at all looks exactly like it.
+pub fn credentials_from_arg(raw: &str) -> Vec<String> {
+    raw.split(',')
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(str::to_string)
+        .collect()
+}
 #[cfg(test)]
 mod tests {
+    /// What a caller means by an empty list.
+    ///
+    /// `--credentials-present ""` is a runner saying none are set, which is exactly
+    /// the state this check exists to catch. Read as one nameless credential it would
+    /// match nothing and report the wrong reason; dropped, it reaches the provider
+    /// resolution as the empty set and gets the run's own answer.
+    #[test]
+    fn an_empty_argument_is_no_credentials_rather_than_one_without_a_name() {
+        assert!(super::credentials_from_arg("").is_empty());
+        assert!(super::credentials_from_arg("  ").is_empty());
+        assert!(super::credentials_from_arg(",,").is_empty());
+    }
+
+    /// Whitespace is the shell's, not the caller's intent.
+    #[test]
+    fn credential_names_survive_the_spacing_a_shell_leaves() {
+        assert_eq!(
+            super::credentials_from_arg(" OPENAI_API_KEY , ANTHROPIC_API_KEY "),
+            vec!["OPENAI_API_KEY".to_string(), "ANTHROPIC_API_KEY".to_string()]
+        );
+    }
     use super::*;
     use crate::infra::persistence::agent_def::FileAgentDefAdapter;
     use crate::infra::persistence::tool_def::FileToolDefAdapter;

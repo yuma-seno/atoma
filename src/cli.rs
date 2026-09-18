@@ -163,7 +163,8 @@ pub enum Command {
     #[command(after_help = "EXAMPLES:
   atoma validate --agent-def ./agent.md
   atoma validate --agent-def ./agent.md --tools-file ./tools.yml
-  atoma validate --agent-def ./agent.md --template ./prompt-template.md")]
+  atoma validate --agent-def ./agent.md --template ./prompt-template.md
+  atoma validate --agent-def ./agent.md --credentials-present OPENAI_API_KEY")]
     Validate {
         #[arg(long, value_name = "FILE")]
         agent_def: PathBuf,
@@ -176,6 +177,18 @@ pub enum Command {
         /// one, which is correct by construction.
         #[arg(long, value_name = "FILE")]
         template: Option<PathBuf>,
+        /// Credential names that are set, to check the resolved provider's is among them
+        ///
+        /// Comma-separated NAMES and never values, so a caller can answer this holding
+        /// no secret -- a workflow step can test whether one is empty without
+        /// materialising it. An empty list is a caller saying none are set, which is a
+        /// state worth being able to state.
+        ///
+        /// Absent means the credentials are not checked at all. That is the default
+        /// because it is what validating a definition in a pull request wants: there,
+        /// a missing credential is not a defect in the file.
+        #[arg(long, value_name = "NAMES")]
+        credentials_present: Option<String>,
     },
 
     /// Generate a default atoma.toml configuration file

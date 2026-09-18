@@ -116,15 +116,9 @@ pub trait Provider: Sync + std::fmt::Debug {
 
     /// The credential's value, or an error naming what to set and for whom.
     fn api_key(&self, credentials: &Credentials) -> Result<String> {
-        credentials.get(self.credential()).with_context(|| {
-            format!(
-                "{} is not set, and the {} provider authenticates with it. Set it, or choose \
-                 another provider with ATOMA_PROVIDER (one of: {}).",
-                self.credential(),
-                self.name(),
-                provider_names(),
-            )
-        })
+        credentials
+            .get(self.credential())
+            .with_context(|| credential_missing(self.credential(), self.name()))
     }
 }
 
@@ -528,6 +522,57 @@ fn provider_names() -> String {
         .join(", ")
 }
 
+/// What to say when the provider a run resolved to has no credential.
+///
+/// One place, because two callers need the same sentence: `api_key`, reached once a
+/// run has already started, and `check_credentials`, whose whole purpose is to say it
+/// before one does. Two copies would drift, and the copy a person reads is whichever
+/// one they happened to hit.
+fn credential_missing(credential: &str, provider: &str) -> String {
+    format!(
+        "{credential} is not set, and the {provider} provider authenticates with it. Set it, \
+         or choose another provider with ATOMA_PROVIDER (one of: {}).",
+        provider_names(),
+    )
+}
+
+/// Whether the credential this run needs is among the ones that are set.
+///
+/// Names, never values. `resolve_provider` already takes presence as a function
+/// because that is all the decision needs, and this is the same decision asked one
+/// step earlier -- before a runner has checked out, installed and started tool
+/// servers, rather than after. So a caller can answer it holding no secret: a
+/// workflow step can test whether a secret is empty without materialising it, and a
+/// check that demanded the values would put them in the one step with no use for them.
+///
+/// Deliberately not part of `validate`. That command asks whether a definition is
+/// correct and runs where no credential exists -- a pull request checking a file --
+/// and `a_known_provider_passes_without_its_credential` fixes that judgement. This is
+/// a different question, asked by whoever is about to run the definition.
+pub fn check_credentials(provider_hint: Option<&str>, present: &[String]) -> Result<String> {
+    let provider = credentials_checked(PROVIDERS, provider_hint, present)?;
+    Ok(format!(
+        "{} is set, and the {} provider authenticates with it",
+        provider.credential(),
+        provider.name()
+    ))
+}
+
+/// The list is supplied rather than reached for, as everywhere else in this file.
+fn credentials_checked<'a>(
+    providers: &'a [&'a dyn Provider],
+    provider_hint: Option<&str>,
+    present: &[String],
+) -> Result<&'a dyn Provider> {
+    let provider = resolve_provider(providers, provider_hint, |name| {
+        present.iter().any(|set| set.as_str() == name)
+    })?;
+    if present.iter().any(|set| set.as_str() == provider.credential()) {
+        return Ok(provider);
+    }
+    anyhow::bail!("{}", credential_missing(provider.credential(), provider.name()))
+}
+
 /// Which provider this run is for.
 ///
 /// Takes the list, so a caller supplies it rather than this function reaching for a
@@ -865,6 +910,52 @@ mod tests {
 
     /// The union that keeps provider keys out of tool servers is built from this, so
     /// a provider added above is covered without anyone remembering a second list.
+    /// The check a runner makes before it installs anything.
+    ///
+    /// Names go in and a provider comes out; no value is passed and none is returned.
+    /// The caller is a workflow step that can say whether a secret is empty without
+    /// materialising it, and it would have no other use for the value.
+    #[test]
+    fn a_present_credential_passes_the_early_check() {
+        let present = vec!["ORCAROUTER_API_KEY".to_string()];
+        let provider = credentials_checked(PROVIDERS, Some("orcarouter-responses"), &present)
+            .expect("the credential it names is present");
+        assert_eq!(provider.name(), "orcarouter-responses");
+        assert_eq!(provider.credential(), "ORCAROUTER_API_KEY");
+    }
+
+    /// The whole point: the name to add, before a runner is spent finding out.
+    ///
+    /// Asserted against `credential_missing` rather than against a quoted sentence,
+    /// because the property that matters is that this is the SAME sentence a run
+    /// produces. A person who has seen one has to recognise the other, and a copy here
+    /// would pass this test while drifting from what the run says.
+    #[test]
+    fn a_missing_credential_names_the_secret_to_add() {
+        let present = vec!["OPENAI_API_KEY".to_string()];
+        let error = credentials_checked(PROVIDERS, Some("orcarouter-responses"), &present)
+            .unwrap_err()
+            .to_string();
+        assert_eq!(
+            error,
+            credential_missing("ORCAROUTER_API_KEY", "orcarouter-responses")
+        );
+        assert!(error.contains("ORCAROUTER_API_KEY"), "{error}");
+    }
+
+    /// Detection is not re-tested here: the early check reaches it through
+    /// `resolve_provider`, which is the run's own function, and the tests above cover
+    /// what it answers for none and for several. Re-testing it through this door would
+    /// read `ATOMA_PROVIDER` from the environment, which is what those tests avoid by
+    /// calling `detect` directly.
+    #[test]
+    fn the_early_check_carries_no_credential_value_in_its_answer() {
+        let present = vec!["ANTHROPIC_API_KEY".to_string()];
+        let message = check_credentials(Some("anthropic"), &present).expect("present");
+        assert!(message.contains("ANTHROPIC_API_KEY"), "{message}");
+        // The name, and nothing that could be a value: this string is printed.
+        assert!(!message.contains("sk-"), "{message}");
+    }
     #[test]
     fn every_provider_credential_is_published() {
         let names = provider_credential_names();

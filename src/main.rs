@@ -163,16 +163,27 @@ async fn main() -> Result<()> {
             agent_def,
             tools_file,
             template,
+            credentials_present,
         } => {
             let agent_def_port = infra::persistence::agent_def::FileAgentDefAdapter;
             let tool_def_port = infra::persistence::tool_def::FileToolDefAdapter::default();
             application::validator::validate(
-                agent_def,
+                agent_def.clone(),
                 tools_file,
                 template,
                 &agent_def_port,
                 &tool_def_port,
-            )
+            )?;
+            // A separate question, asked only when a caller opts in. See
+            // `validate_credentials` for why it is not a branch inside `validate`.
+            if let Some(raw) = credentials_present {
+                application::validator::validate_credentials(
+                    &agent_def,
+                    &application::validator::credentials_from_arg(&raw),
+                    &agent_def_port,
+                )?;
+            }
+            Ok(())
         }
         Command::Init => {
             let template = config_module::generate_default_config();
