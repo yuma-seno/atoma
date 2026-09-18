@@ -279,6 +279,41 @@ impl Provider for Anthropic {
 #[derive(Debug)]
 struct GitHubCopilot;
 
+/// What GitHub Copilot is told about the client asking.
+///
+/// A function rather than a literal inside `connect`, because one of these is a
+/// contract and a test is the only thing that can watch it.
+fn copilot_headers() -> Vec<(String, String)> {
+    let pkg_id = format!("{}/{}", env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"));
+    vec![
+        // The executable, which is this one. These are a version statement and
+        // nothing is gated on them.
+        ("Editor-Version".to_string(), pkg_id.clone()),
+        ("Editor-Plugin-Version".to_string(), pkg_id),
+        // NOT a name for this application: `Copilot-Integration-Id` selects an API
+        // contract, and with it which models the account may reach. It was
+        // `atoma-cli`, which is not registered with GitHub, and an unregistered id
+        // is not a smaller entitlement but an unknown one -- the failure it produces
+        // is `The requested model is not supported`, on models that work elsewhere.
+        //
+        // `copilot-developer-cli` is the documented default for a client that has
+        // not registered a branded id, which is this one. Measured by somebody with
+        // a real token: 44 models under this id, 39 with `vscode-chat` and 39 with
+        // the header absent. So it is also the widest catalogue available without
+        // claiming to be a product we are not.
+        //
+        // Register `atoma` with GitHub and this becomes that instead. Until then,
+        // naming ourselves here buys nothing and costs models.
+        (
+            "Copilot-Integration-Id".to_string(),
+            "copilot-developer-cli".to_string(),
+        ),
+        (
+            "Openai-Intent".to_string(),
+            "conversation-panel".to_string(),
+        ),
+    ]
+}
 #[async_trait]
 impl Provider for GitHubCopilot {
     fn name(&self) -> &'static str {
@@ -324,19 +359,7 @@ impl Provider for GitHubCopilot {
         http: reqwest::Client,
         credentials: &Credentials,
     ) -> Result<Box<dyn LlmPort + Send + Sync>> {
-        let pkg_id = format!("{}/{}", env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"));
-        let headers = vec![
-            ("Editor-Version".to_string(), pkg_id.clone()),
-            ("Editor-Plugin-Version".to_string(), pkg_id),
-            (
-                "Copilot-Integration-Id".to_string(),
-                "atoma-cli".to_string(),
-            ),
-            (
-                "Openai-Intent".to_string(),
-                "conversation-panel".to_string(),
-            ),
-        ];
+        let headers = copilot_headers();
         Ok(Box::new(
             CopilotClient::connect(http, self.base_url(), headers, self.api_key(credentials)?)
                 .await?,
@@ -891,6 +914,35 @@ mod tests {
         assert!(names.contains(&"HTTP-Referer".to_string()), "{names:?}");
     }
 
+    /// The Copilot integration id is a contract, and a test is the only thing watching it.
+    ///
+    /// Nothing fails when this value is wrong. The account reaches fewer models, or one,
+    /// with `The requested model is not supported` on the rest -- an error that reads as
+    /// the model being unavailable rather than as the request being routed somewhere
+    /// narrower. It was `atoma-cli`, which nothing had registered, for however long.
+    ///
+    /// The assertion is the reasoning rather than the string: this client has no
+    /// registered branded id, so it sends the documented default for clients that have
+    /// none. Registering one makes this test the place that says so.
+    #[test]
+    fn copilot_sends_the_documented_default_integration_id() {
+        let headers = copilot_headers();
+        let integration = headers
+            .iter()
+            .find(|(name, _)| name == "Copilot-Integration-Id")
+            .expect("Copilot-Integration-Id is sent");
+        assert_eq!(integration.1, "copilot-developer-cli");
+
+        // The version headers state the executable and are not the contract.
+        for name in ["Editor-Version", "Editor-Plugin-Version"] {
+            let value = headers
+                .iter()
+                .find(|(header, _)| header == name)
+                .map(|(_, value)| value.as_str())
+                .unwrap_or_default();
+            assert!(value.starts_with(env!("CARGO_PKG_NAME")), "{name}: {value}");
+        }
+    }
     /// What every router reads, and what only one of them does.
     ///
     /// `X-Title` and `HTTP-Referer` are the convention; `X-OpenRouter-Title` is
