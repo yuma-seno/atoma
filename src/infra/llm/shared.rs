@@ -833,7 +833,10 @@ mod tests {
         // Still unknown, because nothing here reads those names -- but now the run
         // says which names it saw instead of leaving it to be guessed.
         assert_eq!(
-            chat_response_to_llm(resp).usage.expect("usage").cached_prompt_tokens,
+            chat_response_to_llm(resp)
+                .usage
+                .expect("usage")
+                .cached_prompt_tokens,
             None,
         );
     }
