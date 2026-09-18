@@ -88,6 +88,7 @@ impl SingleEntryToolDefPort {
             key: key.to_string(),
             tool_def: ToolDef {
                 name: key.to_string(),
+                unprefixed: false,
                 command: "echo".to_string(),
                 args: vec![],
                 env: HashMap::new(),
