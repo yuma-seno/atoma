@@ -5,6 +5,7 @@ use serde_json::error::Category;
 use serde_json::Value;
 use std::time::Duration;
 
+use crate::domain::ports::{FinishReason, LlmChoice, LlmResponse, LlmUsage};
 use crate::domain::session::Message;
 
 const MAX_HTTP_ATTEMPTS: u8 = 3;
@@ -136,6 +137,23 @@ pub struct Usage {
     pub prompt_tokens: u64,
     pub completion_tokens: u64,
     pub total_tokens: u64,
+    /// The cache breakdown, for a provider that sends one.
+    ///
+    /// Absent for one that does not, and absent is the answer -- see
+    /// `LlmUsage::cached_prompt_tokens` for why it must not become zero on the way
+    /// through.
+    #[serde(default)]
+    pub prompt_tokens_details: Option<PromptTokensDetails>,
+}
+
+/// What a provider says about the cached part of a prompt.
+///
+/// The same derives as `Usage`, which is `Copy`: a type nested in a `Copy` struct has
+/// to be one too, and this is two machine words.
+#[derive(Debug, Deserialize, Default, Clone, Copy)]
+pub struct PromptTokensDetails {
+    #[serde(default)]
+    pub cached_tokens: Option<u64>,
 }
 
 /// POST a request and deserialize its JSON body, retrying transport-level
@@ -392,6 +410,37 @@ pub async fn openai_compat_call(
         request.json(&body)
     })
     .await
+}
+
+/// Turns a chat-completions reply into the domain reply.
+///
+/// Three adapters speak this dialect -- OpenAI, Copilot, and Anthropic after its own
+/// translation -- and each used to carry its own copy of this mapping. A field added
+/// to `LlmUsage` then had to be remembered in three places, and the one that forgot
+/// would report the same call differently from the others.
+pub fn chat_response_to_llm(resp: ChatResponse) -> LlmResponse {
+    LlmResponse {
+        choices: resp
+            .choices
+            .into_iter()
+            .map(|c| LlmChoice {
+                message: c.message,
+                // The canonical spelling is this dialect's own, so a value that does not
+                // read is a provider inventing one -- `None`, and the runner says so,
+                // rather than being quietly taken for `stop`.
+                finish_reason: c.finish_reason.as_deref().and_then(FinishReason::from_openai),
+            })
+            .collect(),
+        usage: resp.usage.map(|u| LlmUsage {
+            prompt_tokens: u.prompt_tokens,
+            completion_tokens: u.completion_tokens,
+            total_tokens: u.total_tokens,
+            // A provider that sends no cache breakdown stays `None` here. Zero would
+            // be a claim that the cache did nothing, indistinguishable afterwards
+            // from a provider that never reports.
+            cached_prompt_tokens: u.prompt_tokens_details.and_then(|d| d.cached_tokens),
+        }),
+    }
 }
 
 #[cfg(test)]
@@ -657,6 +706,61 @@ mod tests {
             !is_truncated(&error),
             "wrong shape must not be treated as truncation"
         );
+    }
+
+    /// The cache figure a chat-completions provider sends, carried through as the
+    /// part of the prompt it is.
+    ///
+    /// A run here is overwhelmingly prompt, re-sent in full every round trip, and a
+    /// cached prompt token costs a fraction of a fresh one. Without this the bill
+    /// cannot be read off the numbers the run records.
+    #[test]
+    fn a_cached_prompt_is_carried_through_as_part_of_the_prompt() {
+        let resp: ChatResponse = serde_json::from_value(serde_json::json!({
+            "choices": [{"message": {"role": "assistant", "content": "hi"}, "finish_reason": "stop"}],
+            "usage": {
+                "prompt_tokens": 1000,
+                "completion_tokens": 50,
+                "total_tokens": 1050,
+                "prompt_tokens_details": {"cached_tokens": 800}
+            }
+        }))
+        .unwrap();
+
+        let usage = chat_response_to_llm(resp).usage.expect("usage");
+        // 800 of the 1000, not 1800: this dialect counts the cached part inside.
+        assert_eq!(usage.prompt_tokens, 1000);
+        assert_eq!(usage.cached_prompt_tokens, Some(800));
+    }
+
+    /// A provider that says nothing about its cache is reported as saying nothing.
+    ///
+    /// Zero is a claim that the cache did nothing, which afterwards is
+    /// indistinguishable from a provider that never reports -- and the two want
+    /// opposite responses, one a prompt to fix, the other nothing at all.
+    #[test]
+    fn a_provider_that_reports_no_cache_is_not_recorded_as_a_cache_that_missed() {
+        let resp: ChatResponse = serde_json::from_value(serde_json::json!({
+            "choices": [{"message": {"role": "assistant", "content": "hi"}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 1000, "completion_tokens": 50, "total_tokens": 1050}
+        }))
+        .unwrap();
+
+        let usage = chat_response_to_llm(resp).usage.expect("usage");
+        assert_eq!(usage.cached_prompt_tokens, None);
+    }
+
+    /// The mapping is one function because every adapter speaking this dialect must
+    /// report the same reply the same way, finish reason included.
+    #[test]
+    fn a_finish_reason_this_dialect_does_not_define_is_not_taken_for_a_normal_stop() {
+        let resp: ChatResponse = serde_json::from_value(serde_json::json!({
+            "choices": [{"message": {"role": "assistant", "content": "hi"}, "finish_reason": "banana"}],
+            "usage": null
+        }))
+        .unwrap();
+
+        assert_eq!(chat_response_to_llm(resp).choices[0].finish_reason, None);
     }
 }
 

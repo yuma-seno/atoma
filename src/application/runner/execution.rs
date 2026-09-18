@@ -397,9 +397,31 @@ pub async fn inference_loop(
             .await?;
 
         if let Some(u) = response.usage {
+            // Per inference, not only per run. The run total cannot answer how the
+            // prompt grows turn by turn, and that is the whole cost of resending the
+            // conversation: a result read early is paid again on every turn after it.
+            // Answering it once meant parsing a workflow log for iteration timestamps
+            // and guessing at a characters-per-token ratio, which was wrong by three
+            // times and was believed for an hour.
+            tracing::info!(
+                "ATOMA_INFERENCE_USAGE: iteration={} prompt={} completion={} cached={}",
+                iteration,
+                u.prompt_tokens,
+                u.completion_tokens,
+                u.cached_prompt_tokens
+                    .map_or_else(|| "unknown".to_string(), |n| n.to_string()),
+            );
             total_usage.prompt_tokens += u.prompt_tokens;
             total_usage.completion_tokens += u.completion_tokens;
             total_usage.total_tokens += u.total_tokens;
+            // Summed only over the inferences that reported one, and left as `None`
+            // when not one did. Starting the accumulator at zero would turn a run
+            // against a provider that says nothing about its cache into a run whose
+            // cache did nothing, and the two look identical afterwards.
+            if let Some(cached) = u.cached_prompt_tokens {
+                total_usage.cached_prompt_tokens =
+                    Some(total_usage.cached_prompt_tokens.unwrap_or(0) + cached);
+            }
         }
 
         let choice = response

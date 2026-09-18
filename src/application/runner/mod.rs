@@ -543,11 +543,17 @@ pub async fn run(settings: RunSettings, deps: RunDeps<'_>) -> Result<RunOutcome>
         }
     };
 
+    // `cached=` says `unknown` rather than `0` when no inference reported one. The
+    // reader of this line is a delivery script and then a person, and `0` is a claim
+    // about the cache while `unknown` is a claim about the measurement.
     tracing::info!(
-        "ATOMA_TOKEN_USAGE: prompt={} completion={} total={}",
+        "ATOMA_TOKEN_USAGE: prompt={} completion={} total={} cached={}",
         total_usage.prompt_tokens,
         total_usage.completion_tokens,
         total_usage.total_tokens,
+        total_usage
+            .cached_prompt_tokens
+            .map_or_else(|| "unknown".to_string(), |n| n.to_string()),
     );
 
     // 8. Save session, through the helper the failing path already used -- which is what

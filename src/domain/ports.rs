@@ -29,6 +29,19 @@ pub struct LlmUsage {
     pub prompt_tokens: u64,
     pub completion_tokens: u64,
     pub total_tokens: u64,
+    /// How much of `prompt_tokens` the provider served from its cache.
+    ///
+    /// `None` means the provider did not say, which is NOT zero and must never be
+    /// recorded as it. GitHub Copilot bills per request and reports no tokens at all;
+    /// a provider that reports its cache under a name this adapter does not read
+    /// answers the same way. Zero would read as `the cache is doing nothing`, which
+    /// is the one conclusion an absent measurement must not be allowed to support.
+    ///
+    /// It matters because a run here is 99% prompt -- the whole conversation is resent
+    /// every turn -- and a cached prompt token costs between an eighth and a fiftieth
+    /// of an uncached one. Without this the bill is not derivable from the counts, and
+    /// `is this cheaper` cannot be answered about any change to what gets resent.
+    pub cached_prompt_tokens: Option<u64>,
 }
 
 /// Port for LLM chat completion.

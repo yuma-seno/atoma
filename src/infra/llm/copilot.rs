@@ -3,9 +3,9 @@ use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::Value;
 
-use crate::domain::ports::{FinishReason, LlmChoice, LlmPort, LlmResponse, LlmUsage};
+use crate::domain::ports::{LlmPort, LlmResponse};
 use crate::domain::session::Message;
-use crate::infra::llm::shared::openai_compat_call;
+use crate::infra::llm::shared::{chat_response_to_llm, openai_compat_call};
 /// Exchange a GitHub PAT for a short-lived GitHub Copilot API token.
 async fn exchange_copilot_token(client: &reqwest::Client, github_token: &str) -> Result<String> {
     const COPILOT_AUTH_URL: &str = "https://api.github.com/copilot_internal/v2/token";
@@ -104,23 +104,6 @@ impl LlmPort for CopilotClient {
         )
         .await?;
 
-        Ok(LlmResponse {
-            choices: resp
-                .choices
-                .into_iter()
-                .map(|c| LlmChoice {
-                    message: c.message,
-                    finish_reason: c
-                        .finish_reason
-                        .as_deref()
-                        .and_then(FinishReason::from_openai),
-                })
-                .collect(),
-            usage: resp.usage.map(|u| LlmUsage {
-                prompt_tokens: u.prompt_tokens,
-                completion_tokens: u.completion_tokens,
-                total_tokens: u.total_tokens,
-            }),
-        })
+        Ok(chat_response_to_llm(resp))
     }
 }

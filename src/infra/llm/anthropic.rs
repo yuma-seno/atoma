@@ -3,10 +3,11 @@ use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::Value;
 
-use crate::domain::ports::{FinishReason, LlmChoice, LlmPort, LlmResponse, LlmUsage};
+use crate::domain::ports::{LlmPort, LlmResponse};
 use crate::domain::session::{Message, ToolCall, ToolCallFunction};
 use crate::infra::llm::shared::{
-    send_json_with_retry, ChatChoice, ChatResponse, Usage, RESERVED_KEYS,
+    chat_response_to_llm, send_json_with_retry, ChatChoice, ChatResponse, PromptTokensDetails,
+    Usage, RESERVED_KEYS,
 };
 
 const ANTHROPIC_API_VERSION: &str = "2023-06-01";
@@ -67,24 +68,7 @@ impl LlmPort for AnthropicClient {
         let resp = self
             .call_anthropic(model, messages, tools, extra_body)
             .await?;
-        Ok(LlmResponse {
-            choices: resp
-                .choices
-                .into_iter()
-                .map(|c| LlmChoice {
-                    message: c.message,
-                    finish_reason: c
-                        .finish_reason
-                        .as_deref()
-                        .and_then(FinishReason::from_openai),
-                })
-                .collect(),
-            usage: resp.usage.map(|u| LlmUsage {
-                prompt_tokens: u.prompt_tokens,
-                completion_tokens: u.completion_tokens,
-                total_tokens: u.total_tokens,
-            }),
-        })
+        Ok(chat_response_to_llm(resp))
     }
 }
 
@@ -114,6 +98,11 @@ enum AnthropicContentBlock {
 struct AnthropicUsage {
     input_tokens: u64,
     output_tokens: u64,
+    /// Anthropic counts this SEPARATELY from `input_tokens` rather than as a part of
+    /// it, which is the opposite of how OpenAI reports the same thing. Kept as what
+    /// this API means by it; the translation is at the one call site.
+    #[serde(default)]
+    cache_read_input_tokens: Option<u64>,
 }
 
 // ── Anthropic translation helpers ─────────────────────────────────────────────
@@ -400,9 +389,22 @@ fn anthropic_to_chat_response(raw: AnthropicResponse) -> ChatResponse {
             finish_reason,
         }],
         usage: Some(Usage {
-            prompt_tokens: raw.usage.input_tokens,
+            // Anthropic reports the cached part BESIDE the input rather than inside
+            // it, and every other provider here reports it inside. `LlmUsage` defines
+            // `cached_prompt_tokens` as a part of `prompt_tokens`, so the sum is the
+            // input -- one meaning, translated at the single place the shapes differ.
+            // Leaving it out would make an Anthropic run look cheaper in tokens than
+            // an identical one anywhere else.
+            prompt_tokens: raw.usage.input_tokens + raw.usage.cache_read_input_tokens.unwrap_or(0),
             completion_tokens: raw.usage.output_tokens,
-            total_tokens: raw.usage.input_tokens + raw.usage.output_tokens,
+            total_tokens: raw.usage.input_tokens
+                + raw.usage.cache_read_input_tokens.unwrap_or(0)
+                + raw.usage.output_tokens,
+            prompt_tokens_details: raw.usage.cache_read_input_tokens.map(|cached| {
+                PromptTokensDetails {
+                    cached_tokens: Some(cached),
+                }
+            }),
         }),
     }
 }
@@ -414,6 +416,27 @@ mod tests {
 
     fn cache_control_of(block: &Value) -> Option<&Value> {
         block.get("cache_control")
+    }
+
+    /// Anthropic counts the cached part beside the input; everyone else counts it
+    /// inside. Translated at the one place the shapes differ, so a run against
+    /// Anthropic does not look cheaper in tokens than an identical one elsewhere.
+    #[test]
+    fn a_cached_read_is_added_into_the_prompt_rather_than_left_beside_it() {
+        let raw: AnthropicResponse = serde_json::from_value(serde_json::json!({
+            "content": [],
+            "stop_reason": "end_turn",
+            "usage": {"input_tokens": 200, "output_tokens": 50, "cache_read_input_tokens": 800}
+        }))
+        .unwrap();
+        let usage = anthropic_to_chat_response(raw).usage.expect("usage");
+        // 200 fresh + 800 cached is a thousand-token prompt, however it was served.
+        assert_eq!(usage.prompt_tokens, 1000);
+        assert_eq!(usage.total_tokens, 1050);
+        assert_eq!(
+            usage.prompt_tokens_details.and_then(|d| d.cached_tokens),
+            Some(800)
+        );
     }
 
     #[test]

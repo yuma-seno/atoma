@@ -115,6 +115,16 @@ struct ResponsesUsage {
     output_tokens: u64,
     #[serde(default)]
     total_tokens: u64,
+    /// The cache breakdown, for a provider that sends one. Absent is the answer for
+    /// one that does not -- see `LlmUsage::cached_prompt_tokens`.
+    #[serde(default)]
+    input_tokens_details: Option<InputTokensDetails>,
+}
+
+#[derive(Debug, Deserialize)]
+struct InputTokensDetails {
+    #[serde(default)]
+    cached_tokens: Option<u64>,
 }
 
 // ── Request ───────────────────────────────────────────────────────────────────
@@ -374,6 +384,7 @@ fn reply_to_llm_response(raw: ResponsesReply) -> LlmResponse {
             prompt_tokens: u.input_tokens,
             completion_tokens: u.output_tokens,
             total_tokens: u.total_tokens,
+            cached_prompt_tokens: u.input_tokens_details.and_then(|d| d.cached_tokens),
         }),
     }
 }
@@ -572,6 +583,44 @@ mod tests {
         .unwrap();
         let message = reply_to_llm_response(raw).choices.remove(0).message;
         assert!(message.provider_items.is_none());
+    }
+
+    /// The cache figure, when the provider sends one.
+    ///
+    /// A run here is 99% prompt and a cached prompt token costs a fraction of an
+    /// uncached one, so the bill is decided by a number that was being thrown away.
+    #[test]
+    fn a_cached_prompt_is_reported_as_the_part_of_the_prompt_it_is() {
+        let raw: ResponsesUsage = serde_json::from_value(json!({
+            "input_tokens": 1000,
+            "output_tokens": 50,
+            "total_tokens": 1050,
+            "input_tokens_details": {"cached_tokens": 800}
+        }))
+        .unwrap();
+        let reply = ResponsesReply { output: vec![], status: None, incomplete_details: None, usage: Some(raw) };
+        let usage = reply_to_llm_response(reply).usage.expect("usage");
+        assert_eq!(usage.prompt_tokens, 1000);
+        // A part of the prompt, not extra beside it.
+        assert_eq!(usage.cached_prompt_tokens, Some(800));
+    }
+
+    /// A provider that says nothing about its cache answers `None`, never zero.
+    ///
+    /// Zero is a claim that the cache did nothing, and would be indistinguishable
+    /// afterwards from a provider that does not report. GitHub Copilot bills per
+    /// request and reports no tokens at all.
+    #[test]
+    fn a_provider_that_says_nothing_about_its_cache_is_not_reported_as_zero() {
+        let raw: ResponsesUsage = serde_json::from_value(json!({
+            "input_tokens": 1000,
+            "output_tokens": 50,
+            "total_tokens": 1050
+        }))
+        .unwrap();
+        let reply = ResponsesReply { output: vec![], status: None, incomplete_details: None, usage: Some(raw) };
+        let usage = reply_to_llm_response(reply).usage.expect("usage");
+        assert_eq!(usage.cached_prompt_tokens, None);
     }
 
     #[test]

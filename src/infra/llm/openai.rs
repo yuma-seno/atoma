@@ -2,9 +2,9 @@ use anyhow::Result;
 use async_trait::async_trait;
 use serde_json::Value;
 
-use crate::domain::ports::{FinishReason, LlmChoice, LlmPort, LlmResponse, LlmUsage};
+use crate::domain::ports::{LlmPort, LlmResponse};
 use crate::domain::session::Message;
-use crate::infra::llm::shared::openai_compat_call;
+use crate::infra::llm::shared::{chat_response_to_llm, openai_compat_call};
 
 /// Client for any endpoint speaking OpenAI's chat-completions dialect.
 ///
@@ -56,26 +56,6 @@ impl LlmPort for OpenAIClient {
         )
         .await?;
 
-        Ok(LlmResponse {
-            choices: resp
-                .choices
-                .into_iter()
-                .map(|c| LlmChoice {
-                    message: c.message,
-                    // The canonical spelling is this dialect's own, so a value that
-                    // does not read is a provider inventing one — `None`, and the runner
-                    // says so, rather than being quietly taken for `stop`.
-                    finish_reason: c
-                        .finish_reason
-                        .as_deref()
-                        .and_then(FinishReason::from_openai),
-                })
-                .collect(),
-            usage: resp.usage.map(|u| LlmUsage {
-                prompt_tokens: u.prompt_tokens,
-                completion_tokens: u.completion_tokens,
-                total_tokens: u.total_tokens,
-            }),
-        })
+        Ok(chat_response_to_llm(resp))
     }
 }
