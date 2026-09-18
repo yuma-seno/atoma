@@ -123,6 +123,19 @@ pub struct RunRecord {
     /// Messages in the session when it was saved: the cheapest proxy for how much work
     /// the run did.
     pub messages: usize,
+    /// Inferences this run made -- round trips to the model, which is what a run waits
+    /// on and what it is billed for.
+    ///
+    /// `messages` was the only size here and is a poor stand-in: it counts tool results
+    /// too, so a run that asks for two tools per turn looks larger than one that asks
+    /// for one, having waited the same number of times. Answering `how long does a
+    /// round trip take here` meant parsing `Inference iteration N` out of a workflow
+    /// log, which is not a thing a report should need.
+    ///
+    /// `#[serde(default)]` because sessions written before this field exists are read
+    /// back, and zero is the honest answer for a run that never recorded it.
+    #[serde(default)]
+    pub iterations: usize,
 }
 
 /// Now, as RFC 3339 in UTC.
@@ -192,19 +205,41 @@ fn seconds_between(started: &str, ended: &str) -> u64 {
 /// whatever it reached.
 fn record_run(session: &mut Session, started: &str, ended_because: &str) {
     let ended = now_rfc3339();
-    let record = RunRecord {
-        seconds: seconds_between(started, &ended),
-        started: started.to_string(),
-        ended,
-        ended_because: ended_because.to_string(),
-        messages: session.messages.len(),
-    };
 
     let mut runs: Vec<Value> = session
         .extra
         .get(RUNS_KEY)
         .and_then(|v| v.as_array().cloned())
         .unwrap_or_default();
+
+    // Where this run's messages begin: where the last one's ended. Taken from the
+    // record rather than threaded down from the top of `run`, because the run's start
+    // is decided before the session is even loaded -- and a second parameter carried
+    // through two functions to reach one line is a worse trade than reading the number
+    // that is already written down.
+    //
+    // A session rebuilt from scratch has no previous run and starts at zero, which is
+    // also right.
+    let first = runs
+        .last()
+        .and_then(|r| r.get("messages"))
+        .and_then(Value::as_u64)
+        .unwrap_or(0) as usize;
+    let iterations = session
+        .messages
+        .iter()
+        .skip(first)
+        .filter(|m| m.role == "assistant")
+        .count();
+
+    let record = RunRecord {
+        seconds: seconds_between(started, &ended),
+        started: started.to_string(),
+        ended,
+        ended_because: ended_because.to_string(),
+        messages: session.messages.len(),
+        iterations,
+    };
     match serde_json::to_value(&record) {
         Ok(value) => runs.push(value),
         Err(e) => {
