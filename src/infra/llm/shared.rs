@@ -3,6 +3,7 @@ use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use serde_json::error::Category;
 use serde_json::Value;
+use std::collections::BTreeMap;
 use std::time::Duration;
 
 use crate::domain::ports::{FinishReason, LlmChoice, LlmResponse, LlmUsage};
@@ -132,7 +133,9 @@ pub struct ChatChoice {
     pub finish_reason: Option<String>,
 }
 
-#[derive(Debug, Deserialize, Default, Clone, Copy)]
+/// Not `Copy`: `unread` is a map. Nothing takes this by value twice -- its one
+/// consumer maps it into `LlmUsage`, which stays `Copy`.
+#[derive(Debug, Deserialize, Default, Clone)]
 pub struct Usage {
     pub prompt_tokens: u64,
     pub completion_tokens: u64,
@@ -144,24 +147,28 @@ pub struct Usage {
     /// through.
     #[serde(default)]
     pub prompt_tokens_details: Option<PromptTokensDetails>,
-    /// DeepSeek's own spelling of the same measurement, which it reports beside
-    /// `prompt_tokens` instead of inside `prompt_tokens_details`.
+    /// The cached part a provider WROTE, which nothing on any wire read here
+    /// reports today.
     ///
-    /// Read because it is the default provider here: a router passing the upstream
-    /// body through unchanged would otherwise leave every run on the default model
-    /// reporting no cache at all -- honestly, but uselessly, since that is the one
-    /// provider the figure was added to answer questions about.
-    ///
-    /// Unlike Anthropic's, this one IS a part of `prompt_tokens` already: DeepSeek
-    /// documents hit + miss as summing to the prompt, so nothing is added here.
+    /// Anthropic's translation fills it in -- that API is the one charging for a
+    /// cache write -- and it lives on this struct rather than beside it because this
+    /// is the shape every chat-completions adapter hands to `chat_response_to_llm`.
     #[serde(default)]
-    pub prompt_cache_hit_tokens: Option<u64>,
+    pub prompt_cache_write_tokens: Option<u64>,
+    /// Every usage field nothing above reads.
+    ///
+    /// Kept so that "this provider reports no cache" can be told apart from "this
+    /// provider spells it something we do not read". Without it the two are the same
+    /// silence, and the second is diagnosed by guessing a field name and shipping a
+    /// release to find out whether the guess was right.
+    #[serde(flatten)]
+    pub unread: BTreeMap<String, Value>,
 }
 
 /// What a provider says about the cached part of a prompt.
 ///
-/// The same derives as `Usage`, which is `Copy`: a type nested in a `Copy` struct has
-/// to be one too, and this is two machine words.
+/// `Copy` because `LlmUsage` is: this is read out of a `Usage` by value on the way
+/// through, and it is one machine word behind an `Option`.
 #[derive(Debug, Deserialize, Default, Clone, Copy)]
 pub struct PromptTokensDetails {
     #[serde(default)]
@@ -430,6 +437,32 @@ pub async fn openai_compat_call(
 /// translation -- and each used to carry its own copy of this mapping. A field added
 /// to `LlmUsage` then had to be remembered in three places, and the one that forgot
 /// would report the same call differently from the others.
+/// Says once, per process, that a provider sent usage fields nothing here reads and
+/// no cached-prompt figure under any name it does.
+///
+/// Those two together are the signature of a provider spelling the cache something
+/// new, which is otherwise indistinguishable from a provider that has no cache to
+/// report: the metrics downstream say `unknown` for both, correctly and uselessly.
+/// Once per process because the answer is a field name -- seeing it a second time
+/// adds nothing, and every inference of every run would say it.
+///
+/// Names only, never values. The names are what identifies the spelling, and this
+/// line is printed into a workflow log anyone can read.
+pub(crate) fn report_unread_usage(unread: &BTreeMap<String, Value>) {
+    if unread.is_empty() {
+        return;
+    }
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        tracing::warn!(
+            "Provider reported usage but no cached-prompt figure under any name this \
+             adapter reads. Usage fields it sent that nothing here reads: {}. If one of \
+             them is the cache figure, it belongs in `Usage`.",
+            unread.keys().cloned().collect::<Vec<_>>().join(", "),
+        );
+    });
+}
+
 pub fn chat_response_to_llm(resp: ChatResponse) -> LlmResponse {
     LlmResponse {
         choices: resp
@@ -446,18 +479,22 @@ pub fn chat_response_to_llm(resp: ChatResponse) -> LlmResponse {
                     .and_then(FinishReason::from_openai),
             })
             .collect(),
-        usage: resp.usage.map(|u| LlmUsage {
-            prompt_tokens: u.prompt_tokens,
-            completion_tokens: u.completion_tokens,
-            total_tokens: u.total_tokens,
-            // The canonical spelling first, then DeepSeek's, which is the default
-            // provider here. A provider that sends neither stays `None`: zero would be
-            // a claim that the cache did nothing, indistinguishable afterwards from a
-            // provider that never reports.
-            cached_prompt_tokens: u
-                .prompt_tokens_details
-                .and_then(|d| d.cached_tokens)
-                .or(u.prompt_cache_hit_tokens),
+        usage: resp.usage.map(|u| {
+            // A provider that sends no cache breakdown stays `None`: zero would be a
+            // claim that the cache did nothing, indistinguishable afterwards from a
+            // provider that never reports. Which of the two it is, the line below
+            // answers -- rather than a guess at what this provider might call it.
+            let cached = u.prompt_tokens_details.and_then(|d| d.cached_tokens);
+            if cached.is_none() {
+                report_unread_usage(&u.unread);
+            }
+            LlmUsage {
+                prompt_tokens: u.prompt_tokens,
+                completion_tokens: u.completion_tokens,
+                total_tokens: u.total_tokens,
+                cached_prompt_tokens: cached,
+                written_prompt_tokens: u.prompt_cache_write_tokens,
+            }
         }),
     }
 }
@@ -769,13 +806,13 @@ mod tests {
         assert_eq!(usage.cached_prompt_tokens, None);
     }
 
-    /// DeepSeek reports the same measurement under its own name, and it is the
-    /// default provider here -- so a router that passes the upstream body through
-    /// unchanged would otherwise leave every run on the default model reporting no
-    /// cache at all: honest, and useless, since that is the provider the figure was
-    /// added to answer questions about.
+    /// A usage object nothing here fully reads keeps what it could not read.
+
+    /// Without this, a provider that spells the cache something new and a provider
+    /// that has no cache are the same silence -- and the answer was being guessed at
+    /// by shipping a field name and waiting to see whether a number appeared.
     #[test]
-    fn deepseeks_own_name_for_the_cached_prompt_is_read_too() {
+    fn a_usage_field_nothing_reads_is_kept_rather_than_dropped() {
         let resp: ChatResponse = serde_json::from_value(serde_json::json!({
             "choices": [{"message": {"role": "assistant", "content": "hi"}, "finish_reason": "stop"}],
             "usage": {
@@ -788,33 +825,31 @@ mod tests {
         }))
         .unwrap();
 
-        let usage = chat_response_to_llm(resp).usage.expect("usage");
-        // Hit + miss is the prompt, so this is already a part of it.
-        assert_eq!(usage.prompt_tokens, 1000);
-        assert_eq!(usage.cached_prompt_tokens, Some(768));
+        let usage = resp.usage.as_ref().expect("usage");
+        assert_eq!(
+            usage.unread.keys().cloned().collect::<Vec<_>>(),
+            vec!["prompt_cache_hit_tokens", "prompt_cache_miss_tokens"],
+        );
+        // Still unknown, because nothing here reads those names -- but now the run
+        // says which names it saw instead of leaving it to be guessed.
+        assert_eq!(
+            chat_response_to_llm(resp).usage.expect("usage").cached_prompt_tokens,
+            None,
+        );
     }
 
-    /// A provider sending both is taken at the canonical spelling rather than being
-    /// added up: they are two names for one measurement, and summing them would
-    /// report a cache larger than the prompt it served.
+    /// Nothing unread is not a complaint. A provider reporting exactly what this
+    /// adapter models, and no cache, has nothing to diagnose.
     #[test]
-    fn two_names_for_one_measurement_are_not_added_together() {
+    fn a_provider_that_reports_only_what_is_modelled_leaves_nothing_unread() {
         let resp: ChatResponse = serde_json::from_value(serde_json::json!({
             "choices": [{"message": {"role": "assistant", "content": "hi"}, "finish_reason": "stop"}],
-            "usage": {
-                "prompt_tokens": 1000,
-                "completion_tokens": 50,
-                "total_tokens": 1050,
-                "prompt_tokens_details": {"cached_tokens": 800},
-                "prompt_cache_hit_tokens": 800
-            }
+            "usage": {"prompt_tokens": 1000, "completion_tokens": 50, "total_tokens": 1050}
         }))
         .unwrap();
 
-        let usage = chat_response_to_llm(resp).usage.expect("usage");
-        assert_eq!(usage.cached_prompt_tokens, Some(800));
+        assert!(resp.usage.as_ref().expect("usage").unread.is_empty());
     }
-
     /// The mapping is one function because every adapter speaking this dialect must
     /// report the same reply the same way, finish reason included.
     #[test]

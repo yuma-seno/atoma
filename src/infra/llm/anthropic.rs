@@ -103,6 +103,14 @@ struct AnthropicUsage {
     /// this API means by it; the translation is at the one call site.
     #[serde(default)]
     cache_read_input_tokens: Option<u64>,
+    /// Counted separately from `input_tokens` as well -- and this one is charged at
+    /// 1.25 times an ordinary input token, where a read is charged at a tenth.
+    ///
+    /// Every request this adapter sends marks a cache breakpoint, so leaving this
+    /// out drops the most expensive part of an Anthropic prompt from its own total,
+    /// on every run.
+    #[serde(default)]
+    cache_creation_input_tokens: Option<u64>,
 }
 
 // ── Anthropic translation helpers ─────────────────────────────────────────────
@@ -383,6 +391,14 @@ fn anthropic_to_chat_response(raw: AnthropicResponse) -> ChatResponse {
         None => None,
     };
 
+    // Anthropic's `input_tokens` excludes BOTH cached figures rather than containing
+    // them, so the prompt is the three added up. Leaving the write out was leaving out
+    // the one part of an Anthropic prompt that costs more than an ordinary input
+    // token, on every run -- this adapter marks a cache breakpoint in every request.
+    let prompt = raw.usage.input_tokens
+        + raw.usage.cache_read_input_tokens.unwrap_or(0)
+        + raw.usage.cache_creation_input_tokens.unwrap_or(0);
+
     ChatResponse {
         choices: vec![ChatChoice {
             message: Message::assistant(text.as_deref(), tool_calls),
@@ -395,19 +411,17 @@ fn anthropic_to_chat_response(raw: AnthropicResponse) -> ChatResponse {
             // input -- one meaning, translated at the single place the shapes differ.
             // Leaving it out would make an Anthropic run look cheaper in tokens than
             // an identical one anywhere else.
-            prompt_tokens: raw.usage.input_tokens + raw.usage.cache_read_input_tokens.unwrap_or(0),
+            prompt_tokens: prompt,
             completion_tokens: raw.usage.output_tokens,
-            total_tokens: raw.usage.input_tokens
-                + raw.usage.cache_read_input_tokens.unwrap_or(0)
-                + raw.usage.output_tokens,
+            total_tokens: prompt + raw.usage.output_tokens,
             prompt_tokens_details: raw.usage.cache_read_input_tokens.map(|cached| {
                 PromptTokensDetails {
                     cached_tokens: Some(cached),
                 }
             }),
-            // This API does not speak DeepSeek's dialect; the line above is where
-            // Anthropic says it.
-            prompt_cache_hit_tokens: None,
+            prompt_cache_write_tokens: raw.usage.cache_creation_input_tokens,
+            // Every field this API sends is read above; there is nothing to diagnose.
+            unread: Default::default(),
         }),
     }
 }
@@ -424,6 +438,37 @@ mod tests {
     /// Anthropic counts the cached part beside the input; everyone else counts it
     /// inside. Translated at the one place the shapes differ, so a run against
     /// Anthropic does not look cheaper in tokens than an identical one elsewhere.
+    /// The write, which `input_tokens` excludes as well.
+    ///
+    /// It is the part charged ABOVE an ordinary input token -- 1.25x, against a
+    /// read's 0.1x -- and this adapter marks a cache breakpoint in every request, so
+    /// dropping it understated the prompt on every Anthropic run that filled a cache.
+    #[test]
+    fn a_cached_write_is_part_of_the_prompt_and_is_named_apart_from_a_read() {
+        let raw: AnthropicResponse = serde_json::from_value(serde_json::json!({
+            "content": [],
+            "stop_reason": "end_turn",
+            "usage": {
+                "input_tokens": 200,
+                "output_tokens": 50,
+                "cache_read_input_tokens": 500,
+                "cache_creation_input_tokens": 300
+            }
+        }))
+        .unwrap();
+        let usage = anthropic_to_chat_response(raw).usage.expect("usage");
+        // 200 fresh + 500 read + 300 written is the thousand tokens it processed.
+        assert_eq!(usage.prompt_tokens, 1000);
+        assert_eq!(usage.total_tokens, 1050);
+        // Apart, because a read is a tenth of an input token and a write is 1.25 of
+        // one: summed there is no price to apply to the result.
+        assert_eq!(
+            usage.prompt_tokens_details.and_then(|d| d.cached_tokens),
+            Some(500)
+        );
+        assert_eq!(usage.prompt_cache_write_tokens, Some(300));
+    }
+
     #[test]
     fn a_cached_read_is_added_into_the_prompt_rather_than_left_beside_it() {
         let raw: AnthropicResponse = serde_json::from_value(serde_json::json!({

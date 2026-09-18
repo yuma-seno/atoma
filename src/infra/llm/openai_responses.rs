@@ -22,7 +22,7 @@ use serde_json::Value;
 
 use crate::domain::ports::{FinishReason, LlmChoice, LlmPort, LlmResponse, LlmUsage};
 use crate::domain::session::{Message, ToolCall, ToolCallFunction};
-use crate::infra::llm::shared::{merge_extra_body, send_json_with_retry};
+use crate::infra::llm::shared::{merge_extra_body, report_unread_usage, send_json_with_retry};
 
 pub struct OpenAIResponsesClient {
     pub(crate) client: reqwest::Client,
@@ -119,6 +119,9 @@ struct ResponsesUsage {
     /// one that does not -- see `LlmUsage::cached_prompt_tokens`.
     #[serde(default)]
     input_tokens_details: Option<InputTokensDetails>,
+    /// Every usage field nothing above reads -- see `Usage::unread` in `shared`.
+    #[serde(flatten)]
+    unread: std::collections::BTreeMap<String, Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -380,11 +383,19 @@ fn reply_to_llm_response(raw: ResponsesReply) -> LlmResponse {
             },
             finish_reason: Some(finish_reason),
         }],
-        usage: raw.usage.map(|u| LlmUsage {
-            prompt_tokens: u.input_tokens,
-            completion_tokens: u.output_tokens,
-            total_tokens: u.total_tokens,
-            cached_prompt_tokens: u.input_tokens_details.and_then(|d| d.cached_tokens),
+        usage: raw.usage.map(|u| {
+            let cached = u.input_tokens_details.and_then(|d| d.cached_tokens);
+            if cached.is_none() {
+                report_unread_usage(&u.unread);
+            }
+            LlmUsage {
+                prompt_tokens: u.input_tokens,
+                completion_tokens: u.output_tokens,
+                total_tokens: u.total_tokens,
+                cached_prompt_tokens: cached,
+                // This API does not charge for a cache write, so it reports none.
+                written_prompt_tokens: None,
+            }
         }),
     }
 }

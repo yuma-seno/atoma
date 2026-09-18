@@ -404,11 +404,13 @@ pub async fn inference_loop(
             // and guessing at a characters-per-token ratio, which was wrong by three
             // times and was believed for an hour.
             tracing::info!(
-                "ATOMA_INFERENCE_USAGE: iteration={} prompt={} completion={} cached={}",
+                "ATOMA_INFERENCE_USAGE: iteration={} prompt={} completion={} cached={} written={}",
                 iteration,
                 u.prompt_tokens,
                 u.completion_tokens,
                 u.cached_prompt_tokens
+                    .map_or_else(|| "unknown".to_string(), |n| n.to_string()),
+                u.written_prompt_tokens
                     .map_or_else(|| "unknown".to_string(), |n| n.to_string()),
             );
             total_usage.prompt_tokens += u.prompt_tokens;
@@ -421,6 +423,10 @@ pub async fn inference_loop(
             if let Some(cached) = u.cached_prompt_tokens {
                 total_usage.cached_prompt_tokens =
                     Some(total_usage.cached_prompt_tokens.unwrap_or(0) + cached);
+            }
+            if let Some(written) = u.written_prompt_tokens {
+                total_usage.written_prompt_tokens =
+                    Some(total_usage.written_prompt_tokens.unwrap_or(0) + written);
             }
         }
 

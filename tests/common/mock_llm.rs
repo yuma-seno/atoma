@@ -32,6 +32,7 @@ impl MockLlmClient {
                 completion_tokens: 5,
                 total_tokens: 15,
                 cached_prompt_tokens: None,
+                written_prompt_tokens: None,
             }),
         };
         self.queue.lock().unwrap().push_back(response);

@@ -547,12 +547,15 @@ pub async fn run(settings: RunSettings, deps: RunDeps<'_>) -> Result<RunOutcome>
     // reader of this line is a delivery script and then a person, and `0` is a claim
     // about the cache while `unknown` is a claim about the measurement.
     tracing::info!(
-        "ATOMA_TOKEN_USAGE: prompt={} completion={} total={} cached={}",
+        "ATOMA_TOKEN_USAGE: prompt={} completion={} total={} cached={} written={}",
         total_usage.prompt_tokens,
         total_usage.completion_tokens,
         total_usage.total_tokens,
         total_usage
             .cached_prompt_tokens
+            .map_or_else(|| "unknown".to_string(), |n| n.to_string()),
+        total_usage
+            .written_prompt_tokens
             .map_or_else(|| "unknown".to_string(), |n| n.to_string()),
     );
 
