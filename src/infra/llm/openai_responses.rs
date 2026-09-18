@@ -28,16 +28,29 @@ pub struct OpenAIResponsesClient {
     pub(crate) client: reqwest::Client,
     pub(crate) base_url: String,
     pub(crate) api_key: String,
+    /// What the provider wants sent besides the credential -- attribution, mostly.
+    ///
+    /// This dialect had no such field, so a router reached through it learned nothing
+    /// about who was asking. The same headers were going out over chat-completions the
+    /// whole time, which is what made the gap invisible: switching dialect looked like a
+    /// change of wire format and was also a change of identity.
+    pub(crate) extra_headers: Vec<(String, String)>,
 }
 
 impl OpenAIResponsesClient {
     /// Endpoint and credential come from the caller: the vendor is one row of the
     /// provider table, and this dialect is another row of the same one.
-    pub fn new(client: reqwest::Client, base_url: String, api_key: String) -> Self {
+    pub fn new(
+        client: reqwest::Client,
+        base_url: String,
+        api_key: String,
+        extra_headers: Vec<(String, String)>,
+    ) -> Self {
         OpenAIResponsesClient {
             client,
             base_url,
             api_key,
+            extra_headers,
         }
     }
 }
@@ -58,11 +71,15 @@ impl LlmPort for OpenAIResponsesClient {
         tracing::debug!("Request body: {}", serde_json::to_string_pretty(&body)?);
 
         let raw: ResponsesReply = send_json_with_retry("OpenAI Responses", || {
-            self.client
+            let mut request = self
+                .client
                 .post(&url)
                 .header("Authorization", format!("Bearer {}", self.api_key))
-                .header("Content-Type", "application/json")
-                .json(&body)
+                .header("Content-Type", "application/json");
+            for (name, value) in &self.extra_headers {
+                request = request.header(name, value);
+            }
+            request.json(&body)
         })
         .await?;
 

@@ -68,6 +68,22 @@ pub trait Provider: Sync + std::fmt::Debug {
     /// What says otherwise. Every provider has one; none is a special case.
     fn base_url_var(&self) -> &'static str;
 
+    /// Headers this provider wants that no other should receive.
+    ///
+    /// On the trait rather than on one dialect's struct. It was a field on
+    /// `ChatCompletions` alone, so `openrouter` was attributed and
+    /// `openrouter-responses` was not -- picking the newer dialect dropped the run's
+    /// identity, OpenRouter's dashboard stopped naming the app, and nothing failed or
+    /// said so. Attribution is a property of who is being asked, not of which of two
+    /// wire formats the asking uses.
+    ///
+    /// Empty for most, which is an answer rather than an omission: the generic client
+    /// used to attach OpenRouter's headers unconditionally, so real OpenAI received
+    /// `X-OpenRouter-Title` too.
+    fn headers(&self) -> Vec<(String, String)> {
+        Vec::new()
+    }
+
     /// The wire format, for the log line and for tests.
     ///
     /// An endpoint alone leaves "is this host being asked for `/chat/completions` or
@@ -146,6 +162,9 @@ impl Provider for ChatCompletions {
     fn base_url_var(&self) -> &'static str {
         self.base_url_var
     }
+    fn headers(&self) -> Vec<(String, String)> {
+        (self.headers)()
+    }
     fn dialect(&self) -> &'static str {
         "chat-completions"
     }
@@ -159,7 +178,7 @@ impl Provider for ChatCompletions {
             http,
             self.base_url(),
             self.api_key(credentials)?,
-            (self.headers)(),
+            Provider::headers(self),
         )))
     }
 }
@@ -174,6 +193,10 @@ struct Responses {
     credential: &'static str,
     default_base_url: &'static str,
     base_url_var: &'static str,
+    /// See `Provider::headers`. Present here for the same reason it is present on
+    /// `ChatCompletions`: the router behind this dialect still wants to be told who
+    /// is asking.
+    headers: fn() -> Vec<(String, String)>,
 }
 
 #[async_trait]
@@ -190,6 +213,9 @@ impl Provider for Responses {
     fn base_url_var(&self) -> &'static str {
         self.base_url_var
     }
+    fn headers(&self) -> Vec<(String, String)> {
+        (self.headers)()
+    }
     fn dialect(&self) -> &'static str {
         "responses"
     }
@@ -203,6 +229,7 @@ impl Provider for Responses {
             http,
             self.base_url(),
             self.api_key(credentials)?,
+            Provider::headers(self),
         )))
     }
 }
@@ -362,6 +389,7 @@ static PROVIDERS: &[&dyn Provider] = &[
         credential: "OPENAI_API_KEY",
         default_base_url: "https://api.openai.com/v1",
         base_url_var: "OPENAI_BASE_URL",
+        headers: no_headers,
     },
     &ChatCompletions {
         name: "openrouter",
@@ -375,6 +403,7 @@ static PROVIDERS: &[&dyn Provider] = &[
         credential: "OPENROUTER_API_KEY",
         default_base_url: "https://openrouter.ai/api/v1",
         base_url_var: "OPENROUTER_BASE_URL",
+        headers: openrouter_attribution,
     },
     &ChatCompletions {
         name: "orcarouter",
@@ -388,6 +417,12 @@ static PROVIDERS: &[&dyn Provider] = &[
         credential: "ORCAROUTER_API_KEY",
         default_base_url: "https://api.orcarouter.ai/v1",
         base_url_var: "ORCAROUTER_BASE_URL",
+        // `no_headers`, matching its chat-completions sibling, and unverified rather
+        // than decided: whether OrcaRouter reads `X-Title`/`HTTP-Referer` has not been
+        // checked against its documentation. Sending OpenRouter's names on a guess is
+        // the mistake this table already made once, when the generic client attached
+        // `X-OpenRouter-Title` to real OpenAI.
+        headers: no_headers,
     },
     &Anthropic,
     &GitHubCopilot,
@@ -826,6 +861,11 @@ mod tests {
     fn attribution_headers_reach_only_the_providers_that_asked() {
         assert!(no_headers().is_empty());
 
+        for name in ["openai", "openai-responses", "anthropic", "github-copilot"] {
+            let provider = by_name(PROVIDERS, name).expect(name);
+            assert!(provider.headers().is_empty(), "{name}");
+        }
+
         let names: Vec<String> = openrouter_attribution()
             .into_iter()
             .map(|(name, _)| name)
@@ -835,5 +875,22 @@ mod tests {
             "{names:?}"
         );
         assert!(names.contains(&"HTTP-Referer".to_string()), "{names:?}");
+    }
+
+    /// The two dialects of one provider are attributed the same.
+    ///
+    /// `headers` was a field on the chat-completions struct alone, so `openrouter`
+    /// was attributed and `openrouter-responses` was not. Choosing the newer dialect
+    /// dropped the run's identity -- no error, no log line, just an empty App column
+    /// on the router's dashboard, which is the kind of thing found weeks later by
+    /// somebody wondering where their requests went.
+    #[test]
+    fn a_dialect_pair_is_attributed_the_same() {
+        for (chat, responses) in [("openrouter", "openrouter-responses")] {
+            let one = by_name(PROVIDERS, chat).expect(chat);
+            let other = by_name(PROVIDERS, responses).expect(responses);
+            assert_eq!(one.headers(), other.headers(), "{chat} vs {responses}");
+            assert!(!one.headers().is_empty(), "{chat}");
+        }
     }
 }
