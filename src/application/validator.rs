@@ -271,7 +271,10 @@ mod tests {
     fn credential_names_survive_the_spacing_a_shell_leaves() {
         assert_eq!(
             super::credentials_from_arg(" OPENAI_API_KEY , ANTHROPIC_API_KEY "),
-            vec!["OPENAI_API_KEY".to_string(), "ANTHROPIC_API_KEY".to_string()]
+            vec![
+                "OPENAI_API_KEY".to_string(),
+                "ANTHROPIC_API_KEY".to_string()
+            ]
         );
     }
     use super::*;

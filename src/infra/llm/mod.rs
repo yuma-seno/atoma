@@ -567,10 +567,16 @@ fn credentials_checked<'a>(
     let provider = resolve_provider(providers, provider_hint, |name| {
         present.iter().any(|set| set.as_str() == name)
     })?;
-    if present.iter().any(|set| set.as_str() == provider.credential()) {
+    if present
+        .iter()
+        .any(|set| set.as_str() == provider.credential())
+    {
         return Ok(provider);
     }
-    anyhow::bail!("{}", credential_missing(provider.credential(), provider.name()))
+    anyhow::bail!(
+        "{}",
+        credential_missing(provider.credential(), provider.name())
+    )
 }
 
 /// Which provider this run is for.
