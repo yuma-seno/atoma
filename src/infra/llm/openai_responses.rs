@@ -524,7 +524,10 @@ mod tests {
 
         // The two this adapter reads are NOT carried: they go back out of `content` and
         // `tool_calls`, and keeping them here would send each of them twice.
-        assert_eq!(message.content.as_ref().and_then(Value::as_str), Some("done"));
+        assert_eq!(
+            message.content.as_ref().and_then(Value::as_str),
+            Some("done")
+        );
         assert_eq!(message.tool_calls.as_ref().map(Vec::len), Some(1));
     }
 
