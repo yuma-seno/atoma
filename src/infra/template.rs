@@ -291,6 +291,7 @@ mod tests {
                 knows_about: vec!["ReviewAgent".to_string()],
                 mcp_servers: vec![],
                 extra_body: HashMap::default(),
+                extra_headers: HashMap::default(),
             },
             body,
         }
