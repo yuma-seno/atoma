@@ -77,9 +77,25 @@ take no part in auto-detection: a run that talks to GitHub has one anyway, so
 detecting Copilot from them would make every such run ambiguous. Select
 `github-copilot` explicitly to use them.
 
-`ATOMA_APP_NAME` and `ATOMA_APP_URL` are sent to routers that attribute requests to
-an application (OpenRouter reads them as `X-Title` and `HTTP-Referer`). Only the
-providers that read them receive them.
+Routers that attribute requests to an application receive Atoma's own name and
+repository (OpenRouter reads them as `X-Title` and `HTTP-Referer`). They are fixed:
+the question they answer is which application is asking, and that is this one
+whoever deploys it. Who is paying is the API key. Only the providers that read them
+receive them.
+
+## Headers an agent adds
+
+An agent definition's `extra_headers` are sent with every request that agent makes,
+for a setting a provider reads from a header rather than from the body.
+
+```yaml
+extra_headers:
+  X-OrcaRouter-Session-Id: atomaton-engineer
+```
+
+A header Atoma sets itself is refused by `atoma validate` rather than merged, since
+those carry authentication, the shape of the body, the API version, and which model
+catalogue the account may reach.
 
 ## Request timeout and retries
 

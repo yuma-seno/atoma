@@ -84,7 +84,12 @@ async fn main() -> Result<()> {
             let agent_def_port = infra::persistence::agent_def::FileAgentDefAdapter;
             let parsed_agent = AgentDefPort::parse(&agent_def_port, &resolved.agent_def)?;
             let provider_hint = parsed_agent.frontmatter.provider.as_deref();
-            let llm = infra::llm::build_llm_client(provider_hint, &credentials).await?;
+            let llm = infra::llm::build_llm_client(
+                provider_hint,
+                &credentials,
+                &parsed_agent.frontmatter.extra_headers,
+            )
+            .await?;
             let session_port = infra::persistence::session::FileSessionAdapter;
             // Moved in after the client is built: the adapter owns the credentials
             // from here on, and is what routes each one to the single tool server

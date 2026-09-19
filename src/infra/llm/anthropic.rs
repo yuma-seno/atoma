@@ -18,14 +18,23 @@ pub struct AnthropicClient {
     pub(crate) client: reqwest::Client,
     pub(crate) base_url: String,
     pub(crate) api_key: String,
+    /// What the agent declared, applied after this API's own. Never one of those:
+    /// `validate` refuses a definition naming a header Atoma sets.
+    pub(crate) extra_headers: Vec<(String, String)>,
 }
 
 impl AnthropicClient {
-    pub fn new(client: reqwest::Client, base_url: String, api_key: String) -> Self {
+    pub fn new(
+        client: reqwest::Client,
+        base_url: String,
+        api_key: String,
+        extra_headers: Vec<(String, String)>,
+    ) -> Self {
         AnthropicClient {
             client,
             base_url,
             api_key,
+            extra_headers,
         }
     }
 
@@ -43,12 +52,16 @@ impl AnthropicClient {
         tracing::debug!("Request body: {}", serde_json::to_string_pretty(&body)?);
 
         let raw: AnthropicResponse = send_json_with_retry("Anthropic", || {
-            self.client
+            let mut request = self
+                .client
                 .post(&url)
                 .header("x-api-key", &self.api_key)
                 .header("anthropic-version", ANTHROPIC_API_VERSION)
-                .header("Content-Type", "application/json")
-                .json(&body)
+                .header("Content-Type", "application/json");
+            for (name, value) in &self.extra_headers {
+                request = request.header(name.as_str(), value.as_str());
+            }
+            request.json(&body)
         })
         .await?;
 

@@ -19,9 +19,6 @@ static ENVIRONMENT_HELP: LazyLock<String> = LazyLock::new(|| {
 {providers}
   ATOMA_PROVIDER         (optional)   Name one of the providers above instead of
                                        letting the credential decide.
-  ATOMA_APP_NAME         (optional)   Application name sent to routers that attribute
-                                       requests (OpenRouter). Default: atoma
-  ATOMA_APP_URL          (optional)   Application URL sent with it.
   ATOMA_LLM_TIMEOUT      (optional)   Per-request LLM timeout in seconds (default: 300)
   ATOMA_HOOK_TIMEOUT     (optional)   Hook script timeout in seconds (default: 30)
   ATOMA_MCP_TIMEOUT      (optional)   MCP tool call timeout in seconds (default: 60)

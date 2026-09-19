@@ -53,6 +53,18 @@ pub struct AgentDef {
     /// The reserved fields `model` and `messages` cannot be overridden.
     #[serde(default)]
     pub extra_body: HashMap<String, Value>,
+    /// Headers sent with every request this agent makes.
+    ///
+    /// For a setting a provider reads from a header rather than from the body --
+    /// OrcaRouter's `X-OrcaRouter-Session-Id`, which keeps one conversation on one
+    /// deployment so its prompt cache stays warm, is the case this was added for.
+    ///
+    /// A header Atoma sets itself is refused by `validate` rather than merged: those
+    /// carry authentication, the shape of the body, the API version, and which model
+    /// catalogue the account may reach. Overriding one does not read as a mistake
+    /// afterwards -- it reads as the provider behaving strangely.
+    #[serde(default)]
+    pub extra_headers: HashMap<String, String>,
 }
 
 /// A fully parsed agent definition: frontmatter + optional body.

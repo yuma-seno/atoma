@@ -6,6 +6,7 @@ pub(crate) mod shared;
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
+use std::collections::HashMap;
 use std::time::Duration;
 
 use crate::domain::ports::LlmPort;
@@ -96,6 +97,7 @@ pub trait Provider: Sync + std::fmt::Debug {
         &self,
         http: reqwest::Client,
         credentials: &Credentials,
+        agent_headers: &HashMap<String, String>,
     ) -> Result<Box<dyn LlmPort + Send + Sync>>;
 
     /// Every credential name this provider might read, not only the one it advertises.
@@ -167,12 +169,13 @@ impl Provider for ChatCompletions {
         &self,
         http: reqwest::Client,
         credentials: &Credentials,
+        agent_headers: &HashMap<String, String>,
     ) -> Result<Box<dyn LlmPort + Send + Sync>> {
         Ok(Box::new(OpenAIClient::new(
             http,
             self.base_url(),
             self.api_key(credentials)?,
-            Provider::headers(self),
+            merged_headers(self, agent_headers),
         )))
     }
 }
@@ -218,12 +221,13 @@ impl Provider for Responses {
         &self,
         http: reqwest::Client,
         credentials: &Credentials,
+        agent_headers: &HashMap<String, String>,
     ) -> Result<Box<dyn LlmPort + Send + Sync>> {
         Ok(Box::new(OpenAIResponsesClient::new(
             http,
             self.base_url(),
             self.api_key(credentials)?,
-            Provider::headers(self),
+            merged_headers(self, agent_headers),
         )))
     }
 }
@@ -254,11 +258,13 @@ impl Provider for Anthropic {
         &self,
         http: reqwest::Client,
         credentials: &Credentials,
+        agent_headers: &HashMap<String, String>,
     ) -> Result<Box<dyn LlmPort + Send + Sync>> {
         Ok(Box::new(AnthropicClient::new(
             http,
             self.base_url(),
             self.api_key(credentials)?,
+            merged_headers(self, agent_headers),
         )))
     }
 }
@@ -348,15 +354,27 @@ impl Provider for GitHubCopilot {
             )
     }
 
+    /// On the trait, so the reserved list can see them. They were built inside
+    /// `connect`, where nothing could enumerate them -- and one of them decides
+    /// which models the account may reach.
+    fn headers(&self) -> Vec<(String, String)> {
+        copilot_headers()
+    }
+
     async fn connect(
         &self,
         http: reqwest::Client,
         credentials: &Credentials,
+        agent_headers: &HashMap<String, String>,
     ) -> Result<Box<dyn LlmPort + Send + Sync>> {
-        let headers = copilot_headers();
         Ok(Box::new(
-            CopilotClient::connect(http, self.base_url(), headers, self.api_key(credentials)?)
-                .await?,
+            CopilotClient::connect(
+                http,
+                self.base_url(),
+                merged_headers(self, agent_headers),
+                self.api_key(credentials)?,
+            )
+            .await?,
         ))
     }
 }
@@ -368,14 +386,20 @@ fn no_headers() -> Vec<(String, String)> {
 
 /// What this application calls itself, for a router that attributes requests.
 ///
-/// `ATOMA_APP_*`, not `OPENAI_APP_*` as before: the value identifies this application,
-/// and naming it after one vendor is what made it look like OpenAI's business.
+/// From the package rather than from the environment. `ATOMA_APP_NAME` and
+/// `ATOMA_APP_URL` used to override it -- the last of the settings that were all
+/// read as environment variables in the first version, and the one the refactor that
+/// moved endpoint and credential into the provider table left behind. Nothing set
+/// them: the delivery template that runs this has no such configuration anywhere.
+///
+/// Fixed is also the more meaningful answer. The question is which application is
+/// asking, and that is this one whoever deploys it; who is paying is the API key.
+/// An override only let one application arrive under several names.
 fn app_identity() -> (String, String) {
-    let name =
-        std::env::var("ATOMA_APP_NAME").unwrap_or_else(|_| env!("CARGO_PKG_NAME").to_string());
-    let url =
-        std::env::var("ATOMA_APP_URL").unwrap_or_else(|_| env!("CARGO_PKG_REPOSITORY").to_string());
-    (name, url)
+    (
+        env!("CARGO_PKG_NAME").to_string(),
+        env!("CARGO_PKG_REPOSITORY").to_string(),
+    )
 }
 
 /// The two headers a router reads to attribute a request to an application.
@@ -399,6 +423,59 @@ fn openrouter_attribution() -> Vec<(String, String)> {
     let mut headers = router_attribution();
     headers.push(("X-OpenRouter-Title".to_string(), name));
     headers
+}
+
+/// A provider's own headers, with the agent's added after them.
+///
+/// The agent's cannot displace a provider's: `validate` refuses a definition that
+/// names one, so anything left here is a name Atoma does not set.
+fn merged_headers(
+    provider: &dyn Provider,
+    agent_headers: &HashMap<String, String>,
+) -> Vec<(String, String)> {
+    let mut headers = provider.headers();
+    headers.extend(
+        agent_headers
+            .iter()
+            .map(|(name, value)| (name.clone(), value.clone())),
+    );
+    headers
+}
+
+/// The headers Atoma sets on a completion request itself, whatever the provider.
+///
+/// Authentication, the shape of the body, and the version of the API being spoken.
+/// Each adapter writes these inline at the call, which is where they belong and also
+/// where nothing can enumerate them -- so they are named once here, for the check
+/// that keeps an agent from setting one.
+const ALWAYS_SET_HEADERS: [&str; 4] = [
+    "authorization",
+    "content-type",
+    "x-api-key",
+    "anthropic-version",
+];
+
+/// Every header name an agent may not set, lowercased.
+///
+/// Built from the providers rather than written out a second time. `extra_body`'s
+/// check reads `RESERVED_KEYS` from the adapters for the same reason: the copy that
+/// was written by hand fell behind, and `validate` passed a definition two of the
+/// three dialects quietly ignored.
+///
+/// What a provider sets is as load-bearing as authentication even where it looks
+/// decorative. Copilot's `Copilot-Integration-Id` selects an API contract and with
+/// it which models the account may reach -- an agent overriding it would not see a
+/// rejected setting, it would see models disappear.
+pub fn reserved_header_names() -> Vec<String> {
+    let mut names: Vec<String> = ALWAYS_SET_HEADERS.iter().map(|n| n.to_string()).collect();
+    for provider in PROVIDERS {
+        for (name, _) in provider.headers() {
+            names.push(name.to_lowercase());
+        }
+    }
+    names.sort();
+    names.dedup();
+    names
 }
 
 /// Every provider Atoma speaks to. One line each.
@@ -696,6 +773,7 @@ fn detect<'a>(
 pub async fn build_llm_client(
     provider_hint: Option<&str>,
     credentials: &Credentials,
+    agent_headers: &HashMap<String, String>,
 ) -> Result<Box<dyn LlmPort + Send + Sync>> {
     let raw_timeout = std::env::var("ATOMA_LLM_TIMEOUT").ok();
     let timeout_secs = resolve_timeout_secs(raw_timeout.as_deref());
@@ -724,12 +802,56 @@ pub async fn build_llm_client(
         provider.base_url()
     );
 
-    provider.connect(http, credentials).await
+    provider.connect(http, credentials, agent_headers).await
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The list is built from the providers, so a provider that gains a header is
+    /// covered without anyone remembering. These four are the fixed ones no provider
+    /// declares, and Copilot's is the one that used to be invisible to this because
+    /// it was assembled inside `connect`.
+    #[test]
+    fn every_header_atoma_sets_is_reserved() {
+        let reserved = reserved_header_names();
+        for name in [
+            "authorization",
+            "content-type",
+            "x-api-key",
+            "anthropic-version",
+            "x-title",
+            "http-referer",
+            "x-openrouter-title",
+            "copilot-integration-id",
+        ] {
+            assert!(reserved.iter().any(|r| r == name), "{name} is not reserved");
+        }
+    }
+
+    /// Lowercased, because a header's name is not case-sensitive and the check that
+    /// reads this compares against a lowercased name.
+    #[test]
+    fn the_reserved_names_are_lowercase_and_unique() {
+        let reserved = reserved_header_names();
+        for name in &reserved {
+            assert_eq!(name, &name.to_lowercase(), "{name} is not lowercased");
+        }
+        let mut sorted = reserved.clone();
+        sorted.dedup();
+        assert_eq!(sorted.len(), reserved.len(), "a name is listed twice");
+    }
+
+    /// The identity is the package's, not an environment variable's. Nothing set the
+    /// variables that used to override it, and one application arriving under several
+    /// names is not something this needs to support.
+    #[test]
+    fn the_application_names_itself_after_the_package() {
+        let (name, url) = app_identity();
+        assert_eq!(name, env!("CARGO_PKG_NAME"));
+        assert_eq!(url, env!("CARGO_PKG_REPOSITORY"));
+    }
 
     #[test]
     fn timeout_defaults_when_unset() {

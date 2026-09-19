@@ -93,6 +93,23 @@ pub fn validate(
             }
         }
 
+        // The same rule for headers, and from the same source: the providers
+        // themselves, not a list written here a second time.
+        //
+        // Refused rather than dropped. A header Atoma sets carries authentication, the
+        // shape of the body, the API version, or -- for Copilot -- which models the
+        // account may reach. An agent that quietly lost one of those would not see a
+        // rejected setting; it would see the provider behaving strangely.
+        let reserved = crate::infra::llm::reserved_header_names();
+        for name in agent.extra_headers.keys() {
+            if reserved.iter().any(|r| r == &name.to_lowercase()) {
+                errors.push(format!(
+                    "extra_headers contains '{}', which Atoma sets itself",
+                    name
+                ));
+            }
+        }
+
         // The name only. A provider that does not exist is a defect in the definition;
         // a credential that is not set is not, and a validation run has none -- so
         // conflating them would fail every run of this command.
@@ -542,6 +559,71 @@ mod tests {
                 "{key} should be refused"
             );
         }
+    }
+
+    /// Every header Atoma sets, whoever sets it -- the fixed ones each adapter writes
+    /// at the call, and every provider's own. Refused rather than dropped: an agent
+    /// that lost one would see the provider behaving strangely rather than a rejected
+    /// setting, and for Copilot's `Copilot-Integration-Id` it would see models
+    /// disappear from the catalogue.
+    #[test]
+    fn a_header_atoma_sets_itself_cannot_be_set_by_an_agent() {
+        for name in crate::infra::llm::reserved_header_names() {
+            let dir = tempfile::tempdir().unwrap();
+            let path = write_agent(
+                dir.path(),
+                "solo",
+                &format!("extra_headers:\n  {name}: something\n"),
+            );
+            assert!(
+                validate(
+                    path,
+                    None,
+                    None,
+                    &FileAgentDefAdapter,
+                    &FileToolDefAdapter::default()
+                )
+                .is_err(),
+                "{name} should be refused"
+            );
+        }
+    }
+
+    /// Case is not part of a header's identity, and a definition writing one in a
+    /// different case is making the same mistake.
+    #[test]
+    fn a_reserved_header_is_refused_whatever_case_it_is_written_in() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_agent(dir.path(), "solo", "extra_headers:\n  AUTHORIZATION: bearer x\n");
+        assert!(
+            validate(
+                path,
+                None,
+                None,
+                &FileAgentDefAdapter,
+                &FileToolDefAdapter::default()
+            )
+            .is_err()
+        );
+    }
+
+    /// The case the field exists for: a name Atoma does not set goes through.
+    #[test]
+    fn a_header_atoma_does_not_set_is_accepted() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_agent(
+            dir.path(),
+            "solo",
+            "extra_headers:\n  X-OrcaRouter-Session-Id: atomaton-solo\n",
+        );
+        assert!(validate(
+            path,
+            None,
+            None,
+            &FileAgentDefAdapter,
+            &FileToolDefAdapter::default()
+        )
+        .is_ok());
     }
 
     #[test]
