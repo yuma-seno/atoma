@@ -594,17 +594,19 @@ mod tests {
     #[test]
     fn a_reserved_header_is_refused_whatever_case_it_is_written_in() {
         let dir = tempfile::tempdir().unwrap();
-        let path = write_agent(dir.path(), "solo", "extra_headers:\n  AUTHORIZATION: bearer x\n");
-        assert!(
-            validate(
-                path,
-                None,
-                None,
-                &FileAgentDefAdapter,
-                &FileToolDefAdapter::default()
-            )
-            .is_err()
+        let path = write_agent(
+            dir.path(),
+            "solo",
+            "extra_headers:\n  AUTHORIZATION: bearer x\n",
         );
+        assert!(validate(
+            path,
+            None,
+            None,
+            &FileAgentDefAdapter,
+            &FileToolDefAdapter::default()
+        )
+        .is_err());
     }
 
     /// The case the field exists for: a name Atoma does not set goes through.
