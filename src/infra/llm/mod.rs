@@ -1165,9 +1165,26 @@ mod tests {
     fn attribution_headers_reach_only_the_providers_that_asked() {
         assert!(no_headers().is_empty());
 
-        for name in ["openai", "openai-responses", "anthropic", "github-copilot"] {
+        for name in ["openai", "openai-responses", "anthropic"] {
             let provider = by_name(PROVIDERS, name).expect(name);
             assert!(provider.headers().is_empty(), "{name}");
+        }
+
+        // Copilot declares three of its own. They are not attribution -- one of them
+        // selects which models the account may reach -- and they are on the trait so
+        // that the reserved list can see them. Before that they were assembled inside
+        // its `connect`, where this assertion read as "it sends none".
+        let copilot = by_name(PROVIDERS, "github-copilot").expect("github-copilot");
+        let copilot_names: Vec<String> = copilot.headers().into_iter().map(|(n, _)| n).collect();
+        assert!(
+            copilot_names.contains(&"Copilot-Integration-Id".to_string()),
+            "{copilot_names:?}"
+        );
+        for attribution in ["X-Title", "HTTP-Referer", "X-OpenRouter-Title"] {
+            assert!(
+                !copilot_names.iter().any(|n| n == attribution),
+                "{attribution} reached a provider that did not ask for it"
+            );
         }
 
         let names: Vec<String> = openrouter_attribution()
