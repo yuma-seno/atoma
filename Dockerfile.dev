@@ -1,0 +1,26 @@
+FROM rust:1-slim
+
+WORKDIR /app
+
+# ── Layer 1: dependency cache ──────────────────────────────────────────────
+# Copy only manifests and build with a stub binary to pre-compile all
+# dependencies. This layer is invalidated only when Cargo.toml / Cargo.lock
+# change, keeping iterative rebuilds fast.
+COPY Cargo.toml Cargo.lock ./
+RUN mkdir -p src && echo 'fn main() {}' > src/main.rs && \
+    cargo build --release && \
+    # Also compile dev-dependencies (e.g. tempfile) so they are cached in the image
+    cargo test --release --no-run && \
+    # Remove the stub artifact so cargo rebuilds the real binary in the next layer
+    rm -f target/release/atoma target/release/deps/atoma-* target/release/deps/atoma_*
+
+# ── Layer 2: real source ───────────────────────────────────────────────────
+COPY src ./src
+RUN cargo build --release --locked && \
+    cargo test --release --no-run --locked && \
+    # Ensure target directory is writable at runtime (overlayfs copy-up compatibility)
+    chmod -R a+rwX /app/target
+
+# Default: run the unit test suite against the baked-in source.
+# Override the command to use this image for other purposes (e.g. `bash`).
+CMD ["cargo", "test", "--release", "--locked"]
