@@ -1,0 +1,6 @@
+target/
+.git/
+*.tmp
+output.txt
+prompt.txt
+.bash_history

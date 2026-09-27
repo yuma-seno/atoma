@@ -1,0 +1,393 @@
+use anyhow::{Context, Result};
+use serde_json::Value;
+use std::time::Duration;
+
+use crate::domain::tool::Hooks;
+
+/// How long a `before_tool` hook may take before its tool is refused.
+const DEFAULT_HOOK_TIMEOUT_SECS: u64 = 30;
+
+fn hook_timeout() -> Duration {
+    crate::infra::timeouts::from_env("ATOMA_HOOK_TIMEOUT", DEFAULT_HOOK_TIMEOUT_SECS)
+}
+
+/// Returns `true` if `pattern` matches `value`.
+///
+/// Supports a single trailing `*` wildcard (e.g. `"filesystem__*"`).
+pub fn glob_matches(pattern: &str, value: &str) -> bool {
+    if let Some(prefix) = pattern.strip_suffix('*') {
+        value.starts_with(prefix)
+    } else {
+        pattern == value
+    }
+}
+
+/// Validate whether `tool_name` is permitted by the hook configuration.
+///
+/// Order of checks:
+/// 1. Denylist — any match → blocked immediately.
+/// 2. Allowlist — if non-empty and no match → blocked.
+pub fn check_access(hooks: &Hooks, tool_name: &str) -> Result<()> {
+    if let Some(message) = access_denial_reason(hooks, tool_name) {
+        tracing::warn!("{}", message);
+        anyhow::bail!(message);
+    }
+
+    Ok(())
+}
+
+/// Return the static access-control reason for hiding or rejecting a tool.
+/// Dynamic `before_tool` hooks are intentionally not evaluated here.
+pub fn access_denial_reason(hooks: &Hooks, tool_name: &str) -> Option<String> {
+    if let Some(pattern) = hooks
+        .tool_denylist
+        .iter()
+        .find(|p| glob_matches(p, tool_name))
+    {
+        return Some(format!(
+            "Tool '{}' is blocked by denylist pattern '{}'",
+            tool_name, pattern
+        ));
+    }
+
+    if !hooks.tool_allowlist.is_empty()
+        && !hooks
+            .tool_allowlist
+            .iter()
+            .any(|p| glob_matches(p, tool_name))
+    {
+        return Some(format!(
+            "Tool '{}' is not permitted by the allowlist",
+            tool_name
+        ));
+    }
+
+    None
+}
+
+/// The patterns in a server's lists that match none of the tools it advertises.
+///
+/// A pattern matching nothing is a guard that is not guarding, and nothing says so.
+/// `filesystem__*` on a server that sets `unprefixed: true` blocks exactly nothing
+/// while reading, in the file, as though it blocks everything.
+///
+/// The same defect with the sign flipped is already measured here: an allowlist
+/// written as five names refused 64 calls that were all reads, because the names
+/// nobody thought of on the day were not in it. One list said too little, this one
+/// says nothing at all, and neither announced itself.
+///
+/// Both lists together, because a dead pattern is dead whichever list it is in.
+pub fn unmatched_patterns(hooks: &Hooks, advertised: &[String]) -> Vec<String> {
+    hooks
+        .tool_denylist
+        .iter()
+        .chain(hooks.tool_allowlist.iter())
+        .filter(|pattern| !advertised.iter().any(|tool| glob_matches(pattern, tool)))
+        .cloned()
+        .collect()
+}
+
+/// Say what both lists together will do, at registration time.
+///
+/// This used to REFUSE that configuration as "ambiguous", and it is not: `check_access`
+/// above documents the precedence, `domain::tool::Hooks` documents it on the field
+/// ("Checked before the allowlist"), and a test in this file pins it. Three places
+/// describing behaviour, and a fourth calling the same configuration fatal — so a reader
+/// had no way to know which was true, and the tested behaviour was unreachable.
+///
+/// The refusal was also badly placed: `McpRegistry` spawns every server and filters its
+/// tools before reaching it, so the fatal error arrived after the subprocesses existed,
+/// and `atoma validate` never called it at all — a tools file it would have rejected
+/// passed validation clean.
+///
+/// So it warns instead. Both lists is unusual enough to mention and well-defined enough
+/// to allow.
+pub fn describe_hooks(name: &str, hooks: &Hooks) {
+    if !hooks.tool_allowlist.is_empty() && !hooks.tool_denylist.is_empty() {
+        tracing::warn!(
+            "MCP server '{}' sets both tool_allowlist and tool_denylist. The denylist is \
+             checked first, so a tool matching both is blocked.",
+            name
+        );
+    }
+}
+
+/// Invoke the `before_tool` hook script.
+///
+/// The script receives JSON on stdin and must respond with
+/// `{"allow": true}` or `{"allow": false, "reason": "..."}`.
+/// Non-zero exit or invalid JSON is treated as a deny (fail-closed).
+pub async fn run_before_hook(script: &str, payload: Value) -> Result<()> {
+    use tokio::io::AsyncWriteExt;
+
+    let input = serde_json::to_vec(&payload)?;
+
+    let mut child = tokio::process::Command::new(script)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::inherit())
+        .spawn()
+        .with_context(|| format!("Failed to spawn before_tool hook: {}", script))?;
+
+    let mut stdin = child
+        .stdin
+        .take()
+        .context("Failed to get before_tool hook stdin")?;
+    stdin.write_all(&input).await?;
+    drop(stdin);
+
+    let timeout = hook_timeout();
+    let output = tokio::time::timeout(timeout, child.wait_with_output())
+        .await
+        .with_context(|| {
+            format!(
+                "before_tool hook '{}' timed out after {}s",
+                script,
+                timeout.as_secs()
+            )
+        })?
+        .with_context(|| format!("Failed to wait for before_tool hook: {}", script))?;
+
+    if !output.status.success() {
+        let msg = format!(
+            "before_tool hook '{}' exited with status {}",
+            script, output.status
+        );
+        tracing::warn!("{}", msg);
+        anyhow::bail!("{}", msg);
+    }
+
+    let response: Value = serde_json::from_slice(&output.stdout)
+        .with_context(|| format!("before_tool hook '{}' returned invalid JSON", script))?;
+
+    let allowed = response
+        .get("allow")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    if !allowed {
+        let reason = response
+            .get("reason")
+            .and_then(|v| v.as_str())
+            .unwrap_or("hook denied the request");
+        let msg = format!("Tool blocked by hook '{}': {}", script, reason);
+        tracing::warn!("{}", msg);
+        anyhow::bail!("{}", msg);
+    }
+
+    tracing::debug!("before_tool hook '{}' allowed the call", script);
+    Ok(())
+}
+
+/// What an after-hook had to say, if anything.
+///
+/// `None` covers every way of saying nothing: no output, output that is not JSON, JSON
+/// without a `notice`, a crash, a timeout. An after-hook reports on a call that already
+/// happened, so the failure to report must not become a failure of the call -- which
+/// is the opposite of the before-hook's fail-closed rule, and for the opposite reason.
+pub async fn run_after_hook(script: &str, payload: Value) -> Option<String> {
+    match run_after_hook_inner(script, payload).await {
+        Ok(notice) => notice,
+        Err(e) => {
+            tracing::warn!("after_tool hook '{}' error: {}", script, e);
+            None
+        }
+    }
+}
+
+async fn run_after_hook_inner(script: &str, payload: Value) -> Result<Option<String>> {
+    use tokio::io::AsyncWriteExt;
+
+    let input = serde_json::to_vec(&payload)?;
+
+    let mut child = tokio::process::Command::new(script)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::inherit())
+        .spawn()
+        .with_context(|| format!("Failed to spawn after_tool hook: {}", script))?;
+
+    let mut stdin = child
+        .stdin
+        .take()
+        .context("Failed to get after_tool hook stdin")?;
+    stdin.write_all(&input).await?;
+    drop(stdin);
+
+    let timeout = hook_timeout();
+    let output = tokio::time::timeout(timeout, child.wait_with_output())
+        .await
+        .with_context(|| {
+            format!(
+                "after_tool hook '{}' timed out after {}s",
+                script,
+                timeout.as_secs()
+            )
+        })?
+        .with_context(|| format!("Failed to wait for after_tool hook: {}", script))?;
+
+    if !output.status.success() {
+        tracing::warn!(
+            "after_tool hook '{}' exited with status {}",
+            script,
+            output.status
+        );
+    }
+
+    // Anything unreadable is nothing to say, not an error to raise: see the doc
+    // comment. A hook that wants to report a problem with itself has stderr, which
+    // is inherited and lands in the run log.
+    let parsed: Value = match serde_json::from_slice(&output.stdout) {
+        Ok(value) => value,
+        Err(_) => return Ok(None),
+    };
+    let notice = parsed
+        .get("notice")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+
+    Ok(notice)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::domain::tool::Hooks;
+
+    fn lists(allow: &[&str], deny: &[&str]) -> Hooks {
+        Hooks {
+            tool_allowlist: allow.iter().map(|s| s.to_string()).collect(),
+            tool_denylist: deny.iter().map(|s| s.to_string()).collect(),
+            ..Default::default()
+        }
+    }
+
+    /// The case `unprefixed` creates: the pattern was right until the names moved.
+    ///
+    /// `filesystem__*` blocked everything on a prefixed server. The same line on a
+    /// server that gives its tools their own names blocks nothing, and reads exactly
+    /// as it did before. Nothing else in the run will mention it.
+    #[test]
+    fn a_pattern_that_matches_no_tool_is_reported() {
+        let advertised = vec!["read".to_string(), "grep".to_string()];
+        let hooks = lists(&[], &["filesystem__*"]);
+        assert_eq!(
+            unmatched_patterns(&hooks, &advertised),
+            vec!["filesystem__*"]
+        );
+    }
+
+    /// A pattern that matches is not reported, even when the filter then removes the
+    /// only tool it matched. Removing a tool is the pattern working.
+    #[test]
+    fn a_pattern_that_matches_is_not_reported() {
+        let advertised = vec!["read".to_string(), "directory_tree".to_string()];
+        assert!(unmatched_patterns(&lists(&[], &["directory_tree"]), &advertised).is_empty());
+        assert!(unmatched_patterns(&lists(&["read"], &[]), &advertised).is_empty());
+    }
+
+    /// Both lists, because a dead pattern is dead whichever one it is in. The measured
+    /// failure was an allowlist: five names on a server whose whole purpose is reading,
+    /// which refused 64 calls that were all reads.
+    #[test]
+    fn both_lists_are_checked_and_every_dead_pattern_is_named() {
+        let advertised = vec!["read".to_string()];
+        let hooks = lists(&["read", "read_text_file"], &["write_*"]);
+        let dead = unmatched_patterns(&hooks, &advertised);
+        assert!(dead.contains(&"read_text_file".to_string()), "{dead:?}");
+        assert!(dead.contains(&"write_*".to_string()), "{dead:?}");
+        assert_eq!(dead.len(), 2, "{dead:?}");
+    }
+
+    /// A server that declares no list has no dead pattern, rather than every tool.
+    #[test]
+    fn no_lists_means_nothing_to_report() {
+        assert!(unmatched_patterns(&lists(&[], &[]), &["read".to_string()]).is_empty());
+    }
+
+    #[test]
+    fn test_glob_matches_exact() {
+        assert!(glob_matches("read_file", "read_file"));
+    }
+
+    #[test]
+    fn test_glob_matches_wildcard_suffix() {
+        assert!(glob_matches("read_*", "read_file"));
+        assert!(glob_matches("read_*", "read_anything"));
+        assert!(!glob_matches("read_*", "write_file"));
+    }
+
+    #[test]
+    fn test_glob_matches_wildcard_all() {
+        assert!(glob_matches("*", "any_tool"));
+    }
+
+    #[test]
+    fn test_glob_no_match() {
+        assert!(!glob_matches("write_file", "read_file"));
+    }
+
+    #[test]
+    fn test_check_access_empty_hooks_allows_all() {
+        let hooks = Hooks {
+            tool_allowlist: vec![],
+            tool_denylist: vec![],
+            before_tool: vec![],
+            after_tool: vec![],
+        };
+        assert!(check_access(&hooks, "any_tool").is_ok());
+    }
+
+    #[test]
+    fn test_check_access_denylist_blocks() {
+        let hooks = Hooks {
+            tool_allowlist: vec![],
+            tool_denylist: vec!["dangerous_*".to_string()],
+            before_tool: vec![],
+            after_tool: vec![],
+        };
+        assert!(check_access(&hooks, "dangerous_rm").is_err());
+        assert!(check_access(&hooks, "safe_read").is_ok());
+    }
+
+    #[test]
+    fn test_check_access_allowlist_gates() {
+        let hooks = Hooks {
+            tool_allowlist: vec!["read_*".to_string()],
+            tool_denylist: vec![],
+            before_tool: vec![],
+            after_tool: vec![],
+        };
+        assert!(check_access(&hooks, "read_file").is_ok());
+        assert!(check_access(&hooks, "write_file").is_err());
+    }
+
+    #[test]
+    /// The behaviour `validate_hooks` used to make unreachable by refusing the very
+    /// configuration this exercises.
+    #[test]
+    fn both_lists_together_are_allowed_and_described() {
+        let hooks = Hooks {
+            tool_allowlist: vec!["a__*".to_string()],
+            tool_denylist: vec!["a__danger".to_string()],
+            ..Default::default()
+        };
+        // Nothing to assert but that it does not refuse: the warning is for a person.
+        describe_hooks("a", &hooks);
+        assert!(check_access(&hooks, "a__safe").is_ok());
+        assert!(check_access(&hooks, "a__danger").is_err());
+    }
+
+    #[test]
+    fn test_check_access_denylist_takes_precedence_over_allowlist() {
+        let hooks = Hooks {
+            tool_allowlist: vec!["*".to_string()],
+            tool_denylist: vec!["rm_*".to_string()],
+            before_tool: vec![],
+            after_tool: vec![],
+        };
+        assert!(check_access(&hooks, "rm_all").is_err());
+        assert!(check_access(&hooks, "read_file").is_ok());
+    }
+}

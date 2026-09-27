@@ -1,0 +1,41 @@
+name: CI
+
+# Trigger: a pull request against main, and nothing else.
+#
+# It used to run on `push: branches: ['**']` as well, and that was load-bearing for
+# a reason that no longer exists. `release.yml` fired on `workflow_run` -- "after CI
+# succeeds on main" -- so CI had to run on main for a release to happen at all, and
+# a push to main was the only way to get one. Main now takes pull requests only (see
+# `.github/rulesets/main.json`), so nothing is ever pushed to it directly, and the
+# `push` trigger could only ever fire for a branch nobody was waiting on.
+#
+# What it cost while it was there: every push to a feature branch ran the whole
+# suite a second time, beside the `pull_request` run for the same commits. Two runs
+# of one thing, and the one on `push` was the one whose result nobody read.
+#
+# The release is now triggered by the tag it creates, not by this workflow -- see
+# `release.yml`. So this file has one job again: say whether a pull request is safe
+# to merge.
+on:
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check format
+        run: cargo fmt --check
+
+      - name: Clippy
+        run: cargo clippy -- -D warnings
+
+      - name: Test
+        run: cargo test --locked
