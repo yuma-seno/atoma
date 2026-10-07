@@ -10,6 +10,52 @@ use crate::domain::ports::{DeltaHandler, FinishReason, LlmChoice, LlmResponse, L
 use crate::domain::session::{Message, ToolCall, ToolCallFunction};
 
 const MAX_HTTP_ATTEMPTS: u8 = 3;
+
+/// How many times a turn whose answer stopped arriving is asked for again.
+///
+/// The retry that matters is the one [`send_sse_with_retry`] refuses to make. Once the
+/// stream has started, a transport failure ends the *request* — but it does not
+/// invalidate the *turn*, and the two were being treated as the same thing: the run
+/// failed, and 14 minutes of an agent's work went with it.
+///
+/// Nothing has been decided when that happens. Deltas reach the repetition detector
+/// and nothing else; tool calls are executed from the assembled response, which never
+/// assembled, so no tool ran. Re-asking therefore cannot duplicate a side effect —
+/// which is the one thing that made re-sending a half-read stream unsafe to do inside
+/// the provider layer.
+///
+/// Bounded, unlike the `--loop-retries` re-ask: a loop is a property of one sample and
+/// can be re-sampled as long as the clock allows, while a connection that dies this way
+/// three times running is a provider or network condition that another try will not
+/// change.
+pub(crate) const MAX_STREAM_RETRIES: u8 = 3;
+
+/// A completion that stopped arriving before the provider said it was finished.
+///
+/// Its own type so the runner can tell it apart without matching on a message, the
+/// same reason [`crate::domain::repetition::Repetition`] is one. What it carries is
+/// the part that DID arrive: already paid for, and the thing the model continues from
+/// rather than starting the answer over.
+#[derive(Debug)]
+pub struct StreamInterrupted {
+    /// The answer text received before the connection failed. May be empty.
+    pub received: String,
+    /// What actually failed, for the note and for the log.
+    pub cause: String,
+}
+
+impl std::fmt::Display for StreamInterrupted {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "the response stopped arriving before it finished: {}",
+            self.cause
+        )
+    }
+}
+
+impl std::error::Error for StreamInterrupted {}
+
 const RETRY_BASE_DELAY_MS: u64 = 1_000;
 const RETRY_DELAY_FACTOR: u64 = 4;
 
@@ -536,6 +582,17 @@ impl StreamAccumulator {
         added
     }
 
+    /// The answer text received so far, taken out for an interrupted stream.
+    ///
+    /// The same text [`Self::into_response`] would have put in an assistant message, so
+    /// a caller that continues a cut-off answer continues the real thing rather than a
+    /// reconstruction of it. Tool-call fragments are deliberately not included: a half
+    /// assembled call is not a call, and the runner discards those anyway — only the
+    /// text is carried into the note that asks for the rest.
+    fn into_received_text(self) -> String {
+        self.text
+    }
+
     /// The reply the non-streaming path would have produced.
     fn into_response(self, request_id: Option<String>) -> LlmResponse {
         let tool_calls: Vec<ToolCall> = self
@@ -680,7 +737,7 @@ pub(crate) async fn send_streaming_with_retry(
 ) -> Result<LlmResponse> {
     let mut accumulator = StreamAccumulator::default();
 
-    let request_id = send_sse_with_retry(label, build_request, |payload| {
+    let outcome = send_sse_with_retry(label, build_request, |payload| {
         let chunk: Value = serde_json::from_str(payload)
             .with_context(|| format!("Failed to parse a {label} stream chunk: {payload}"))?;
 
@@ -700,9 +757,45 @@ pub(crate) async fn send_streaming_with_retry(
         }
         on_delta(&added)
     })
-    .await?;
+    .await;
+
+    let request_id = match outcome {
+        Ok(request_id) => request_id,
+        Err(e) => {
+            // A transport failure that arrived after the stream had started is handed
+            // back as its own type, with the part already received, so the caller can
+            // re-ask the TURN rather than the REQUEST. Retrying here is not enough: the
+            // request is rebuilt from the session, which does not hold the half-written
+            // answer (see [`StreamInterrupted`]).
+            //
+            // Everything else is passed through unchanged — a repetition abort, a
+            // provider error delivered mid-stream, a malformed chunk, a failed
+            // connection. None of those is the same question as "the answer stopped
+            // arriving", and only the last one is worth asking again.
+            if !is_stream_interrupted(&e) {
+                return Err(e);
+            }
+            return Err(anyhow::Error::new(StreamInterrupted {
+                received: accumulator.into_received_text(),
+                cause: e.to_string(),
+            }));
+        }
+    };
 
     Ok(accumulator.into_response(request_id))
+}
+
+/// Whether this is a stream that stopped arriving, rather than an answer.
+///
+/// Matched on the one context string [`read_sse`] adds, which is the only place a
+/// response body is read a chunk at a time. A repetition abort does not come from
+/// there (it comes back through `abort`, and its own type is looked for first), and
+/// neither does a non-2xx status, a failed connection, or a provider error delivered
+/// mid-stream as a chunk.
+fn is_stream_interrupted(error: &anyhow::Error) -> bool {
+    error
+        .chain()
+        .any(|cause| cause.to_string().contains("Failed to read a chunk"))
 }
 
 /// Text of the assistant message bridging a tool result to its pictures.
@@ -1414,7 +1507,7 @@ mod tests {
     }
 
     /// A usage object nothing here fully reads keeps what it could not read.
-
+    ///
     /// Without this, a provider that spells the cache something new and a provider
     /// that has no cache are the same silence -- and the answer was being guessed at
     /// by shipping a field name and waiting to see whether a number appeared.
@@ -1987,6 +2080,78 @@ mod streaming_tests {
         assert!(
             format!("{error:#}").contains("upstream overloaded"),
             "got: {error:#}"
+        );
+    }
+
+    /// A stream that stops arriving is handed back as its own case, carrying what did
+    /// arrive, rather than as a failed request.
+    ///
+    /// This is the whole point of the type. Until it existed, the run ended here: the
+    /// request had started, so `send_sse_with_retry` refused to retry, and the error
+    /// went all the way up as "Run failed". What the caller needs instead is to know
+    /// that the turn is still answerable and what the model already said, so it can ask
+    /// for the rest.
+    ///
+    /// The partial text matters as much as the classification: it was billed for, and
+    /// a model asked to continue from it does better than one asked to start over.
+    #[tokio::test]
+    async fn a_stream_that_stops_arriving_reports_what_it_received() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+
+        tokio::spawn(async move {
+            let Ok((mut stream, _)) = listener.accept().await else {
+                return;
+            };
+            let mut request = vec![0; 8192];
+            let _ = stream.read(&mut request).await;
+            // Content-Length promises more than will ever be sent, and the connection
+            // closes at the end. The deltas below are delivered before that, so the
+            // accumulator is not empty when the read fails -- which is the case a real
+            // dropped connection produces.
+            let body = "data: {\"choices\":[{\"delta\":{\"content\":\"half an \"}}]}\n\n\
+                        data: {\"choices\":[{\"delta\":{\"content\":\"answer\"}}]}\n\n";
+            let head = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\n\
+                 Connection: close\r\n\r\n",
+                body.len() + 100,
+            );
+            let _ = stream.write_all(head.as_bytes()).await;
+            let _ = stream.write_all(body.as_bytes()).await;
+            let _ = stream.shutdown().await;
+        });
+
+        let mut on_delta = |_: &str| Ok(());
+        let error = stream_from(address, &mut on_delta)
+            .await
+            .expect_err("the stream never finished");
+
+        let interrupted = error
+            .downcast_ref::<StreamInterrupted>()
+            .unwrap_or_else(|| panic!("expected an interrupted stream, got: {error:#}"));
+        assert_eq!(
+            interrupted.received, "half an answer",
+            "what arrived must be carried out, not dropped"
+        );
+    }
+
+    /// The abort path is not an interruption, and must not be mistaken for one.
+    ///
+    /// A repetition refusal and a stopped stream both end the request early, so
+    /// "the request did not finish" is true of both — and re-asking a *loop* would be
+    /// the opposite of what the repetition breaker decided. The two are told apart by
+    /// type, which is why the caller looks for this one before it does anything else.
+    #[tokio::test]
+    async fn a_refused_delta_is_not_reported_as_an_interrupted_stream() {
+        let body = sse_body(&[json!({"choices":[{"delta":{"content":"one"}}]})]);
+        let (address, _) = spawn_sse_server(body).await;
+
+        let mut on_delta = |_: &str| anyhow::bail!("repetition");
+        let error = stream_from(address, &mut on_delta).await.unwrap_err();
+
+        assert!(
+            error.downcast_ref::<StreamInterrupted>().is_none(),
+            "an abort is a decision, not a dropped connection: {error:#}"
         );
     }
 

@@ -8,7 +8,7 @@ use clap::Parser;
 use tracing_subscriber::EnvFilter;
 
 use crate::application::runner::{envelope, RunDeps, RunFacts, RunOutcome, RunSettings};
-use crate::cli::{Cli, Command};
+use crate::cli::{Cli, Command, RunArgs};
 use crate::domain::ports::AgentDefPort;
 use crate::infra::config::{self as config_module, CliOverrides, OutputFormat};
 
@@ -42,22 +42,26 @@ async fn main() -> Result<()> {
     };
 
     match cli.command {
-        Command::Run {
-            agent_def,
-            profile,
-            output,
-            in_session,
-            prompt_file,
-            out_session,
-            template,
-            tools_file,
-            skills_dir,
-            max_iterations,
-            max_runtime_secs,
-            stop_file,
-            loop_retries,
-            fail_on_tool_findings,
-        } => {
+        Command::Run(args) => {
+            // Destructured once here so the body below reads as it did when these were
+            // the variant's own fields; see `RunArgs` for why they moved into a box.
+            let RunArgs {
+                agent_def,
+                profile,
+                output,
+                in_session,
+                prompt_file,
+                out_session,
+                template,
+                tools_file,
+                skills_dir,
+                max_iterations,
+                max_runtime_secs,
+                stop_file,
+                loop_retries,
+                fail_on_tool_findings,
+            } = *args;
+
             let config = config_module::discover_and_load()?.1;
 
             let output_override = output.as_deref().map(OutputFormat::from_arg).transpose()?;

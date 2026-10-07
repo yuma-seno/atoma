@@ -164,7 +164,7 @@ mod tests {
     fn a_cut_never_lands_inside_a_character() {
         let text = "設計判断はコメントに書く。".repeat(100);
         let capped = cap(&text, 40);
-        assert_eq!(capped.text.chars().filter(|c| *c != '\n').count() > 0, true);
+        assert!(capped.text.chars().any(|c| c != '\n'));
         assert!(capped.dropped > 0);
         // The real assertion is that the two lines above did not panic.
         assert!(capped.text.contains("dropped from the middle"));
