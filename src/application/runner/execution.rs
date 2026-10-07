@@ -11,6 +11,7 @@ use crate::domain::ports::{FinishReason, LlmPort, LlmUsage, ToolCallResult, Tool
 use crate::domain::repetition::{Repetition, RepetitionDetector};
 use crate::domain::session::{Message, Session, ToolCall};
 use crate::domain::tool_loop::{CallOutcome, LoopTracker};
+use crate::infra::llm::shared::{StreamInterrupted, MAX_STREAM_RETRIES};
 
 /// How many consecutive degenerate (contentless) completions to re-request
 /// before giving up.
@@ -487,6 +488,53 @@ pub async fn inference_loop(
             {
                 Ok(response) => break response,
                 Err(e) => {
+                    // The answer stopped arriving. The request is over, but the turn is
+                    // not: no tool ran (calls are executed from the assembled response,
+                    // which never assembled), so the same turn can be asked for again
+                    // without duplicating anything.
+                    //
+                    // Handled before the repetition case and separately from it, because
+                    // the endings differ. A loop is refused and discarded -- the model is
+                    // not shown its own loop. An interruption is kept and continued: the
+                    // part that arrived was billed for, and the model does better
+                    // finishing a sentence it can already see than starting over.
+                    if let Some(interrupted) = e.downcast_ref::<StreamInterrupted>() {
+                        attempt += 1;
+                        if attempt > u32::from(MAX_STREAM_RETRIES) {
+                            tracing::warn!(
+                                "The answer stopped arriving {} times in a row; giving up on \
+                                 this turn.",
+                                MAX_STREAM_RETRIES,
+                            );
+                            return Err(e);
+                        }
+                        tracing::warn!(
+                            "{} Re-asking this turn (attempt {}/{}), carrying the {} char(s) \
+                             that did arrive.",
+                            interrupted,
+                            attempt,
+                            MAX_STREAM_RETRIES,
+                            interrupted.received.len(),
+                        );
+                        // The assistant's own words first, as an assistant message, so
+                        // what follows reads as a continuation of that message rather
+                        // than as a second, contradictory answer. Then the note, which is
+                        // a user message because that is the role the model reads as
+                        // instruction -- the same shape the loop re-ask uses.
+                        if !interrupted.received.is_empty() {
+                            session
+                                .messages
+                                .push(Message::assistant(Some(&interrupted.received), None));
+                        }
+                        session.messages.push(Message::user(
+                            "Your previous attempt at this turn was cut off mid-answer \
+                             because the connection dropped. Continue from where it stopped \
+                             and finish the same request; do not repeat what you already \
+                             wrote.",
+                        ));
+                        continue;
+                    }
+
                     let Some(repetition) = e.downcast_ref::<Repetition>() else {
                         return Err(e);
                     };

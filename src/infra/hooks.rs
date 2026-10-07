@@ -363,7 +363,6 @@ mod tests {
         assert!(check_access(&hooks, "write_file").is_err());
     }
 
-    #[test]
     /// The behaviour `validate_hooks` used to make unreachable by refusing the very
     /// configuration this exercises.
     #[test]

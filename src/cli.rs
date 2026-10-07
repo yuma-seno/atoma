@@ -98,105 +98,7 @@ pub enum Command {
   atoma run --agent-def ./agent.md --prompt-file ./prompt.txt
   atoma run --agent-def ./agent.md --in-session ./sess.json --out-session ./sess.json
   atoma run --profile review --in-session ./sess.json")]
-    Run {
-        /// Path to the agent definition Markdown file
-        #[arg(long, value_name = "FILE")]
-        agent_def: Option<PathBuf>,
-
-        /// Use a named profile from atoma.toml
-        #[arg(long, value_name = "NAME")]
-        profile: Option<String>,
-
-        /// Output format: text (default) or json
-        #[arg(long, value_name = "FORMAT")]
-        output: Option<String>,
-
-        #[arg(long, value_name = "FILE")]
-        in_session: Option<PathBuf>,
-
-        #[arg(long, value_name = "FILE")]
-        prompt_file: Option<PathBuf>,
-
-        #[arg(long, value_name = "FILE")]
-        out_session: Option<PathBuf>,
-
-        #[arg(long, value_name = "FILE")]
-        template: Option<PathBuf>,
-
-        #[arg(long, value_name = "FILE")]
-        tools_file: Option<PathBuf>,
-
-        /// Directory containing dynamically loadable skill Markdown files
-        #[arg(long, value_name = "DIR")]
-        skills_dir: Option<PathBuf>,
-
-        /// Stop after N turns. Absent means no turn ceiling.
-        #[arg(long, value_name = "N")]
-        max_iterations: Option<u32>,
-
-        /// Stop after N seconds. Absent means no time limit.
-        ///
-        /// Passed per invocation rather than kept in `atoma.toml` because it belongs to
-        /// the run's circumstances, not to the agent: the same agent under a CI job with
-        /// a 60-minute timeout and the same agent on a workstation want different
-        /// answers, and only the caller knows which one it is.
-        #[arg(long, value_name = "SECONDS")]
-        max_runtime_secs: Option<u64>,
-
-        /// Stop when this file appears. Absent means nothing can interrupt the run.
-        ///
-        /// For a caller that has to be able to change its mind -- a person watching a
-        /// run go the wrong way. Checked at the top of each turn, so the run ends with
-        /// its conversation whole and its session written, which killing the process
-        /// does not do: atoma writes the session once, at the end.
-        ///
-        /// A path, not a signal, because the thing that needs to reach a running agent
-        /// usually comes from another machine.
-        #[arg(long, value_name = "FILE")]
-        stop_file: Option<PathBuf>,
-
-        /// Re-ask a turn, without limit, when the model repeats itself.
-        ///
-        /// Absent means the run ends on the loop, which is the default: a completion
-        /// whose vocabulary collapsed is a verdict, and the run stops with a session
-        /// that can be resumed by hand.
-        ///
-        /// Present treats the loop as a bad sample instead. The aborted completion is
-        /// discarded -- it never enters the session, so the model does not see its own
-        /// loop -- a message saying what was seen is appended, and the turn is asked for
-        /// again.
-        ///
-        /// Unbounded on purpose, because the run already has bounds. `--max-runtime-secs`
-        /// and `--stop-file` are re-checked before each re-ask, so a model that loops on
-        /// every attempt is stopped by the clock or by a person rather than by a count.
-        /// A count would be a second ceiling guessing at the same thing, and the wrong
-        /// guess either way: too low gives up on a run that would have recovered, too
-        /// high is the unbounded case with extra steps.
-        #[arg(long)]
-        loop_retries: bool,
-
-        /// Refuse the run when a tool server's configuration has any finding at all
-        ///
-        /// A finding is what atoma notices when it asks every server what it has: a
-        /// guard pattern matching none of the tools that server advertises, say. Some
-        /// are fatal on their own -- two servers claiming one tool name cannot be
-        /// routed -- and those stop the run whatever this flag says. This is about the
-        /// rest.
-        ///
-        /// Off by default, and deliberately. Stopping the run does not close a guard
-        /// that has stopped guarding; it only removes the ability for an agent to
-        /// repair the configuration, leaving a person to do it by hand. So the default
-        /// is to say so and go on: every finding is written as an
-        /// `ATOMA_CONFIG_FINDING:` line, fatal ones included, which is what lets the
-        /// environment around atoma decide. A caller that would rather stop can say so
-        /// here.
-        ///
-        /// For a pull-request gate, `atoma validate --with-live-tools` is the better
-        /// place: it is already strict, it starts the servers without running an
-        /// agent, and it fails before anything has been changed.
-        #[arg(long)]
-        fail_on_tool_findings: bool,
-    },
+    Run(Box<RunArgs>),
 
     /// Validate an agent definition and optional tools file
     #[command(after_help = "EXAMPLES:
@@ -256,4 +158,114 @@ pub enum Command {
 
     /// Generate a default atoma.toml configuration file
     Init,
+}
+
+/// `atoma run`'s arguments.
+///
+/// A struct rather than a variant's fields, and boxed at the use site, because of
+/// size: this is twenty arguments and the other variants are unit-like, so `Command`
+/// was 336 bytes of which one variant was nearly all. A `Command` is built once per
+/// process, so the cost was never paid twice — but the size is what every `match` and
+/// every containing `Result` pays for, and clippy's `large_enum_variant` is the
+/// version of that which CI can see. Boxing puts the arguments on the heap and the
+/// enum back to the size of `Validate`.
+#[derive(clap::Args)]
+pub struct RunArgs {
+    /// Path to the agent definition Markdown file
+    #[arg(long, value_name = "FILE")]
+    pub agent_def: Option<PathBuf>,
+
+    /// Use a named profile from atoma.toml
+    #[arg(long, value_name = "NAME")]
+    pub profile: Option<String>,
+
+    /// Output format: text (default) or json
+    #[arg(long, value_name = "FORMAT")]
+    pub output: Option<String>,
+
+    #[arg(long, value_name = "FILE")]
+    pub in_session: Option<PathBuf>,
+
+    #[arg(long, value_name = "FILE")]
+    pub prompt_file: Option<PathBuf>,
+
+    #[arg(long, value_name = "FILE")]
+    pub out_session: Option<PathBuf>,
+
+    #[arg(long, value_name = "FILE")]
+    pub template: Option<PathBuf>,
+
+    #[arg(long, value_name = "FILE")]
+    pub tools_file: Option<PathBuf>,
+
+    /// Directory containing dynamically loadable skill Markdown files
+    #[arg(long, value_name = "DIR")]
+    pub skills_dir: Option<PathBuf>,
+
+    /// Stop after N turns. Absent means no turn ceiling.
+    #[arg(long, value_name = "N")]
+    pub max_iterations: Option<u32>,
+
+    /// Stop after N seconds. Absent means no time limit.
+    ///
+    /// Passed per invocation rather than kept in `atoma.toml` because it belongs to
+    /// the run's circumstances, not to the agent: the same agent under a CI job with
+    /// a 60-minute timeout and the same agent on a workstation want different
+    /// answers, and only the caller knows which one it is.
+    #[arg(long, value_name = "SECONDS")]
+    pub max_runtime_secs: Option<u64>,
+
+    /// Stop when this file appears. Absent means nothing can interrupt the run.
+    ///
+    /// For a caller that has to be able to change its mind -- a person watching a
+    /// run go the wrong way. Checked at the top of each turn, so the run ends with
+    /// its conversation whole and its session written, which killing the process
+    /// does not do: atoma writes the session once, at the end.
+    ///
+    /// A path, not a signal, because the thing that needs to reach a running agent
+    /// usually comes from another machine.
+    #[arg(long, value_name = "FILE")]
+    pub stop_file: Option<PathBuf>,
+
+    /// Re-ask a turn, without limit, when the model repeats itself.
+    ///
+    /// Absent means the run ends on the loop, which is the default: a completion
+    /// whose vocabulary collapsed is a verdict, and the run stops with a session
+    /// that can be resumed by hand.
+    ///
+    /// Present treats the loop as a bad sample instead. The aborted completion is
+    /// discarded -- it never enters the session, so the model does not see its own
+    /// loop -- a message saying what was seen is appended, and the turn is asked for
+    /// again.
+    ///
+    /// Unbounded on purpose, because the run already has bounds. `--max-runtime-secs`
+    /// and `--stop-file` are re-checked before each re-ask, so a model that loops on
+    /// every attempt is stopped by the clock or by a person rather than by a count.
+    /// A count would be a second ceiling guessing at the same thing, and the wrong
+    /// guess either way: too low gives up on a run that would have recovered, too
+    /// high is the unbounded case with extra steps.
+    #[arg(long)]
+    pub loop_retries: bool,
+
+    /// Refuse the run when a tool server's configuration has any finding at all
+    ///
+    /// A finding is what atoma notices when it asks every server what it has: a
+    /// guard pattern matching none of the tools that server advertises, say. Some
+    /// are fatal on their own -- two servers claiming one tool name cannot be
+    /// routed -- and those stop the run whatever this flag says. This is about the
+    /// rest.
+    ///
+    /// Off by default, and deliberately. Stopping the run does not close a guard
+    /// that has stopped guarding; it only removes the ability for an agent to
+    /// repair the configuration, leaving a person to do it by hand. So the default
+    /// is to say so and go on: every finding is written as an
+    /// `ATOMA_CONFIG_FINDING:` line, fatal ones included, which is what lets the
+    /// environment around atoma decide. A caller that would rather stop can say so
+    /// here.
+    ///
+    /// For a pull-request gate, `atoma validate --with-live-tools` is the better
+    /// place: it is already strict, it starts the servers without running an
+    /// agent, and it fails before anything has been changed.
+    #[arg(long)]
+    pub fail_on_tool_findings: bool,
 }

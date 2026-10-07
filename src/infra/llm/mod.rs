@@ -1260,11 +1260,10 @@ mod tests {
     /// somebody wondering where their requests went.
     #[test]
     fn a_dialect_pair_is_attributed_the_same() {
-        for (chat, responses) in [("openrouter", "openrouter-responses")] {
-            let one = by_name(PROVIDERS, chat).expect(chat);
-            let other = by_name(PROVIDERS, responses).expect(responses);
-            assert_eq!(one.headers(), other.headers(), "{chat} vs {responses}");
-            assert!(!one.headers().is_empty(), "{chat}");
-        }
+        let (chat, responses) = ("openrouter", "openrouter-responses");
+        let one = by_name(PROVIDERS, chat).expect(chat);
+        let other = by_name(PROVIDERS, responses).expect(responses);
+        assert_eq!(one.headers(), other.headers(), "{chat} vs {responses}");
+        assert!(!one.headers().is_empty(), "{chat}");
     }
 }
