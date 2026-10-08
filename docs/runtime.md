@@ -174,6 +174,45 @@ The two stderr log lines are unchanged and still carry the same numbers for call
 grep: `ATOMA_TOKEN_USAGE` once per run, `ATOMA_INFERENCE_USAGE` once per round trip. They
 are no longer the only place the cache counts exist.
 
+## Machine-readable lines
+
+Three lines are addressed to the environment rather than to a person. Each is an `ATOMA_`
+name, a colon, then space-separated `key=value`:
+
+```
+ATOMA_TOKEN_USAGE: prompt=… completion=… total=… cached=… written=…
+ATOMA_INFERENCE_USAGE: iteration=… prompt=… completion=… cached=… written=… request=…
+ATOMA_CONFIG_FINDING: kind=dead_guard severity=warn server=files_ro pattern=files_ro__* tools=read,grep
+ATOMA_LLM_ERROR: label=Anthropic code=free_rate_limited type=orcarouter_api_error
+```
+
+**The fields are the contract and the sentence beside them is not.** Parse `kind=`,
+`code=`, `severity=` and the fields beside them; never the English. A caller that greps
+the prose is a caller whose tooling atoma breaks by rewording a warning, which is why
+these lines carry fields and no sentence at all — the paragraph that a person reads is a
+separate, neighbouring log line.
+
+`ATOMA_LLM_ERROR` is written when a provider delivers an error **object** — under HTTP
+200, or as a chunk in the middle of a stream, which is where a rate limit hit halfway
+through an answer arrives, since the status was already sent when the stream opened. Its
+fields are:
+
+| Field | Meaning |
+| --- | --- |
+| `label` | Which call failed: `Anthropic`, `OpenAI Responses`, `LLM`. The only field that is atoma's rather than the provider's. |
+| `code` | The provider's `code` — an identifier, unlike the message, which is prose and is localized by at least one provider here. Absent when the provider sent none, including when it sent an empty one. |
+| `type` | The provider's `type`. Absent on the same terms. |
+
+There is deliberately no table of what a `code` means. The same number is terminal for one
+vendor and transient for another, and the codes arrive as strings here and integers there;
+collecting the values from real runs is what decides whether a table is worth having.
+Nothing in atoma branches on these fields yet — they are logged so that they can be.
+
+The same run also carries what `atoma` did about it. Every provider that says *when* to
+come back gets obeyed: a `Retry-After` in seconds is honoured up to two minutes, and only
+where the provider sent none does the run fall back to its own backoff. The retry line
+says which of the two it used.
+
 ## Troubleshooting
 
 | Symptom | Likely cause | Recovery action |

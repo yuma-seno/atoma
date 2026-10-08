@@ -10,6 +10,10 @@ use crate::domain::tool::{Hooks, ToolDef};
 use crate::domain::tool_health::{self, HealthLog, Severity};
 use crate::domain::tool_output;
 use crate::infra::hooks;
+// The encoder is shared with `ATOMA_LLM_ERROR` rather than owned here: a second copy
+// would be a second answer to "what makes a value safe", and the two would eventually
+// disagree about a value that both lines can carry.
+use crate::infra::machine_line::{field, field_list};
 
 /// How long one `tools/list` or `tools/call` may take, for a server that does not
 /// say otherwise.
@@ -1253,45 +1257,6 @@ impl Finding {
     }
 }
 
-/// One value, with the three characters that would break the line's own grammar
-/// percent-encoded as their UTF-8 bytes.
-///
-/// Whitespace would split one field into two, a comma would split one list entry into
-/// two, and `%` has to be encoded for either of those to be reversible. Everything
-/// else is written as it is, including the `_` and `*` that real names and globs are
-/// made of: encoding those would make the common case unreadable to buy nothing.
-fn field(value: &str) -> String {
-    let mut out = String::with_capacity(value.len());
-    for c in value.chars() {
-        match c {
-            '%' => out.push_str("%25"),
-            ',' => out.push_str("%2C"),
-            c if c.is_whitespace() => {
-                let mut buf = [0u8; 4];
-                for byte in c.encode_utf8(&mut buf).as_bytes() {
-                    out.push_str(&format!("%{:02X}", byte));
-                }
-            }
-            c => out.push(c),
-        }
-    }
-    out
-}
-
-/// Several values as one comma-separated field. Empty is written as nothing, which is
-/// a server that advertises no tools at all -- the state in which every pattern it
-/// declares is dead.
-fn field_list(values: &[String]) -> String {
-    let mut out = String::new();
-    for (index, value) in values.iter().enumerate() {
-        if index > 0 {
-            out.push(',');
-        }
-        out.push_str(&field(value));
-    }
-    out
-}
-
 /// What these servers, having said what they have, are wrong about.
 ///
 /// Pure, and the only place either check lives, so registration and
@@ -2022,7 +1987,7 @@ mod http_body_tests {
 
 #[cfg(test)]
 mod finding_line_tests {
-    use super::{field, findings, report_on, Finding, FindingKind, RegisteredTool};
+    use super::{findings, report_on, Finding, FindingKind, RegisteredTool};
     use crate::domain::tool::{Hooks, ToolDef};
     use std::collections::HashMap;
 
@@ -2191,15 +2156,6 @@ mod finding_line_tests {
         );
         assert!(line.contains("server=my%20files"), "{line}");
         assert!(line.contains("pattern=read%20*"), "{line}");
-    }
-
-    /// `%` is encoded because encoding anything at all makes it the escape character,
-    /// and `,` because it is what separates the entries of a list.
-    #[test]
-    fn the_escape_character_and_the_list_separator_are_themselves_encoded() {
-        assert_eq!(field("100%"), "100%25");
-        assert_eq!(field("a,b"), "a%2Cb");
-        assert_eq!(field("read_text_file"), "read_text_file");
     }
 
     /// A server that advertises nothing is the state in which every pattern it

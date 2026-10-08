@@ -8,8 +8,17 @@ use std::time::Duration;
 
 use crate::domain::ports::{DeltaHandler, FinishReason, LlmChoice, LlmResponse, LlmUsage};
 use crate::domain::session::{Message, ToolCall, ToolCallFunction};
+use crate::infra::machine_line::field;
 
-const MAX_HTTP_ATTEMPTS: u8 = 3;
+/// The most attempts any one request is given, exposed for the one adapter that
+/// assembles its own call.
+///
+/// `CopilotClient` cannot use `send_json_with_retry` — its token exchange is a GET
+/// against GitHub with a different auth header, not a chat-completions POST — so it
+/// runs its own loop. It is the only such loop in the tree, which is why this is a
+/// constant shared with it rather than a parameter: two retry counts that could
+/// disagree would eventually disagree.
+pub(crate) const MAX_HTTP_ATTEMPTS: u8 = 3;
 
 /// How many times a turn whose answer stopped arriving is asked for again.
 ///
@@ -59,7 +68,7 @@ impl std::error::Error for StreamInterrupted {}
 const RETRY_BASE_DELAY_MS: u64 = 1_000;
 const RETRY_DELAY_FACTOR: u64 = 4;
 
-fn is_transient(error: &reqwest::Error) -> bool {
+pub(crate) fn is_transient(error: &reqwest::Error) -> bool {
     error.is_timeout() || error.is_connect() || error.is_body() || error.is_decode()
 }
 
@@ -74,21 +83,10 @@ fn is_truncated(error: &serde_json::Error) -> bool {
     matches!(error.classify(), Category::Eof)
 }
 
+/// This repository's own backoff, used when the provider offered no hint.
 fn retry_backoff(attempt: u8) -> Duration {
     let factor = RETRY_DELAY_FACTOR.saturating_pow(u32::from(attempt).saturating_sub(1));
     Duration::from_millis(RETRY_BASE_DELAY_MS.saturating_mul(factor))
-}
-
-async fn retry_delay(attempt: u8, reason: &str) {
-    let delay = retry_backoff(attempt);
-    tracing::warn!(
-        "Transient LLM HTTP failure on attempt {}/{}: {}. Retrying in {:?}.",
-        attempt,
-        MAX_HTTP_ATTEMPTS,
-        reason,
-        delay,
-    );
-    tokio::time::sleep(delay).await;
 }
 
 /// Request keys Atoma owns outright; `extra_body` may not set them.
@@ -296,6 +294,157 @@ const REQUEST_ID_HEADERS: [&str; 4] = [
     "x-ms-request-id",
 ];
 
+/// The longest a `Retry-After` hint is obeyed before it is treated as a refusal.
+///
+/// A rate limit says "come back in N seconds" and the honest thing is to wait N. What
+/// makes that unsafe to do unbounded is who writes N: a provider under load, an
+/// intermediary, or a misconfiguration, and a run has a clock (`--max-runtime-secs`) that
+/// it would spend asleep. OpenAI's own guidance is the same shape — "if a valid server
+/// delay exceeds the supported or configured maximum retry delay, stop retrying and defer
+/// the request rather than retrying sooner".
+///
+/// Two minutes is chosen to be longer than every hint actually observed here (seconds, in
+/// practice) and far shorter than any run's budget, so a provider that means "a moment"
+/// is obeyed and one that says "an hour" ends the run instead of stalling it.
+const MAX_RETRY_AFTER: Duration = Duration::from_secs(120);
+
+/// The provider's `Retry-After` hint, in seconds, when it sent a usable one.
+///
+/// The header is defined by RFC 9110 as either delta-seconds or an HTTP-date, and both
+/// spellings are seen in the wild. Delta-seconds is what every provider read here sends
+/// (OpenAI: "the minimum number of seconds"; Anthropic: "the number of seconds"; OrcaRouter:
+/// "always … `Retry-After: <seconds>`"), so that is what is parsed. An HTTP-date is not
+/// parsed rather than being parsed wrong: a hint that arrives as a date would need a clock
+/// comparison against the server's own clock, and guessing at that is worse than falling
+/// back to the backoff below, which is what `None` does.
+///
+/// A zero or negative value is not a hint to retry immediately — it is a provider that sent
+/// a number it does not mean, so it is treated as no hint at all.
+fn retry_after(headers: &reqwest::header::HeaderMap) -> Option<Duration> {
+    let seconds: u64 = headers
+        .get(reqwest::header::RETRY_AFTER)?
+        .to_str()
+        .ok()?
+        .trim()
+        .parse()
+        .ok()?;
+    (seconds > 0).then(|| Duration::from_secs(seconds.min(MAX_RETRY_AFTER.as_secs())))
+}
+
+/// Wait out a provider's hint, or fall back to this repository's own backoff.
+///
+/// One place, called by both the streaming and the non-streaming path, because the two
+/// had the same `retry_delay` and the same gap: every provider that says *when* to come
+/// back was making a number that nothing read. `Retry-After` is that number, and for the
+/// providers here it is the one signal that says both "retry" and "for how long" — an
+/// Anthropic spend cap carries no header, which is how its own docs say to tell it apart
+/// from a rate limit.
+///
+/// `fallback_attempt` is this repository's attempt count, used only when the provider
+/// offered nothing.
+pub(crate) async fn delay_before_retry(
+    attempt: u8,
+    headers: Option<&reqwest::header::HeaderMap>,
+    reason: &str,
+) {
+    let hinted = headers.and_then(retry_after);
+    let delay = hinted.unwrap_or_else(|| retry_backoff(attempt));
+    tracing::warn!(
+        "Transient LLM HTTP failure on attempt {}/{}: {}. Retrying in {:?}{}.",
+        attempt,
+        MAX_HTTP_ATTEMPTS,
+        reason,
+        delay,
+        if hinted.is_some() {
+            " (Retry-After)"
+        } else {
+            ""
+        },
+    );
+    tokio::time::sleep(delay).await;
+}
+
+/// What every machine-readable inference-failure line starts with.
+///
+/// A constant because it is the token a caller greps for: it may not drift by a typo
+/// in one `format!` while the documentation says something else. The `ATOMA_` name, the
+/// colon and the `key=value` fields are the shape `ATOMA_TOKEN_USAGE` and
+/// `ATOMA_CONFIG_FINDING` already use, and [`crate::infra::machine_line`] is the grammar
+/// all three share.
+pub(crate) const LLM_ERROR_LINE: &str = "ATOMA_LLM_ERROR:";
+
+/// Why an inference failed, as the identifiers a machine can branch on.
+///
+/// The code is the part that survives translation: `message` is prose and is localized
+/// by at least one provider here (OrcaRouter says so of its own messages), while `code`
+/// and `type` are identifiers. "Absent" is said rather than printed as an empty string
+/// -- an empty `code` would read as a code whose name is blank rather than as a provider
+/// that sent none. OrcaRouter documents sending exactly that, so it happens.
+///
+/// This is deliberately NOT a parsed enum. What a code means differs per provider, the
+/// same number is terminal for one vendor and transient for another, and the codes arrive
+/// as strings here and integers there. Collecting the values is what decides whether a
+/// table is worth having; inventing one first is how a guess gets shipped.
+///
+/// Two readers, so two renderings. [`Self::line`] is what a machine greps -- fields
+/// only, never a sentence, because the fields are the contract and the prose is not.
+/// [`Self::summary`] is a parenthesis a person reads inside the error the run reports,
+/// which is where the shape reached the log before this line existed.
+pub(crate) struct ProviderFailure {
+    /// The provider's `code`, when it sent a usable one.
+    code: Option<String>,
+    /// The provider's `type`, when it sent a usable one.
+    kind: Option<String>,
+}
+
+impl ProviderFailure {
+    /// Read the shape out of a provider's `error` object, which is the one place both
+    /// the streaming and the non-streaming path can find it.
+    pub(crate) fn new(error_obj: &Value) -> Self {
+        let code = match error_obj.get("code") {
+            Some(Value::String(code)) if !code.is_empty() => Some(code.clone()),
+            Some(Value::Number(code)) => Some(code.to_string()),
+            _ => None,
+        };
+        let kind = error_obj
+            .get("type")
+            .and_then(Value::as_str)
+            .filter(|t| !t.is_empty())
+            .map(str::to_string);
+        Self { code, kind }
+    }
+
+    /// The identifiers as a parenthesis for the prose, or nothing when the provider
+    /// named neither -- rather than an empty `(provider error)` on every anonymous one.
+    pub(crate) fn summary(&self) -> String {
+        if self.code.is_none() && self.kind.is_none() {
+            return String::new();
+        }
+        format!(" (provider error{})", self.fields())
+    }
+
+    /// The line a machine greps, which carries no sentence at all.
+    ///
+    /// The label is which call failed -- `Anthropic`, `OpenAI Responses`, `LLM` -- and
+    /// is the only field here that comes from atoma rather than the provider. It is
+    /// what tells two failures in one run apart when the provider named neither.
+    pub(crate) fn line(&self, label: &str) -> String {
+        format!("{LLM_ERROR_LINE} label={}{}", field(label), self.fields())
+    }
+
+    /// The fields, as space-separated `key=value`, ready for either rendering.
+    fn fields(&self) -> String {
+        let mut out = String::new();
+        if let Some(code) = &self.code {
+            out.push_str(&format!(" code={}", field(code)));
+        }
+        if let Some(kind) = &self.kind {
+            out.push_str(&format!(" type={}", field(kind)));
+        }
+        out
+    }
+}
+
 /// The provider's id for a response, read off the headers before anything consumes it.
 fn provider_request_id(headers: &reqwest::header::HeaderMap) -> Option<String> {
     REQUEST_ID_HEADERS
@@ -330,7 +479,7 @@ pub(crate) async fn send_json_with_retry<T: DeserializeOwned>(
         let response = match build_request().send().await {
             Ok(response) => response,
             Err(error) if attempt < MAX_HTTP_ATTEMPTS && is_transient(&error) => {
-                retry_delay(attempt, &error.to_string()).await;
+                delay_before_retry(attempt, None, &error.to_string()).await;
                 continue;
             }
             Err(error) => {
@@ -346,13 +495,19 @@ pub(crate) async fn send_json_with_retry<T: DeserializeOwned>(
             let status = response.status();
             let retryable =
                 status == reqwest::StatusCode::TOO_MANY_REQUESTS || status.is_server_error();
+            // Read before `text()` consumes the response: the headers are gone after that,
+            // and `Retry-After` is the provider saying how long to wait. Every provider
+            // read here sends it on a rate limit, and Anthropic's docs say its absence is
+            // how a spend cap is told apart from one -- so it is read rather than guessed.
+            let hint = response.headers().clone();
             let error_text = response
                 .text()
                 .await
                 .unwrap_or_else(|_| "unknown error".to_string());
             if attempt < MAX_HTTP_ATTEMPTS && retryable {
-                retry_delay(
+                delay_before_retry(
                     attempt,
+                    Some(&hint),
                     &format!("{label} API error ({status}): {error_text}"),
                 )
                 .await;
@@ -376,7 +531,7 @@ pub(crate) async fn send_json_with_retry<T: DeserializeOwned>(
         let body = match response.text().await {
             Ok(body) => body,
             Err(error) if attempt < MAX_HTTP_ATTEMPTS && is_transient(&error) => {
-                retry_delay(attempt, &error.to_string()).await;
+                delay_before_retry(attempt, None, &error.to_string()).await;
                 continue;
             }
             Err(error) => return Err(error).context("Failed to read response body"),
@@ -390,12 +545,16 @@ pub(crate) async fn send_json_with_retry<T: DeserializeOwned>(
                     .get("message")
                     .and_then(|m| m.as_str())
                     .unwrap_or("unknown provider error");
-                let code = error_obj
-                    .get("code")
-                    .and_then(|c| c.as_i64())
-                    .map(|c| format!(" (code: {})", c))
-                    .unwrap_or_default();
-                anyhow::bail!("LLM provider error{}: {}", code, msg);
+                let failure = ProviderFailure::new(error_obj);
+                // The machine line first and the sentence second, so that a caller
+                // reading the log for `ATOMA_LLM_ERROR:` finds the fields whether or
+                // not it can parse the prose beside them.
+                tracing::warn!("{}", failure.line(label));
+                tracing::warn!(
+                    "LLM provider error delivered under HTTP 200{}: {msg}",
+                    failure.summary()
+                );
+                anyhow::bail!("LLM provider error{}: {}", failure.summary(), msg);
             }
         }
 
@@ -407,7 +566,8 @@ pub(crate) async fn send_json_with_retry<T: DeserializeOwned>(
                 })
             }
             Err(error) if attempt < MAX_HTTP_ATTEMPTS && is_truncated(&error) => {
-                retry_delay(attempt, &format!("truncated response body: {error}")).await;
+                delay_before_retry(attempt, None, &format!("truncated response body: {error}"))
+                    .await;
             }
             Err(error) => {
                 return Err(error).with_context(|| {
@@ -664,7 +824,7 @@ pub(crate) async fn send_sse_with_retry(
         let response = match build_request().send().await {
             Ok(response) => response,
             Err(error) if attempt < MAX_HTTP_ATTEMPTS && is_transient(&error) => {
-                retry_delay(attempt, &error.to_string()).await;
+                delay_before_retry(attempt, None, &error.to_string()).await;
                 attempt += 1;
                 continue;
             }
@@ -679,13 +839,15 @@ pub(crate) async fn send_sse_with_retry(
             let status = response.status();
             let retryable =
                 status == reqwest::StatusCode::TOO_MANY_REQUESTS || status.is_server_error();
+            let hint = response.headers().clone();
             let error_text = response
                 .text()
                 .await
                 .unwrap_or_else(|_| "unknown error".to_string());
             if attempt < MAX_HTTP_ATTEMPTS && retryable {
-                retry_delay(
+                delay_before_retry(
                     attempt,
+                    Some(&hint),
                     &format!("{label} API error ({status}): {error_text}"),
                 )
                 .await;
@@ -741,14 +903,31 @@ pub(crate) async fn send_streaming_with_retry(
         let chunk: Value = serde_json::from_str(payload)
             .with_context(|| format!("Failed to parse a {label} stream chunk: {payload}"))?;
 
-        // A provider error delivered mid-stream, which OpenRouter does. The
-        // non-streaming path checks for the same shape under HTTP 200.
+        // A provider error delivered mid-stream, which OpenRouter and OrcaRouter both do.
+        // The status was already sent when the stream opened, so this in-band chunk is the
+        // only place a mid-stream failure can appear -- which means a rate limit hit
+        // halfway through an answer arrives here and NOT as an HTTP 429. OpenRouter's docs
+        // say so outright, and that its `code` is 429 in that case; OrcaRouter documents
+        // the same shape with `type: upstream_error` and an EMPTY `code`.
+        //
+        // The non-streaming path checks for the same shape under HTTP 200. Read here so
+        // the shape reaches the log, and not branched on, for the reason
+        // `ProviderFailure` gives.
         if let Some(error_obj) = chunk.get("error").filter(|e| !e.is_null()) {
             let msg = error_obj
                 .get("message")
                 .and_then(|m| m.as_str())
                 .unwrap_or("unknown provider error");
-            anyhow::bail!("LLM provider error: {}", msg);
+            let failure = ProviderFailure::new(error_obj);
+            // Same two lines as the non-streaming path, for the same reason: the
+            // machine line carries the fields and nothing else, and the sentence is
+            // free to be a sentence.
+            tracing::warn!("{}", failure.line(label));
+            tracing::warn!(
+                "LLM provider error delivered mid-stream{}: {msg}",
+                failure.summary()
+            );
+            anyhow::bail!("LLM provider error{}: {}", failure.summary(), msg);
         }
 
         let added = accumulator.absorb(&chunk);
@@ -1336,6 +1515,151 @@ mod tests {
         server.await.unwrap();
         let rendered = format!("{error:#}");
         assert!(rendered.contains("req_refused"), "got: {rendered}");
+    }
+
+    /// The header three providers document, read from the one shape they all send.
+    ///
+    /// Delta-seconds is what OpenAI ("the minimum number of seconds"), Anthropic ("the
+    /// number of seconds") and OrcaRouter ("always … `<seconds>`") all send. The point of
+    /// the test is that the number arrives at all: before this, every provider's "come
+    /// back in N" was read by nothing and the repository waited its own backoff instead.
+    #[test]
+    fn a_retry_after_in_seconds_is_read() {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(reqwest::header::RETRY_AFTER, "37".parse().unwrap());
+        assert_eq!(retry_after(&headers), Some(Duration::from_secs(37)));
+    }
+
+    /// Absent is absent. Not zero, and not the backoff -- the caller decides that, and
+    /// `delay_before_retry` is where the two are told apart.
+    #[test]
+    fn no_retry_after_header_is_no_hint() {
+        assert_eq!(retry_after(&reqwest::header::HeaderMap::new()), None);
+    }
+
+    /// A number that is not a number is no hint rather than a panic or a zero.
+    ///
+    /// RFC 9110 allows an HTTP-date here, and nothing read in this repository sends one.
+    /// Ignoring it falls back to the backoff, which is the safe answer: parsing a date
+    /// against the server's own clock is a comparison atoma has no way to make correctly.
+    #[test]
+    fn an_unparseable_retry_after_is_ignored_rather_than_guessed() {
+        for value in ["Wed, 21 Oct 2026 07:28:00 GMT", "", "  ", "soon"] {
+            let mut headers = reqwest::header::HeaderMap::new();
+            headers.insert(reqwest::header::RETRY_AFTER, value.parse().unwrap());
+            assert_eq!(retry_after(&headers), None, "for {value:?}");
+        }
+    }
+
+    /// A hint is bounded, because a run has a clock it would otherwise sleep through.
+    ///
+    /// The cap exists for the case the value is absurd rather than informative: the run's
+    /// own `--max-runtime-secs` is the real ceiling, and a provider that says "an hour"
+    /// should end the run rather than stall it. OpenAI's guidance is the same shape.
+    #[test]
+    fn an_absurd_retry_after_is_capped() {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(reqwest::header::RETRY_AFTER, "86400".parse().unwrap());
+        assert_eq!(retry_after(&headers), Some(MAX_RETRY_AFTER));
+    }
+
+    /// Zero is not a hint either. A provider that sends it means "no number here", and
+    /// retrying immediately is what the number was supposed to prevent.
+    #[test]
+    fn a_zero_retry_after_is_not_a_hint_to_retry_now() {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(reqwest::header::RETRY_AFTER, "0".parse().unwrap());
+        assert_eq!(retry_after(&headers), None);
+    }
+
+    /// The two error-object paths must say what the provider called the error, because
+    /// the message is prose and some providers localize it.
+    ///
+    /// This is the log half of #109's failure: a run died with "The upstream provider is
+    /// temporarily unavailable" and nothing in the record said whether that was a rate
+    /// limit, a quota, or an upstream outage -- three conditions with three different
+    /// answers. `code` and `type` are the identifiers that do say, and both spellings
+    /// they arrive in are read.
+    #[test]
+    fn a_providers_error_shape_is_summarised_for_the_log() {
+        // OrcaRouter's envelope: a string code and a type.
+        let shaped = ProviderFailure::new(&serde_json::json!({
+            "message": "…",
+            "type": "orcarouter_api_error",
+            "code": "free_rate_limited",
+        }));
+        let summary = shaped.summary();
+        assert!(summary.contains("code=free_rate_limited"), "{summary}");
+        assert!(summary.contains("type=orcarouter_api_error"), "{summary}");
+
+        // OpenAI's: an integer code and no type.
+        let numeric =
+            ProviderFailure::new(&serde_json::json!({"code": 429, "message": "…"})).summary();
+        assert!(numeric.contains("code=429"), "{numeric}");
+
+        // What OrcaRouter documents for a mid-stream upstream failure: an EMPTY code.
+        // Printing `code=` here would read as a code whose name is blank.
+        let empty = ProviderFailure::new(&serde_json::json!({
+            "code": "",
+            "type": "upstream_error",
+            "message": "…",
+        }))
+        .summary();
+        assert!(!empty.contains("code="), "{empty}");
+        assert!(empty.contains("type=upstream_error"), "{empty}");
+
+        // Nothing to say, so nothing is said -- rather than an empty parenthetical.
+        assert!(ProviderFailure::new(&serde_json::json!({"message": "…"}))
+            .summary()
+            .is_empty());
+    }
+
+    /// The machine line is what a caller greps, so its shape is the part that may not
+    /// drift: the prefix, then `key=value` fields and not one word of prose.
+    ///
+    /// `report_config_findings.ts` reads `ATOMA_CONFIG_FINDING` by taking everything
+    /// after the prefix and hashing it, and a caller doing the same with this line is
+    /// the point of the line existing. A sentence in it would change the hash on every
+    /// rewording and, for a defect report, open a duplicate issue each time.
+    #[test]
+    fn the_machine_line_is_fields_only() {
+        let failure = ProviderFailure::new(&serde_json::json!({
+            "message": "The upstream provider is temporarily unavailable.",
+            "type": "upstream_error",
+            "code": "",
+        }));
+        let line = failure.line("Anthropic");
+        assert!(line.starts_with(LLM_ERROR_LINE), "{line}");
+
+        // Every token after the prefix is a field. The message is prose and is
+        // deliberately absent: three words of it would be three fields a reader
+        // would try to parse.
+        let fields = line.strip_prefix(LLM_ERROR_LINE).unwrap_or_default();
+        assert!(fields.split_whitespace().all(|f| f.contains('=')), "{line}");
+        assert!(fields.contains("label=Anthropic"), "{line}");
+        assert!(fields.contains("type=upstream_error"), "{line}");
+        // The empty `code` is omitted rather than written as `code=`, which a reader
+        // would take for a code whose name is blank.
+        assert!(!fields.contains("code="), "{line}");
+
+        // A label with a space in it cannot become two fields either, and no label
+        // does today -- which is the kind of thing that is true until it is not.
+        assert_eq!(
+            ProviderFailure::new(&serde_json::json!({"code": "x"}))
+                .line("OpenAI Responses")
+                .split_whitespace()
+                .count(),
+            3,
+            "the prefix, then one token per field",
+        );
+    }
+
+    /// A provider that names neither the code nor the type still gets a line, because
+    /// a failure that says nothing is the one a caller most needs to count.
+    #[test]
+    fn a_failure_with_no_identifiers_still_has_a_line() {
+        let line = ProviderFailure::new(&serde_json::json!({"message": "…"})).line("LLM");
+        assert_eq!(line, "ATOMA_LLM_ERROR: label=LLM");
     }
 
     fn body_with_runtime_tools() -> serde_json::Map<String, Value> {
