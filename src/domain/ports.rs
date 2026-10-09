@@ -271,7 +271,6 @@ pub trait TemplatePort: Send + Sync {
 /// strings — an order a caller can get wrong silently.
 pub struct PromptContext<'a> {
     pub agent: &'a ParsedAgentDef,
-    pub tool_descriptions: &'a [String],
     /// Overrides the built-in template entirely when present.
     pub custom_template: Option<&'a str>,
     pub working_dir: &'a str,

@@ -8,7 +8,6 @@ impl crate::domain::ports::TemplatePort for FileTemplateAdapter {
     fn build_system_prompt(&self, context: &crate::domain::ports::PromptContext<'_>) -> String {
         build_system_prompt(
             context.agent,
-            context.tool_descriptions,
             context.custom_template,
             context.working_dir,
             context.colleagues,
@@ -55,8 +54,6 @@ You interact with the environment through the Model Context Protocol (MCP). Do n
 
 Each tool runs as its own process and receives only the credentials its own configuration declares. A credential you cannot see from one tool is confined, not missing: a shell that reports nothing for an API token is behaving as intended, and the tool that needs that token has it. Do not hardcode a value, hunt for it in other places, or conclude the setup is broken because a token is absent from where you looked. If a tool genuinely fails to authenticate, report which tool and what it said.
 
-{{AVAILABLE_TOOLS}}
-
 # Available Skills
 A skill is a set of instructions this project has written for a particular kind of work. When the work in front of you is of a kind a skill below covers, call `{{LOAD_SKILL_TOOL}}` and follow it in place of your own approach -- it is what this project has decided, not advice to weigh.
 
@@ -64,20 +61,35 @@ The list carries names and descriptions only. A description is not the instructi
 
 {{AVAILABLE_SKILLS}}
 
-# Thought Process & Execution
-Before taking action or generating final output, always use the `<thought>` tag to develop a rigorous thought process following the steps below:
+# Thinking
+Reason through the problem before you act -- what the request needs, what the steps are, what could go wrong, what you will do when it does. Do it privately.
 
-<thought>
-1. [Analyze]: Analyze the current context, requirements, and environment state.
-2. [Plan]: Plan the next steps to execute based on your role and available tools.
-3. [Act & Verify]: Execute tools and verify results. If errors or unexpected results occur, analyze the cause and re-execute. Do not proceed based on assumptions.
-4. [Communicate]: Determine task completion, blockage status, and what text to output.
-</thought>
+**Do not write that reasoning out.** A `<thought>` block, a plan, or a narration of what you are about to do all end up in the same place the answer goes, and that place is a pipe, a log, or a report somebody has to read. The answer is the only thing anyone is looking for.
+
+What you DO say is what a tool returned. An intention is not an outcome and a step you took is not a result.
+
+# Your report
+Your last message is the whole of what anyone reads. Write it for a reader who did not watch you work and who will act on it.
+
+**The answer first.** One or two sentences saying what is true now and what it means for whoever reads it. Not that you followed the steps, and not that the work is complete.
+
+**Then how you know.** Only the claims the answer rests on, each anchored to something the reader can check without asking you: a path with a line number, text copied out of a tool result, a number with its unit, a command and what it exited with. Write a path and a line as `path/to/file.ts:42` -- GitHub turns that into a link, and a claim the reader can click is worth more than one they take on trust. A sentence saying only that you performed a step is not one of these.
+
+**Then what you could not establish.** What you tried, what came back, and what is still unknown because of it. Nobody else can recover this: you are the run that saw it. Say there is nothing if there genuinely is nothing -- leaving it out is itself a claim.
+
+**Then what happens next.** Who or what acts now, and on what. If nothing follows, say the work is done and stop.
+
+**No opening and no closing.** The first line is the answer, not "I looked at". The last is what happens next. A sentence that is neither a claim nor an anchor is a sentence to delete.
+
+**Say what is done, not that you did things.** "The check passes from a clean tree" is a state the reader can act on; "I updated the callers" is a claim about you. When you report an error, give the cause and the fix.
+
+**Do not write as measured what you did not measure.** "This should work" and "I ran it and it exited 0" are different claims, and only one of them is worth anything to somebody who was not here.
+
+The four parts above are the shape for work that reached a conclusion. A short answer to a short question is one or two sentences and no headings -- the shape serves the reader, and padding it out does not.
 
 # Strict Rules
-- [Tone] Eliminate all greetings, unnecessary apologies, and verbose explanations. Communicate in a technical and concise manner.
-- [Tool Trustworthiness] Do not fabricate (hallucinate) file contents or execution results.
-- [Autonomy & Coordination] Do not repeatedly call yourself or other agents without purpose (no infinite loops).
+- [Tool Trustworthiness] Do not fabricate file contents or execution results. Report what a tool returned, including when it failed.
+- [Autonomy] Do not call the same tool with the same arguments again. A call that failed will fail the same way; change something or report the failure.
 "#;
 
 /// Everything a template may say, as one list.
@@ -96,7 +108,6 @@ pub enum Placeholder {
     AgentName,
     AgentRolePrompt,
     ColleaguesList,
-    AvailableTools,
     AvailableSkills,
     LoadSkillTool,
     WorkingDirectory,
@@ -105,11 +116,10 @@ pub enum Placeholder {
 impl Placeholder {
     /// Every one of them. The order is the order they are substituted in, which does
     /// not matter -- no value here contains another's token.
-    pub const ALL: [Placeholder; 7] = [
+    pub const ALL: [Placeholder; 6] = [
         Placeholder::AgentName,
         Placeholder::AgentRolePrompt,
         Placeholder::ColleaguesList,
-        Placeholder::AvailableTools,
         Placeholder::AvailableSkills,
         Placeholder::LoadSkillTool,
         Placeholder::WorkingDirectory,
@@ -121,7 +131,6 @@ impl Placeholder {
             Placeholder::AgentName => "{{AGENT_NAME}}",
             Placeholder::AgentRolePrompt => "{{AGENT_ROLE_PROMPT}}",
             Placeholder::ColleaguesList => "{{COLLEAGUES_LIST}}",
-            Placeholder::AvailableTools => "{{AVAILABLE_TOOLS}}",
             Placeholder::AvailableSkills => "{{AVAILABLE_SKILLS}}",
             Placeholder::LoadSkillTool => "{{LOAD_SKILL_TOOL}}",
             Placeholder::WorkingDirectory => "{{WORKING_DIRECTORY}}",
@@ -132,7 +141,7 @@ impl Placeholder {
 /// A `{{...}}` in a template that nothing will substitute, in the order it appears.
 ///
 /// Worth reporting rather than tolerating, because the failure is silent and looks
-/// like an instruction: an unsubstituted `{{AVAILABLE_TOOL}}` renders literally into
+/// like an instruction: an unsubstituted placeholder renders literally into
 /// the system prompt, and a model reads it as text it was given on purpose.
 ///
 /// Only `{{NAME}}` shapes are considered. A template is prose, and something like
@@ -171,7 +180,6 @@ pub fn unknown_placeholders(template: &str) -> Vec<String> {
 /// Pass `custom_template` to override the built-in template entirely.
 pub fn build_system_prompt(
     agent: &ParsedAgentDef,
-    tool_descriptions: &[String],
     custom_template: Option<&str>,
     working_dir: &str,
     colleagues: &[(String, String)],
@@ -192,20 +200,13 @@ pub fn build_system_prompt(
                 .to_string(),
             Placeholder::ColleaguesList => {
                 if colleagues.is_empty() {
-                    "No agents currently available for collaboration.".to_string()
+                    "No other agents were given to this run.".to_string()
                 } else {
                     colleagues
                         .iter()
                         .map(|(name, desc)| format!("- `{}`: {}", name, desc))
                         .collect::<Vec<_>>()
                         .join("\n")
-                }
-            }
-            Placeholder::AvailableTools => {
-                if tool_descriptions.is_empty() {
-                    "No tools currently available.".to_string()
-                } else {
-                    tool_descriptions.join("\n")
                 }
             }
             Placeholder::AvailableSkills => {
@@ -320,34 +321,57 @@ mod tests {
     #[test]
     fn test_custom_body_injected_into_template() {
         let agent = make_test_agent(Some("Custom role description".to_string()));
-        let result = build_system_prompt(&agent, &[], None, "/repo", &default_colleagues(), &[]);
+        let result = build_system_prompt(&agent, None, "/repo", &default_colleagues(), &[]);
         assert!(result.contains("TestAgent"));
         assert!(result.contains("Custom role description"));
         assert!(result.contains("Strict Rules"));
     }
 
+    /// The default template asks for reasoning to be done privately.
+    ///
+    /// It asked the opposite until now -- `always use the <thought> tag` -- and nothing
+    /// strips that tag, so the reasoning landed in the answer: in stdout, in a pipe, in
+    /// the report a delegate returns. Every provider read here separates reasoning from
+    /// the answer at the API level (Anthropic sends `thinking` blocks beside `text`
+    /// blocks; OpenAI's models have a "hidden chain of thought"), so a template written
+    /// for atoma should not put it back into the text.
+    #[test]
+    fn the_default_template_does_not_ask_for_a_thought_tag() {
+        // Naming the tag in the instruction NOT to use it is fine; asking for it is what
+        // this guards, so the assertion is on the instruction rather than the word.
+        assert!(!DEFAULT_TEMPLATE.contains("always use the `<thought>` tag"));
+        assert!(!DEFAULT_TEMPLATE.contains("<thought>\n"));
+        assert!(DEFAULT_TEMPLATE.contains("Do not write that reasoning out"));
+    }
+
+    /// The report shape is the one part of the default template that is about the
+    /// output rather than about the work, so it has to survive edits here.
+    #[test]
+    fn the_default_template_says_what_a_report_looks_like() {
+        assert!(DEFAULT_TEMPLATE.contains("# Your report"));
+        assert!(DEFAULT_TEMPLATE.contains("The answer first."));
+        assert!(DEFAULT_TEMPLATE.contains("how you know"));
+        assert!(DEFAULT_TEMPLATE.contains("what you could not establish"));
+        assert!(DEFAULT_TEMPLATE.contains("what happens next"));
+        // And it says a short answer is allowed, because the four parts are a shape for
+        // work that reached a conclusion rather than a form every reply has to fill.
+        assert!(DEFAULT_TEMPLATE.contains("no headings"));
+    }
+
     #[test]
     fn test_description_fallback_when_no_body() {
         let agent = make_test_agent(None);
-        let result = build_system_prompt(&agent, &[], None, "/repo", &default_colleagues(), &[]);
+        let result = build_system_prompt(&agent, None, "/repo", &default_colleagues(), &[]);
         assert!(result.contains("A test agent for unit testing"));
     }
 
     #[test]
     fn test_template_substitution() {
         let agent = make_test_agent(None);
-        let result = build_system_prompt(
-            &agent,
-            &["- `read_file`".to_string()],
-            None,
-            "/repo",
-            &default_colleagues(),
-            &[],
-        );
+        let result = build_system_prompt(&agent, None, "/repo", &default_colleagues(), &[]);
         assert!(result.contains("TestAgent"));
         assert!(result.contains("A test agent for unit testing"));
         assert!(result.contains("ReviewAgent"));
-        assert!(result.contains("read_file"));
         assert!(result.contains("/repo"));
     }
 
@@ -355,7 +379,7 @@ mod tests {
     fn test_custom_template() {
         let agent = make_test_agent(None);
         let custom = "Hello {{AGENT_NAME}}! Role: {{AGENT_ROLE_PROMPT}}";
-        let result = build_system_prompt(&agent, &[], Some(custom), "/repo", &[], &[]);
+        let result = build_system_prompt(&agent, Some(custom), "/repo", &[], &[]);
         assert_eq!(
             result,
             "Hello TestAgent! Role: A test agent for unit testing"
@@ -367,7 +391,6 @@ mod tests {
         let agent = make_test_agent(None);
         let result = build_system_prompt(
             &agent,
-            &[],
             None,
             "/home/runner/work/myrepo",
             &default_colleagues(),
@@ -389,7 +412,7 @@ mod tests {
                 "Agent responsible for reviews".to_string(),
             ),
         ];
-        let result = build_system_prompt(&agent, &[], None, "/repo", &colleagues, &[]);
+        let result = build_system_prompt(&agent, None, "/repo", &colleagues, &[]);
         assert!(result.contains("`engineer`: Agent responsible for implementation"));
         assert!(result.contains("`reviewer`: Agent responsible for reviews"));
     }
@@ -401,7 +424,7 @@ mod tests {
             name: "engineering/tdd".to_string(),
             description: "Test first.".to_string(),
         }];
-        let result = build_system_prompt(&agent, &[], None, "/repo", &[], &skills);
+        let result = build_system_prompt(&agent, None, "/repo", &[], &skills);
         assert!(result.contains("`engineering/tdd`: Test first."));
         assert!(!result.contains("red-green-refactor"));
     }
