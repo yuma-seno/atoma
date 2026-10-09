@@ -355,17 +355,6 @@ async fn run_inner(
 
     let tool_definitions = runtime_tools.tool_definitions();
 
-    let tool_descriptions: Vec<String> = tool_definitions
-        .iter()
-        .map(|t| {
-            let name = t
-                .pointer("/function/name")
-                .and_then(|v| v.as_str())
-                .unwrap_or("unknown");
-            format!("- `{}`", name)
-        })
-        .collect();
-
     // 4. Build system prompt
     let custom_template: Option<String> = if let Some(ref path) = template_path {
         let t = std::fs::read_to_string(path)
@@ -398,7 +387,6 @@ async fn run_inner(
 
     let system_prompt = deps.template.build_system_prompt(&PromptContext {
         agent: &parsed_agent,
-        tool_descriptions: &tool_descriptions,
         custom_template: custom_template.as_deref(),
         working_dir: &working_dir,
         colleagues: &colleagues,
