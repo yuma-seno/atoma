@@ -187,7 +187,9 @@ fn transport_of(name: &str, cfg: &ToolConfig) -> Result<()> {
 ///   command: npx
 ///   args: ["-y", "@modelcontextprotocol/server-filesystem", "."]
 ///   hooks:
-///     tool_allowlist: ["filesystem__*"]
+///     # The server's OWN tool names, with no `server__` prefix. The lists sit inside
+///     # this entry, so the entry saying its own name again is it repeating itself.
+///     tool_allowlist: ["read*", "list*"]
 ///     before_tool: ./scripts/fs_guard.py
 ///
 /// shell:

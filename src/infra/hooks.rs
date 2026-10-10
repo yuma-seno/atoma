@@ -13,7 +13,7 @@ fn hook_timeout() -> Duration {
 
 /// Returns `true` if `pattern` matches `value`.
 ///
-/// Supports a single trailing `*` wildcard (e.g. `"filesystem__*"`).
+/// Supports a single trailing `*` wildcard (e.g. `"read*"`).
 pub fn glob_matches(pattern: &str, value: &str) -> bool {
     if let Some(prefix) = pattern.strip_suffix('*') {
         value.starts_with(prefix)
@@ -38,6 +38,20 @@ pub fn check_access(hooks: &Hooks, tool_name: &str) -> Result<()> {
 
 /// Return the static access-control reason for hiding or rejecting a tool.
 /// Dynamic `before_tool` hooks are intentionally not evaluated here.
+///
+/// `tool_name` is the name the SERVER advertised, with no `server__` prefix -- and
+/// that is the whole point of the argument's name. The lists live INSIDE one server's
+/// own entry, so writing the server's name into them is the entry repeating itself:
+/// `atomaton_env` has to name `atomaton_env__reload_environment` to allow the one tool
+/// it offers, and the name it writes is one atoma assembles afterwards, from
+/// `unprefixed` and the server's key. A setting that has to know how it will be
+/// relabelled is a setting that breaks when the label changes.
+///
+/// Routing is unaffected: `McpRegistry` still keys its route table by the prefixed
+/// name, because that is how a call says which server it meant. Only the matching here
+/// moved, and two servers offering one bare name is already fatal -- see
+/// [`crate::infra::mcp::FindingKind::DuplicateTool`] -- so a bare pattern cannot become
+/// ambiguous by this change.
 pub fn access_denial_reason(hooks: &Hooks, tool_name: &str) -> Option<String> {
     if let Some(pattern) = hooks
         .tool_denylist
@@ -68,8 +82,8 @@ pub fn access_denial_reason(hooks: &Hooks, tool_name: &str) -> Option<String> {
 /// The patterns in a server's lists that match none of the tools it advertises.
 ///
 /// A pattern matching nothing is a guard that is not guarding, and nothing says so.
-/// `filesystem__*` on a server that sets `unprefixed: true` blocks exactly nothing
-/// while reading, in the file, as though it blocks everything.
+/// `filesystem__*` blocks exactly nothing on a server whose tools are named `read`
+/// and `grep`, while reading, in the file, as though it blocks everything.
 ///
 /// The same defect with the sign flipped is already measured here: an allowlist
 /// written as five names refused 64 calls that were all reads, because the names
@@ -263,11 +277,13 @@ mod tests {
         }
     }
 
-    /// The case `unprefixed` creates: the pattern was right until the names moved.
+    /// A pattern carrying a `server__` prefix matches nothing, because the lists are
+    /// held against the server's own names.
     ///
-    /// `filesystem__*` blocked everything on a prefixed server. The same line on a
-    /// server that gives its tools their own names blocks nothing, and reads exactly
-    /// as it did before. Nothing else in the run will mention it.
+    /// This was the shape `unprefixed` created -- a pattern that was right until the
+    /// names moved -- and it is now the ordinary mistake instead: the prefix belongs to
+    /// routing and never to a list. The line reads as though it blocks everything.
+    /// Nothing else in the run will mention it.
     #[test]
     fn a_pattern_that_matches_no_tool_is_reported() {
         let advertised = vec!["read".to_string(), "grep".to_string()];
@@ -368,14 +384,59 @@ mod tests {
     #[test]
     fn both_lists_together_are_allowed_and_described() {
         let hooks = Hooks {
-            tool_allowlist: vec!["a__*".to_string()],
-            tool_denylist: vec!["a__danger".to_string()],
+            tool_allowlist: vec!["a_*".to_string()],
+            tool_denylist: vec!["a_danger".to_string()],
             ..Default::default()
         };
         // Nothing to assert but that it does not refuse: the warning is for a person.
         describe_hooks("a", &hooks);
-        assert!(check_access(&hooks, "a__safe").is_ok());
-        assert!(check_access(&hooks, "a__danger").is_err());
+        assert!(check_access(&hooks, "a_safe").is_ok());
+        assert!(check_access(&hooks, "a_danger").is_err());
+    }
+
+    /// The lists are held against the SERVER's names, with no `server__` prefix.
+    ///
+    /// The lists live inside one server's own entry, so a pattern naming that server
+    /// is the entry repeating a label atoma assembles afterwards -- from `unprefixed`
+    /// and the server's key. A setting that has to know how it will be relabelled
+    /// breaks when the label changes, and `unprefixed` is exactly such a change: this
+    /// repository's `files_readonly` had `read` in its allowlist and its neighbour
+    /// `atomaton_env` had `atomaton_env__reload_environment`, for one tool each, and
+    /// the difference was only which of the two had asked for bare names.
+    #[test]
+    fn the_lists_are_written_with_the_servers_own_names() {
+        let hooks = Hooks {
+            tool_allowlist: vec!["reload_environment".to_string()],
+            ..Default::default()
+        };
+        // The name the server advertises is what is allowed...
+        assert!(check_access(&hooks, "reload_environment").is_ok());
+        // ...and the prefixed spelling is not a second way to say it. Two spellings
+        // for one fact is the shape this repository keeps paying for.
+        assert!(check_access(&hooks, "atomaton_env__reload_environment").is_err());
+    }
+
+    /// A pattern written with a prefix is reported as guarding nothing.
+    ///
+    /// It is not an error -- a tools file is not rewritten under anybody -- but it is
+    /// the only warning a writer gets, and it has to fire or the mistake is silent.
+    #[test]
+    fn a_prefixed_pattern_is_reported_as_dead() {
+        let hooks = Hooks {
+            tool_denylist: vec!["filesystem__write*".to_string()],
+            ..Default::default()
+        };
+        let advertised = vec!["read".to_string(), "write".to_string()];
+        assert_eq!(
+            unmatched_patterns(&hooks, &advertised),
+            vec!["filesystem__write*".to_string()]
+        );
+        // And the same list written against the server's own names is not dead.
+        let ok = Hooks {
+            tool_denylist: vec!["write*".to_string()],
+            ..Default::default()
+        };
+        assert!(unmatched_patterns(&ok, &advertised).is_empty());
     }
 
     #[test]

@@ -6,8 +6,16 @@ use std::collections::HashMap;
 #[derive(Debug, Clone, Default)]
 pub struct Hooks {
     /// Glob patterns for allowed tools. Empty = all tools allowed.
+    ///
+    /// A pattern is held against the names the SERVER advertises -- `read`, `bash` --
+    /// with no `server__` prefix, however that server's tools end up labelled. The
+    /// lists belong to one server's entry, so the server naming itself in them is the
+    /// entry repeating a label atoma assembles afterwards; a `unprefixed` server's
+    /// names are the same either way, which is why one spelling works for both.
     pub tool_allowlist: Vec<String>,
     /// Glob patterns for blocked tools. Checked before the allowlist.
+    ///
+    /// Written the same way as `tool_allowlist`: the server's own names, unprefixed.
     pub tool_denylist: Vec<String>,
     /// Scripts invoked before each tool call, in order.
     ///
