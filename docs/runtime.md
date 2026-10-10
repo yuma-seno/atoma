@@ -182,7 +182,7 @@ name, a colon, then space-separated `key=value`:
 ```
 ATOMA_TOKEN_USAGE: prompt=… completion=… total=… cached=… written=…
 ATOMA_INFERENCE_USAGE: iteration=… prompt=… completion=… cached=… written=… request=…
-ATOMA_CONFIG_FINDING: kind=dead_guard severity=warn server=files_ro pattern=files_ro__* tools=read,grep
+ATOMA_CONFIG_FINDING: kind=dead_guard severity=warn server=files_ro pattern=files_ro__read tools=read,grep
 ATOMA_LLM_ERROR: label=Anthropic code=free_rate_limited type=orcarouter_api_error
 ```
 

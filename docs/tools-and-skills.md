@@ -19,7 +19,9 @@ filesystem:
   args: ["-y", "@modelcontextprotocol/server-filesystem", "."]
   env: {}
   hooks:
-    tool_allowlist: ["filesystem__read_file"]
+    # The names the SERVER advertises, with no `server__` prefix -- see "Which names
+    # a list is written in" below.
+    tool_allowlist: ["read_file"]
     before_tool: ./scripts/before_hook
     after_tool: ./scripts/after_hook
 ```
@@ -27,7 +29,8 @@ filesystem:
 At runtime:
 
 - Atoma starts each configured server, or connects to one that is already running.
-- Calls MCP `tools/list` and registers each tool as `server__tool`.
+- Calls MCP `tools/list` and registers each tool as `server__tool` — or as `tool`,
+  when the entry sets `unprefixed: true`.
 - Converts MCP `inputSchema` to OpenAI-compatible `function.parameters`.
 
 ### Where a server is
@@ -209,7 +212,7 @@ ask it `tools/list`, and compare the answer with the file. Two things are checke
 
 | Finding | Severity | What it means |
 | --- | --- | --- |
-| `dead_guard` | `warn` | A pattern in `tool_allowlist` or `tool_denylist` matches none of the tools that server advertises. It reads as a guard and guards nothing — usually a `server__` prefix left in place on a server that sets `unprefixed: true`. |
+| `dead_guard` | `warn` | A pattern in `tool_allowlist` or `tool_denylist` matches none of the tools that server advertises. It reads as a guard and guards nothing — usually a `server__` prefix left on, which the lists never take. |
 | `duplicate_tool` | `error` | Two servers offer one tool name, which routing cannot resolve. The run stops. |
 
 **Only `atoma run` writes this line.** `atoma validate --with-live-tools` prints the
@@ -218,7 +221,7 @@ same findings as prose on stderr and exits non-zero: it is a gate, not a channel
 Each finding is written once, to the log stream on stderr, as a line of fields:
 
 ```
-ATOMA_CONFIG_FINDING: kind=dead_guard severity=warn server=files_ro pattern=files_ro__* tools=read,grep,glob
+ATOMA_CONFIG_FINDING: kind=dead_guard severity=warn server=files_ro pattern=files_ro__read tools=read,grep,glob
 ATOMA_CONFIG_FINDING: kind=duplicate_tool severity=error tool=read servers=files,files_ro
 ```
 
@@ -256,9 +259,33 @@ and it fails before anything has been changed.
 
 ## Prefixes and reserved namespaces
 
-- External tool names are always prefixed by server name: `server__name`.
+- An external tool's callable name is `server__name`, unless that server sets
+  [`unprefixed: true`](#which-names-a-list-is-written-in), in which case it is `name`.
 - Prefix `atoma_builtin__` is reserved.
 - If any external tool starts with `atoma_builtin__`, runtime fails during startup.
+
+### Which names a list is written in
+
+`tool_allowlist` and `tool_denylist` are written with the names the SERVER advertises
+— `read`, `bash`, `create_pr` — and never with the `server__` prefix, whatever that
+server's tools end up being called.
+
+The lists live inside one server's own entry, so a pattern naming that server is the
+entry repeating a label atoma assembles afterwards, from `unprefixed` and the entry's
+key. A setting that has to know how it will be relabelled breaks when the label
+changes, and `unprefixed` is exactly such a change. It is also what made one spelling
+work for `unprefixed` servers and another for everything else, for no reason a reader
+of either file could see.
+
+A pattern written with a prefix matches nothing. It is reported as
+[`dead_guard`](#what-atoma-finds-wrong-with-a-tools-file), which `atoma run` logs as a
+warning and `atoma validate --with-live-tools` treats as a failure — so a list carried
+over from the old spelling is caught by the gate rather than silently ceasing to
+guard. An allowlist whose patterns all miss refuses every tool on that server: the
+run starts and nothing it offers can be called.
+
+Two servers offering one bare name is a `duplicate_tool`, which is fatal — so a bare
+pattern cannot become ambiguous by being written this way.
 
 ## Hooks and failure behavior
 

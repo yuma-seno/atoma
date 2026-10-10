@@ -1271,7 +1271,11 @@ pub fn findings(configs: &[ToolDef], offered: &[(String, Vec<RegisteredTool>)]) 
         // Before the access filter, not after: a pattern is dead because it matches
         // nothing the server has, and the filter removing a tool is that pattern
         // working.
-        let names: Vec<String> = tools.iter().map(|t| t.prefixed_name.clone()).collect();
+        //
+        // The names are the server's own, not the prefixed ones the routes are keyed
+        // by: the lists live inside this server's entry, so `read` is what one writes
+        // and `read` is what is held to it. See `hooks::access_denial_reason`.
+        let names: Vec<String> = tools.iter().map(|t| t.tool_name.clone()).collect();
         for pattern in hooks::unmatched_patterns(&config.hooks, &names) {
             out.push(Finding {
                 fatal: false,
@@ -1293,7 +1297,7 @@ pub fn findings(configs: &[ToolDef], offered: &[(String, Vec<RegisteredTool>)]) 
         // After it, here: a tool a server denies is not a name it claims, and counting
         // it would report a clash that cannot happen.
         for tool in tools {
-            if hooks::access_denial_reason(&config.hooks, &tool.prefixed_name).is_some() {
+            if hooks::access_denial_reason(&config.hooks, &tool.tool_name).is_some() {
                 continue;
             }
             if let Some(first) = claimed.get(&tool.prefixed_name) {
@@ -1477,7 +1481,7 @@ impl McpRegistry {
         let mut routes: HashMap<String, Route> = HashMap::new();
         for (config, (_, tools)) in configs.iter().zip(offered) {
             for tool in tools {
-                if hooks::access_denial_reason(&config.hooks, &tool.prefixed_name).is_some() {
+                if hooks::access_denial_reason(&config.hooks, &tool.tool_name).is_some() {
                     continue;
                 }
                 routes.insert(
