@@ -1563,6 +1563,14 @@ impl McpRegistry {
             .and_then(|route| self.hooks.get(&route.server))
             .cloned();
 
+        // Which server this reaches, kept for the result. Taken here rather than asked
+        // for on the way out because a call that fails still reached a server, and the
+        // registry is the only place that knows which.
+        let server = self
+            .routes
+            .get(prefixed_name)
+            .map(|route| route.server.clone());
+
         if let Some(ref h) = hooks {
             hooks::check_access(h, prefixed_name)?;
 
@@ -1600,6 +1608,7 @@ impl McpRegistry {
             content,
             images,
             session_ends,
+            server,
         })
     }
 
@@ -1646,6 +1655,12 @@ impl McpRegistry {
 impl crate::domain::ports::ToolPort for McpRegistry {
     fn tool_definitions(&self) -> Vec<serde_json::Value> {
         self.tool_definitions()
+    }
+
+    fn server_for(&self, prefixed_name: &str) -> Option<String> {
+        self.routes
+            .get(prefixed_name)
+            .map(|route| route.server.clone())
     }
 
     async fn call_tool(

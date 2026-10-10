@@ -5,6 +5,7 @@ mod execution;
 mod report;
 
 use anyhow::{Context, Result};
+use std::collections::BTreeMap;
 use std::io::IsTerminal;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -152,6 +153,22 @@ pub struct RunRecord {
     /// back, and zero is the honest answer for a run that never recorded it.
     #[serde(default)]
     pub iterations: usize,
+    /// Which tools each MCP server was asked for, and how many times.
+    ///
+    /// `server -> tool -> calls`. The one thing a session cannot be asked afterwards:
+    /// a tool reaches the model under its own bare name, so the server that answered is
+    /// gone from the transcript by the time anything reads it. `unprefixed` is what makes
+    /// that true, and it is also what makes this necessary -- two servers may offer
+    /// `read`, and a reader deciding whether a server is ever used needs the server.
+    ///
+    /// Counted where the calls are made, like `iterations`, and for the same reason: a
+    /// run that ends by failing still made the calls it made.
+    ///
+    /// `#[serde(default)]` for the sessions written before it existed. An empty map is
+    /// the honest answer there -- it says nothing was recorded, which is true, rather
+    /// than claiming no server was called.
+    #[serde(default)]
+    pub server_calls: BTreeMap<String, BTreeMap<String, usize>>,
 }
 
 /// Append this run to the session's own record of its runs.
@@ -181,6 +198,7 @@ fn record_run(session: &mut Session, facts: &RunFacts) {
         ended_because: facts.ended_because.to_string(),
         messages: session.messages.len(),
         iterations: facts.iterations,
+        server_calls: facts.server_calls.clone(),
     };
     match serde_json::to_value(&record) {
         Ok(value) => runs.push(value),
@@ -456,8 +474,7 @@ async fn run_inner(
         stop_file.as_deref(),
         agent.vision,
         loop_retries,
-        &mut facts.iterations,
-        &mut facts.usage,
+        facts,
     )
     .await;
 
@@ -591,6 +608,51 @@ mod tests {
         record_run(&mut session, &facts_for("completed", 3));
 
         assert_eq!(iterations_of(&session, 0), Some(3));
+    }
+
+    /// Which server each call went to, which is the one thing the transcript cannot say.
+    ///
+    /// A tool reaches the model under its own bare name -- `read`, `bash` -- so a reader
+    /// holding only the session sees the call and not the server. This is the record that
+    /// answers it, and the reason a deployment can still tell which of its servers is
+    /// never used once every name is unprefixed.
+    #[test]
+    fn the_servers_each_tool_was_asked_for_are_recorded() {
+        let mut session = Session::default();
+        let mut facts = facts_for("completed", 4);
+        facts.record_server_call(Some("files"), "read");
+        facts.record_server_call(Some("files"), "read");
+        facts.record_server_call(Some("files"), "grep");
+        facts.record_server_call(Some("github"), "create_pr");
+        // A built-in tool has no server, and counting it under one that does not exist
+        // would make `load_skill` read as a server of its own.
+        facts.record_server_call(None, "load_skill");
+
+        record_run(&mut session, &facts);
+
+        let recorded = run_field(&session, 0, "server_calls").expect("server_calls");
+        assert_eq!(recorded["files"]["read"], 2);
+        assert_eq!(recorded["files"]["grep"], 1);
+        assert_eq!(recorded["github"]["create_pr"], 1);
+        assert_eq!(recorded.as_object().map(|m| m.len()), Some(2));
+        assert!(
+            recorded.get("load_skill").is_none(),
+            "a tool with no server must not become one: {recorded}"
+        );
+    }
+
+    /// Every run says so, even the ones that called nothing: a reader adding these up
+    /// must not have to tell "no calls" apart from "no field".
+    #[test]
+    fn a_run_that_called_no_server_still_carries_an_empty_map() {
+        let mut session = Session::default();
+
+        record_run(&mut session, &facts_for("completed", 1));
+
+        assert_eq!(
+            run_field(&session, 0, "server_calls"),
+            Some(serde_json::json!({}))
+        );
     }
 
     /// The session and the envelope have to say the same thing about the same run. They

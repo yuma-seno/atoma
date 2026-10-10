@@ -16,6 +16,7 @@
 //! reports cannot drift apart.
 
 use serde_json::Value;
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use crate::domain::ports::LlmUsage;
@@ -63,12 +64,50 @@ pub struct RunFacts {
     pub seconds: u64,
     /// Round trips to the model this run made. What a run waits on and is billed for.
     pub iterations: usize,
+    /// Which tools each MCP server was asked for, and how many times.
+    ///
+    /// `server -> tool -> calls`. The one thing a session cannot be asked, because a
+    /// tool arrives at the model under its own bare name and the server that answered is
+    /// gone by then -- see `ToolCallResult::server`.
+    ///
+    /// This exists so a reader can tell which servers a repository actually uses. The
+    /// names in a session are not enough for it: two servers may offer `read`, and a
+    /// deployment's "never called" list needs the server rather than the tool. A tool
+    /// count alone answers a different question, and both are wanted, so both are here.
+    ///
+    /// Every call the registry dispatched counts, refused and failed ones included: a
+    /// server that answered "denied" was asked for its prompt slot and did something
+    /// with it. A call whose arguments would not parse is not counted at all, because it
+    /// never reached a server to be attributed to.
+    ///
+    /// A `BTreeMap` rather than a `HashMap`: this is written into a session on the data
+    /// branch and diffed there, and an ordering that varies between two runs of the same
+    /// session would make every diff a rewrite.
+    pub server_calls: BTreeMap<String, BTreeMap<String, usize>>,
     /// Tokens this run spent, summed over the inferences that reported any. Partial on
     /// an ending that is not a completion, which is the honest answer: a run that failed
     /// on its fourth turn still spent what its first three cost.
     pub usage: LlmUsage,
     /// Where the session was written, if the caller asked for it to be.
     pub session_path: Option<PathBuf>,
+}
+
+impl RunFacts {
+    /// One tool call on one server, counted.
+    ///
+    /// Called from `execute_tool_calls`, which is where a call becomes a fact: the
+    /// registry has answered by then, and the server it answered from is on the result.
+    /// A result with no server is a built-in tool -- `load_skill` -- and has no server
+    /// to be counted against, so it is not.
+    pub fn record_server_call(&mut self, server: Option<&str>, tool: &str) {
+        let Some(server) = server else { return };
+        *self
+            .server_calls
+            .entry(server.to_string())
+            .or_default()
+            .entry(tool.to_string())
+            .or_insert(0) += 1;
+    }
 }
 
 impl Default for RunFacts {
@@ -83,6 +122,7 @@ impl Default for RunFacts {
             ended_because: "failed",
             seconds: 0,
             iterations: 0,
+            server_calls: BTreeMap::new(),
             usage: LlmUsage::default(),
             session_path: None,
         }
@@ -239,6 +279,16 @@ mod tests {
             ended_because: "completed",
             seconds: 9,
             iterations: 4,
+            server_calls: BTreeMap::from([
+                (
+                    "files".to_string(),
+                    BTreeMap::from([("read".to_string(), 3), ("grep".to_string(), 1)]),
+                ),
+                (
+                    "github".to_string(),
+                    BTreeMap::from([("create_pr".to_string(), 1)]),
+                ),
+            ]),
             usage: LlmUsage {
                 prompt_tokens: 100,
                 completion_tokens: 20,

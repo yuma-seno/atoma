@@ -52,6 +52,16 @@ impl ToolPort for MockMcpRegistry {
         self.tools.clone()
     }
 
+    /// One fixed server, because that is what this mock is: a registry with a list of
+    /// tools and no routing beyond it. Named so a caller counting calls has something to
+    /// count against, and `None` for a name it does not offer, which is what a real
+    /// registry answers for a tool nobody serves.
+    fn server_for(&self, prefixed_name: &str) -> Option<String> {
+        self.responses
+            .contains_key(prefixed_name)
+            .then(|| "mock".to_string())
+    }
+
     async fn call_tool(
         &mut self,
         _agent_name: &str,

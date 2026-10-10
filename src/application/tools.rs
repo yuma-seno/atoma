@@ -189,6 +189,19 @@ impl ToolPort for RuntimeTools {
         definitions
     }
 
+    /// Delegated, so a caller counting calls sees the servers rather than the wrapper.
+    ///
+    /// `load_skill` is this wrapper's own tool and answers `None`: no server offers it,
+    /// and a caller must not read that as a server whose name is empty.
+    fn server_for(&self, name: &str) -> Option<String> {
+        if name == LOAD_SKILL_TOOL {
+            return None;
+        }
+        self.external
+            .as_ref()
+            .and_then(|external| external.server_for(name))
+    }
+
     async fn call_tool(
         &mut self,
         agent_name: &str,

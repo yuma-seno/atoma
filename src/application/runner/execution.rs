@@ -7,11 +7,13 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use crate::domain::ports::{FinishReason, LlmPort, LlmUsage, ToolCallResult, ToolPort};
+use crate::domain::ports::{FinishReason, LlmPort, ToolCallResult, ToolPort};
 use crate::domain::repetition::{Repetition, RepetitionDetector};
 use crate::domain::session::{Message, Session, ToolCall};
 use crate::domain::tool_loop::{CallOutcome, LoopTracker};
 use crate::infra::llm::shared::{StreamInterrupted, MAX_STREAM_RETRIES};
+
+use super::RunFacts;
 
 /// How many consecutive degenerate (contentless) completions to re-request
 /// before giving up.
@@ -140,6 +142,7 @@ async fn execute_tool_calls(
     session: &mut Session,
     tools: &mut Box<dyn ToolPort + Send>,
     loop_tracker: &mut LoopTracker,
+    facts: &mut RunFacts,
 ) -> Result<bool> {
     session
         .messages
@@ -191,6 +194,10 @@ async fn execute_tool_calls(
 
         match tools.call_tool(agent_name, tool_name, &arguments).await {
             Ok(result) => {
+                // Counted before anything else looks at the result: the call reached a
+                // server and was answered, and both of those are true whether the answer
+                // was a report, a refusal or an empty string.
+                facts.record_server_call(result.server.as_deref(), tool_name);
                 // The result's own text, because the rule that matters is whether the
                 // answer changed -- see `domain::tool_loop`. A call carrying only
                 // images or metadata answered with something, just not with words.
@@ -217,6 +224,11 @@ async fn execute_tool_calls(
                 }
             }
             Err(e) => {
+                // A call that failed still reached the server that refused it, and a
+                // refusal is that server doing its job -- so it counts. The name is
+                // looked up rather than carried because `ToolCallResult` is not built on
+                // this path; `tool_servers` is the registry's own table.
+                facts.record_server_call(tools.server_for(tool_name).as_deref(), tool_name);
                 let msg = format!("Error: {}", e);
                 tracing::error!("Tool '{}' failed: {}", tool_name, e);
                 session.messages.push(Message::tool(&tool_call.id, &msg));
@@ -337,20 +349,23 @@ fn withhold_images(message: &Message) -> Message {
 
 /// Run the inference loop: call LLM, handle tool calls or final response.
 ///
-/// `inferences` counts the round trips this run made, and is an out parameter rather
-/// than a field on `InferenceResult` on purpose: every ending that is not a plain
-/// completion leaves this function through `Err` -- the three soft stops and every
-/// failure -- and those are exactly the runs whose inference count is worth having, a
-/// run cut off by `--max-iterations` being the one somebody most wants the size of. A
-/// field on the returned value would only ever describe the runs that finished, while
-/// the caller records a run for all of them.
+/// `inferences` counts the round trips this run made, and is written straight into
+/// `facts` rather than returned: every ending that is not a plain completion leaves
+/// this function through `Err` -- the three soft stops and every failure -- and those
+/// are exactly the runs whose inference count is worth having, a run cut off by
+/// `--max-iterations` being the one somebody most wants the size of. A field on the
+/// returned value would only ever describe the runs that finished, while the caller
+/// records a run for all of them.
 ///
-/// `total_usage` is an out parameter for the same reason, and used to be a field on the
-/// returned value: a run that spent 200k tokens and then hit its time limit reported no
-/// tokens at all, because the only path that carried them was the path that did not
-/// happen. It is summed here rather than by the caller because this is where the
-/// per-inference numbers arrive, and the two cache counts stay `None` until a provider
-/// reports one.
+/// `facts.usage` is written for the same reason, and used to be a field on the returned
+/// value: a run that spent 200k tokens and then hit its time limit reported no tokens at
+/// all, because the only path that carried them was the path that did not happen. It is
+/// summed here rather than by the caller because this is where the per-inference numbers
+/// arrive, and the two cache counts stay `None` until a provider reports one.
+///
+/// One `&mut RunFacts` rather than one parameter per field: they are all fields of it,
+/// and splitting them out made the caller hold several mutable borrows of the same value
+/// -- which the borrow checker refused, correctly, once a third field was added here.
 #[allow(clippy::too_many_arguments)]
 pub async fn inference_loop(
     llm_client: &dyn LlmPort,
@@ -365,8 +380,7 @@ pub async fn inference_loop(
     stop_file: Option<&Path>,
     vision: bool,
     loop_retries: bool,
-    inferences: &mut usize,
-    total_usage: &mut LlmUsage,
+    facts: &mut RunFacts,
 ) -> Result<InferenceResult> {
     let mut loop_tracker = LoopTracker::default();
     let mut consecutive_empty: u8 = 0;
@@ -573,7 +587,7 @@ pub async fn inference_loop(
         // Incremented on the response rather than on an assistant message, so a round
         // trip that came back empty and was re-requested is counted too: it was waited
         // on and it was billed, which is what this number claims to measure.
-        *inferences += 1;
+        facts.iterations += 1;
 
         if let Some(u) = response.usage {
             // Per inference, not only per run. The run total cannot answer how the
@@ -602,20 +616,20 @@ pub async fn inference_loop(
                     .map_or_else(|| "unknown".to_string(), |n| n.to_string()),
                 response.request_id.as_deref().unwrap_or("unknown"),
             );
-            total_usage.prompt_tokens += u.prompt_tokens;
-            total_usage.completion_tokens += u.completion_tokens;
-            total_usage.total_tokens += u.total_tokens;
+            facts.usage.prompt_tokens += u.prompt_tokens;
+            facts.usage.completion_tokens += u.completion_tokens;
+            facts.usage.total_tokens += u.total_tokens;
             // Summed only over the inferences that reported one, and left as `None`
             // when not one did. Starting the accumulator at zero would turn a run
             // against a provider that says nothing about its cache into a run whose
             // cache did nothing, and the two look identical afterwards.
             if let Some(cached) = u.cached_prompt_tokens {
-                total_usage.cached_prompt_tokens =
-                    Some(total_usage.cached_prompt_tokens.unwrap_or(0) + cached);
+                facts.usage.cached_prompt_tokens =
+                    Some(facts.usage.cached_prompt_tokens.unwrap_or(0) + cached);
             }
             if let Some(written) = u.written_prompt_tokens {
-                total_usage.written_prompt_tokens =
-                    Some(total_usage.written_prompt_tokens.unwrap_or(0) + written);
+                facts.usage.written_prompt_tokens =
+                    Some(facts.usage.written_prompt_tokens.unwrap_or(0) + written);
             }
         }
 
@@ -659,7 +673,8 @@ pub async fn inference_loop(
 
             tracing::info!("LLM requested {} tool call(s)", calls.len());
             let session_ends =
-                execute_tool_calls(agent_name, &calls, session, tools, &mut loop_tracker).await?;
+                execute_tool_calls(agent_name, &calls, session, tools, &mut loop_tracker, facts)
+                    .await?;
 
             if session_ends {
                 tracing::info!("Tool requested session suspension; ending inference loop");
