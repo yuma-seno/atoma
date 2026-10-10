@@ -212,6 +212,19 @@ pub struct ToolCallResult {
     /// maps it to its own, which is where that knowledge already lives.
     pub images: Vec<Value>,
     pub session_ends: bool,
+    /// The server that answered, when one did.
+    ///
+    /// Carried out of the registry because it is the one fact a call cannot be asked
+    /// for afterwards. A tool name reaches the model bare — `read`, `bash` — with the
+    /// server stripped off, deliberately: that is what `unprefixed` buys. So a reader
+    /// holding only the session sees a call and cannot say which server made it, and
+    /// two servers may legitimately offer one name to two different agents. This is the
+    /// registry's own answer, taken from the route it dispatched through, so it is
+    /// exact rather than derived.
+    ///
+    /// `None` for the built-in tools, which no server answers. A caller counting what
+    /// the servers were asked for must not read that as a server called `""`.
+    pub server: Option<String>,
 }
 
 /// Unified port for tools visible to the LLM.
@@ -220,6 +233,16 @@ pub struct ToolCallResult {
 #[async_trait]
 pub trait ToolPort: Send {
     fn tool_definitions(&self) -> Vec<Value>;
+
+    /// The server that would answer `name`, without calling it.
+    ///
+    /// `None` for a built-in tool and for a name no server offers. Wanted because a call
+    /// that FAILED has no `ToolCallResult` to read the server from, and a refusal is a
+    /// server doing its job rather than a call that did not happen -- so a reader counting
+    /// what each server was asked for has to be able to attribute one. `McpRegistry`
+    /// answers it from the route table it dispatches through, so this is the same fact
+    /// `call_tool_with_hooks` puts on a successful result.
+    fn server_for(&self, name: &str) -> Option<String>;
 
     async fn call_tool(
         &mut self,
