@@ -15,19 +15,30 @@ Per iteration, Atoma:
 Completion handling:
 
 - `stop` or `end_turn`: successful completion
-- `length`: returns truncated text with completion reason `length`
+- `length`: returns truncated text with completion reason `length`; with no text at all it
+  is a contentless completion (see below)
 - `content_filter`: run fails
 - unknown finish reason: run fails
 
+Every assistant message a run adds carries the provider's reason for it as
+`finish_reason` — `stop`, `length`, `content_filter` or `tool_calls`. It is how a session
+read afterwards says why each turn ended, including the turns whose ending no longer shows
+in the text. The field is Atoma's own and is stripped before the request goes out.
+
 ## Contentless completions
 
-A completion carrying neither text nor tool calls is treated as a provider-side
-misfire, not as a decision by the model. There is nothing in it to append to the
-session, so Atoma re-sends the same request.
+A completion carrying neither text nor tool calls is not an answer: there is nothing in it
+to append to the session for the model to have said or done. It is re-requested with a note
+in the session saying the previous attempt returned nothing, the shape the dropped-stream
+and repetition re-asks already use, so a turn that stumbled and recovered is visible rather
+than looking like it never happened.
 
-This is bounded: after 2 consecutive contentless completions the run fails. The
-bound applies to both shapes — an empty `tool_calls` array, and `stop`/`end_turn`
-with empty text. Any productive completion resets the counter.
+This is bounded: after 2 consecutive contentless completions the run fails, naming the
+last attempt's finish reason. The bound covers all three shapes — an empty `tool_calls`
+array, `stop`/`end_turn` with empty text, and `length` with nothing returned. Any
+productive completion resets the counter. A `length` completion that *carried* text is a
+partial answer, not a contentless one, and still ends the run as `completed` with
+completion reason `length`.
 
 For transport-level failures and the request timeout, see
 [configuration.md](configuration.md).
@@ -157,7 +168,7 @@ read an answer.
 | `iterations` | `--max-iterations` was reached. | `2` |
 | `runtime` | `--max-runtime-secs` was reached. | `2` |
 | `stopped` | The path given to `--stop-file` existed. | `2` |
-| `failed` | Anything else: the provider, a tool, a loop cut short for repeating itself. | non-zero error |
+| `failed` | Anything else: the provider, a tool, a loop cut short for repeating itself, a provider that kept returning contentless completions. | non-zero error |
 
 Read `ended_because`, not the exit status. The three deliberate stops share `2` with each
 other and with clap's own argument-parsing error, so the status cannot tell them apart
@@ -222,6 +233,6 @@ says which of the two it used.
 | `Tool 'X' not found in tools file` | Agent `mcp_servers` and tools YAML keys do not match | Align names exactly and re-run `atoma validate` |
 | Hook script not found | Relative hook path cannot be resolved from tools file directory | Fix path in `tools.yaml` and ensure file exists |
 | `Unknown skill` from `atoma_builtin__load_skill` | Skill name not present in loaded catalog | Use one of the names listed in `AVAILABLE_SKILLS` |
-| `LLM returned empty response ... times in a row` | Provider kept returning contentless completions | Check provider/endpoint health; on OpenRouter, pin routing with `extra_body.provider` |
+| `LLM returned an empty response (finish_reason: X) ... times in a row` | Provider kept returning contentless completions. A `length` here means the model hit its output-token ceiling before producing anything — often a reasoning model spending the whole budget on thoughts | Check provider/endpoint health; on OpenRouter, pin routing with `extra_body.provider`. If the reason is `length`, raise the output-token ceiling or shorten the request |
 | `Failed to parse ... response` | Body did not match the expected shape (truncated bodies are retried automatically) | Verify the model is served in an OpenAI-compatible format at the configured base URL |
 | Single request takes far longer than expected | Upstream endpoint stalled; each attempt waits `ATOMA_LLM_TIMEOUT` | Lower `ATOMA_LLM_TIMEOUT` to fail faster, and route away from the stalling endpoint |

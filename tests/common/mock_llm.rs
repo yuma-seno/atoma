@@ -40,6 +40,23 @@ impl MockLlmClient {
         self
     }
 
+    /// Enqueue a text response under a finish reason other than `stop`.
+    ///
+    /// For the arms a truncated or filtered completion reaches: one that carried text
+    /// (a partial answer) and one that carried none.
+    pub fn enqueue_text_with_reason(self, text: &str, reason: FinishReason) -> Self {
+        let response = LlmResponse {
+            choices: vec![LlmChoice {
+                message: Message::assistant(Some(text), None),
+                finish_reason: Some(reason),
+            }],
+            usage: None,
+            request_id: None,
+        };
+        self.queue.lock().unwrap().push_back(response);
+        self
+    }
+
     /// Enqueue a tool_calls response.
     pub fn enqueue_tool_calls(self, tool_calls: Vec<ToolCall>) -> Self {
         let msg = Message {
@@ -51,6 +68,9 @@ impl MockLlmClient {
             atoma_metadata: None,
             provider_items: None,
             reasoning_content: None,
+            // The reason travels on `LlmChoice::finish_reason`, as every adapter sends
+            // it; the response message itself is built without one, as they build it.
+            finish_reason: None,
         };
         let response = LlmResponse {
             choices: vec![LlmChoice {

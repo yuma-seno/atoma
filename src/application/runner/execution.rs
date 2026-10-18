@@ -15,15 +15,50 @@ use crate::infra::llm::shared::{StreamInterrupted, MAX_STREAM_RETRIES};
 
 use super::RunFacts;
 
-/// How many consecutive degenerate (contentless) completions to re-request
+/// How many consecutive contentless (degenerate) completions to re-request
 /// before giving up.
 ///
-/// A completion carrying neither text nor tool calls is a provider-side
-/// misfire, not a decision the model made — there is nothing in it to append to
-/// the session, so re-sending the identical payload is a genuine retry and gets
-/// a fresh sample. Bounded because a provider stuck in this state would
-/// otherwise silently consume the whole iteration budget.
+/// A completion carrying neither text nor tool calls is not an answer: there is
+/// nothing in it to append to the session for the model to have said or done. The
+/// turn is asked again with a note that says so — the shape the dropped-stream and
+/// repetition re-asks already use — so a turn that stumbled and recovered is visible
+/// in the session rather than looking like it never happened. Bounded because a
+/// provider stuck in this state would otherwise silently consume the whole iteration
+/// budget.
 const MAX_EMPTY_COMPLETION_RETRIES: u8 = 2;
+
+/// Count a contentless completion and either ask the turn again or give up.
+///
+/// The three shapes a contentless completion arrives in — no text under `stop`, no
+/// text under `length`, an empty `tool_calls` array — are one problem seen three ways,
+/// so they share one counter and one ending. `what` names which shape this was, and
+/// the same words go into the log line, the note left in the session and the error a
+/// reader finally gets: `an empty response (finish_reason: length)`, `an empty
+/// tool_calls array`.
+///
+/// Returns `Err` once the bound is passed; otherwise the caller `continue`s the loop.
+fn reask_contentless(session: &mut Session, consecutive_empty: &mut u8, what: &str) -> Result<()> {
+    *consecutive_empty += 1;
+    if *consecutive_empty > MAX_EMPTY_COMPLETION_RETRIES {
+        bail!(
+            "LLM returned {} {} times in a row",
+            what,
+            *consecutive_empty
+        );
+    }
+    tracing::warn!(
+        "LLM returned {} — re-requesting ({}/{})",
+        what,
+        *consecutive_empty,
+        MAX_EMPTY_COMPLETION_RETRIES
+    );
+    session.messages.push(Message::user(&format!(
+        "Your previous attempt at this turn returned {}. Answer the same request again, \
+         and make sure your answer contains something a person can read.",
+        what
+    )));
+    Ok(())
+}
 
 /// Sentinel error returned when the inference loop runs out of iterations.
 #[derive(Debug)]
@@ -143,10 +178,15 @@ async fn execute_tool_calls(
     tools: &mut Box<dyn ToolPort + Send>,
     loop_tracker: &mut LoopTracker,
     facts: &mut RunFacts,
+    finish_reason: FinishReason,
 ) -> Result<bool> {
-    session
-        .messages
-        .push(Message::assistant(None, Some(tool_calls.to_vec())));
+    // The turn is recorded with the reason the provider gave for it. Almost always
+    // `tool_calls`, and recorded rather than assumed: the loop warns when a response
+    // carries calls under any other reason, and a session that says which reason it was
+    // makes that warning checkable after the fact.
+    session.messages.push(
+        Message::assistant(None, Some(tool_calls.to_vec())).with_finish_reason(finish_reason),
+    );
 
     let mut session_ends = false;
     // Set instead of returned, so the batch this turn asked for is finished before the
@@ -649,18 +689,7 @@ pub async fn inference_loop(
 
         if let Some(calls) = tool_calls {
             if calls.is_empty() {
-                consecutive_empty += 1;
-                if consecutive_empty > MAX_EMPTY_COMPLETION_RETRIES {
-                    bail!(
-                        "LLM returned an empty tool_calls array {} times in a row",
-                        consecutive_empty
-                    );
-                }
-                tracing::warn!(
-                    "LLM returned empty tool_calls array — re-requesting ({}/{})",
-                    consecutive_empty,
-                    MAX_EMPTY_COMPLETION_RETRIES
-                );
+                reask_contentless(session, &mut consecutive_empty, "an empty tool_calls array")?;
                 continue;
             }
             consecutive_empty = 0;
@@ -672,44 +701,59 @@ pub async fn inference_loop(
             }
 
             tracing::info!("LLM requested {} tool call(s)", calls.len());
-            let session_ends =
-                execute_tool_calls(agent_name, &calls, session, tools, &mut loop_tracker, facts)
-                    .await?;
+            let session_ends = execute_tool_calls(
+                agent_name,
+                &calls,
+                session,
+                tools,
+                &mut loop_tracker,
+                facts,
+                finish_reason,
+            )
+            .await?;
 
             if session_ends {
                 tracing::info!("Tool requested session suspension; ending inference loop");
                 return Ok(InferenceResult::SessionEnded);
             }
         } else {
+            let text = content
+                .as_ref()
+                .and_then(|c| c.as_str())
+                .unwrap_or("")
+                .to_owned();
+
+            // A completion that carried no text and no tool calls is contentless
+            // whatever the provider called it, and the two reasons a text answer can be
+            // absent are the same problem seen twice. They used to be read apart: the
+            // `stop` arm counted and retried, while the `length` arm pushed the empty
+            // string and reported a COMPLETED run -- so a truncation that produced
+            // nothing was recorded as an answer, and nothing downstream could tell it
+            // from one. They share a counter and an ending now. A `length` that carried
+            // text is a partial answer and still completes; one that carried nothing is
+            // the non-answer an empty `stop` is.
+            //
+            // No counter reset here: every arm below returns or retries, so the
+            // tool_calls branch above is the only one that loops back with the count
+            // still live.
+            if text.is_empty() && matches!(finish_reason, FinishReason::Stop | FinishReason::Length)
+            {
+                reask_contentless(
+                    session,
+                    &mut consecutive_empty,
+                    &format!("an empty response (finish_reason: {})", finish_reason),
+                )?;
+                continue;
+            }
+
             match finish_reason {
                 // `end_turn` used to be an arm here and was dead: the Anthropic adapter
                 // has always translated it before this point.
                 FinishReason::Stop => {
-                    let text = content
-                        .as_ref()
-                        .and_then(|c| c.as_str())
-                        .unwrap_or("")
-                        .to_owned();
-                    if text.is_empty() {
-                        consecutive_empty += 1;
-                        if consecutive_empty > MAX_EMPTY_COMPLETION_RETRIES {
-                            bail!(
-                                "LLM returned empty response (finish_reason: {}) {} times in a row",
-                                finish_reason,
-                                consecutive_empty
-                            );
-                        }
-                        tracing::warn!(
-                            "LLM returned empty response (finish_reason: {}) — re-requesting ({}/{})",
-                            finish_reason,
-                            consecutive_empty,
-                            MAX_EMPTY_COMPLETION_RETRIES
-                        );
-                        continue;
-                    }
-                    // No counter reset here: this arm returns, so only the
-                    // tool_calls branch needs to clear it before looping again.
-                    session.messages.push(Message::assistant(Some(&text), None));
+                    session.messages.push(
+                        Message::assistant(Some(&text), None)
+                            .with_finish_reason(FinishReason::Stop),
+                    );
                     tracing::info!("LLM returned final response ({} chars)", text.len());
                     return Ok(InferenceResult::Completed {
                         text,
@@ -717,12 +761,10 @@ pub async fn inference_loop(
                     });
                 }
                 FinishReason::Length => {
-                    let text = content
-                        .as_ref()
-                        .and_then(|c| c.as_str())
-                        .unwrap_or("")
-                        .to_owned();
-                    session.messages.push(Message::assistant(Some(&text), None));
+                    session.messages.push(
+                        Message::assistant(Some(&text), None)
+                            .with_finish_reason(FinishReason::Length),
+                    );
                     tracing::warn!(
                         "LLM response truncated (finish_reason: length, {} chars)",
                         text.len()
@@ -786,6 +828,7 @@ mod tests {
             atoma_metadata: None,
             provider_items: None,
             reasoning_content: None,
+            finish_reason: None,
         }
     }
 
@@ -883,6 +926,7 @@ mod tests {
             atoma_metadata: None,
             provider_items: None,
             reasoning_content: None,
+            finish_reason: None,
         };
         let messages = [anthropic];
         let sent = messages_for_provider(&messages, false);

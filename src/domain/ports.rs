@@ -1,5 +1,6 @@
 use anyhow::Result;
 use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::path::Path;
@@ -152,7 +153,15 @@ pub trait LlmPort: Send + Sync {
 /// As an enum, an adapter cannot invent a fifth value and the runner's match is checked
 /// by the compiler. What each dialect calls these stays in that dialect's adapter, which
 /// is the only place that knows.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// Serialized under the same spelling [`FinishReason::as_str`] prints, so a session on
+/// disk names a reason exactly as a log line does. The naming is written twice — once in
+/// the attribute and once in `as_str` — and the test
+/// `a_session_spelling_and_a_log_spelling_agree` holds the two together: serde derives
+/// from the variant names, `as_str` is what a person reads, and a rename that moved one
+/// without the other would otherwise be invisible on disk.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum FinishReason {
     /// The model finished of its own accord.
     Stop,
@@ -307,4 +316,45 @@ pub struct PromptContext<'a> {
 #[async_trait]
 pub trait McpFactory: Send + Sync {
     async fn build(&self, tool_defs: &[ToolDef]) -> Result<Box<dyn ToolPort + Send>>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::FinishReason;
+
+    /// The word a session stores and the word a log prints are one vocabulary.
+    ///
+    /// They are written down twice -- serde's `rename_all` derives from the variant
+    /// names, `as_str` is what a person reads -- and nothing but this test stops a
+    /// rename from moving one and leaving the other. A session that spelled a reason
+    /// differently from the log would be exactly the un-checked vocabulary the enum was
+    /// introduced to end.
+    #[test]
+    fn a_session_spelling_and_a_log_spelling_agree() {
+        for reason in [
+            FinishReason::Stop,
+            FinishReason::Length,
+            FinishReason::ContentFilter,
+            FinishReason::ToolCalls,
+        ] {
+            let on_disk = serde_json::to_value(reason).unwrap();
+            assert_eq!(
+                on_disk,
+                serde_json::json!(reason.as_str()),
+                "{reason:?} is stored as {on_disk} but printed as {}",
+                reason.as_str()
+            );
+        }
+    }
+
+    /// A spelling this program never writes is not one it reads back either.
+    ///
+    /// The field is written by `as_str` and nothing else, so a value outside the four is
+    /// a session this program did not write. Reading it back is then an error rather than
+    /// a silent `Stop`, the same choice `from_openai` makes at the provider boundary.
+    #[test]
+    fn an_unknown_spelling_does_not_load_as_stop() {
+        let loaded: Result<FinishReason, _> = serde_json::from_value(serde_json::json!("banana"));
+        assert!(loaded.is_err(), "an unknown reason loaded as {loaded:?}");
+    }
 }
