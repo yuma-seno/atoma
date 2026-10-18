@@ -165,7 +165,11 @@ pub enum InferenceResult {
     SessionEnded,
 }
 
-/// Execute all tool calls from an LLM response, appending results to the session.
+/// Execute all tool calls from an LLM response, appending their results to the session.
+///
+/// The assistant turn that asked for the calls is appended by the caller, not here: it
+/// is the response message, and only the caller has it -- with the text, the tool calls
+/// and the provider items it arrived with, none of which may be rebuilt.
 ///
 /// Returns `true` if any tool requested session suspension.
 ///
@@ -178,16 +182,7 @@ async fn execute_tool_calls(
     tools: &mut Box<dyn ToolPort + Send>,
     loop_tracker: &mut LoopTracker,
     facts: &mut RunFacts,
-    finish_reason: FinishReason,
 ) -> Result<bool> {
-    // The turn is recorded with the reason the provider gave for it. Almost always
-    // `tool_calls`, and recorded rather than assumed: the loop warns when a response
-    // carries calls under any other reason, and a session that says which reason it was
-    // makes that warning checkable after the fact.
-    session.messages.push(
-        Message::assistant(None, Some(tool_calls.to_vec())).with_finish_reason(finish_reason),
-    );
-
     let mut session_ends = false;
     // Set instead of returned, so the batch this turn asked for is finished before the
     // run is. Walking out of the middle of it left the assistant's `tool_calls` with
@@ -684,8 +679,16 @@ pub async fn inference_loop(
         // arrives here as an unknown string: each adapter maps its own dialect, so this
         // is either one of four values or absent.
         let finish_reason = choice.finish_reason.unwrap_or(FinishReason::Stop);
-        let tool_calls = choice.message.tool_calls;
-        let content = choice.message.content;
+
+        // The adapter has already built the message this turn is: its text, its tool
+        // calls, and the provider items a dialect requires back. Keeping that message
+        // rather than rebuilding one from `content`/`tool_calls` is what hands the items
+        // on -- `provider_items` and `reasoning_content` are read out of the SESSION by
+        // the next request, so a message rebuilt here would arrive without them and a
+        // thinking-mode provider would answer 400. It is also what keeps the text a model
+        // wrote beside its tool calls, which a rebuild dropped.
+        let message = choice.message;
+        let tool_calls = message.tool_calls.clone();
 
         if let Some(calls) = tool_calls {
             if calls.is_empty() {
@@ -701,23 +704,20 @@ pub async fn inference_loop(
             }
 
             tracing::info!("LLM requested {} tool call(s)", calls.len());
-            let session_ends = execute_tool_calls(
-                agent_name,
-                &calls,
-                session,
-                tools,
-                &mut loop_tracker,
-                facts,
-                finish_reason,
-            )
-            .await?;
+            session
+                .messages
+                .push(message.with_finish_reason(finish_reason));
+            let session_ends =
+                execute_tool_calls(agent_name, &calls, session, tools, &mut loop_tracker, facts)
+                    .await?;
 
             if session_ends {
                 tracing::info!("Tool requested session suspension; ending inference loop");
                 return Ok(InferenceResult::SessionEnded);
             }
         } else {
-            let text = content
+            let text = message
+                .content
                 .as_ref()
                 .and_then(|c| c.as_str())
                 .unwrap_or("")
@@ -750,10 +750,9 @@ pub async fn inference_loop(
                 // `end_turn` used to be an arm here and was dead: the Anthropic adapter
                 // has always translated it before this point.
                 FinishReason::Stop => {
-                    session.messages.push(
-                        Message::assistant(Some(&text), None)
-                            .with_finish_reason(FinishReason::Stop),
-                    );
+                    session
+                        .messages
+                        .push(message.with_finish_reason(finish_reason));
                     tracing::info!("LLM returned final response ({} chars)", text.len());
                     return Ok(InferenceResult::Completed {
                         text,
@@ -761,10 +760,9 @@ pub async fn inference_loop(
                     });
                 }
                 FinishReason::Length => {
-                    session.messages.push(
-                        Message::assistant(Some(&text), None)
-                            .with_finish_reason(FinishReason::Length),
-                    );
+                    session
+                        .messages
+                        .push(message.with_finish_reason(finish_reason));
                     tracing::warn!(
                         "LLM response truncated (finish_reason: length, {} chars)",
                         text.len()

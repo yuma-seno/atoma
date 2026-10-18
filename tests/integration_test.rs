@@ -1188,6 +1188,138 @@ async fn test_a_tool_call_turn_names_tool_calls() {
     );
 }
 
+/// The items a dialect requires back survive the loop and reach the next request.
+///
+/// The loop used to rebuild each assistant message from its text and tool calls, so
+/// `provider_items` and `reasoning_content` never entered the session and the next
+/// request went out without them -- a thinking-mode provider answers 400 for that. This
+/// drives a two-turn run and inspects the SECOND request, which is the only place the
+/// loss was observable.
+#[tokio::test]
+async fn test_provider_items_reach_the_next_request() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use common::mock_llm::make_tool_call;
+
+    struct ReasoningLlm {
+        seen: Mutex<Vec<Vec<Message>>>,
+        calls: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl atoma::domain::ports::LlmPort for ReasoningLlm {
+        async fn chat_completion(
+            &self,
+            _model: &str,
+            messages: &[Message],
+            _tools: Option<&[serde_json::Value]>,
+            _extra_body: &HashMap<String, serde_json::Value>,
+        ) -> Result<LlmResponse> {
+            self.seen.lock().unwrap().push(messages.to_vec());
+            if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                Ok(LlmResponse {
+                    choices: vec![LlmChoice {
+                        message: Message {
+                            reasoning_content: Some("Let me look.".to_string()),
+                            provider_items: Some(vec![
+                                serde_json::json!({ "type": "reasoning", "id": "rs_1" }),
+                            ]),
+                            ..Message::assistant(
+                                Some("Let me check the tool."),
+                                Some(vec![make_tool_call("c1", "test_tool", r#"{"input":"x"}"#)]),
+                            )
+                        },
+                        finish_reason: Some(FinishReason::ToolCalls),
+                    }],
+                    usage: None,
+                    request_id: None,
+                })
+            } else {
+                Ok(LlmResponse {
+                    choices: vec![LlmChoice {
+                        message: Message::assistant(Some("Done!"), None),
+                        finish_reason: Some(FinishReason::Stop),
+                    }],
+                    usage: None,
+                    request_id: None,
+                })
+            }
+        }
+    }
+
+    let llm = ReasoningLlm {
+        seen: Mutex::new(Vec::new()),
+        calls: AtomicUsize::new(0),
+    };
+
+    let registry = MockMcpRegistry::new()
+        .with_tool("test_tool", "A test tool")
+        .with_response("test_tool", "tool result");
+    let agent_def = AgentDef {
+        mcp_servers: vec!["test_server".to_string()],
+        ..minimal_agent("ThinkingAgent")
+    };
+    let agent_port = StubAgentDefPort { agent_def };
+    let session_port = StubSessionPort;
+    let tool_def_port = SingleEntryToolDefPort::new("test_server");
+    let mcp_factory = StubMcpFactory::new(registry);
+
+    let dir = tempdir().unwrap();
+    let agent_path = dir.path().join("agent.md");
+    std::fs::write(&agent_path, "").unwrap();
+    let tools_path = dir.path().join("tools.yaml");
+    std::fs::write(&tools_path, "").unwrap();
+
+    run(
+        RunSettings {
+            agent_def_path: agent_path,
+            in_session: None,
+            prompt_file: None,
+            out_session: None,
+            template_path: None,
+            tools_file: Some(tools_path),
+            skills_dir: None,
+            max_iterations: Some(10),
+            max_runtime: None,
+            stop_file: None,
+            loop_retries: false,
+        },
+        RunDeps {
+            llm: &llm,
+            agent_def: &agent_port,
+            session: &session_port,
+            tool_def: &tool_def_port,
+            skill: &atoma::infra::persistence::skill::FileSkillAdapter,
+            template: &atoma::infra::template::FileTemplateAdapter,
+            mcp_factory: &mcp_factory,
+        },
+        &mut atoma::application::runner::RunFacts::default(),
+    )
+    .await
+    .expect("the run should complete");
+
+    let seen = llm.seen.lock().unwrap();
+    assert_eq!(seen.len(), 2, "expected two round trips to the model");
+    let assistant = seen[1]
+        .iter()
+        .find(|m| m.tool_calls.is_some())
+        .expect("the tool-call turn should be replayed to the model");
+    assert_eq!(
+        assistant.reasoning_content.as_deref(),
+        Some("Let me look."),
+        "the reasoning was dropped before the next request"
+    );
+    assert!(
+        assistant.provider_items.is_some(),
+        "the provider items were dropped before the next request"
+    );
+    assert_eq!(
+        assistant.content.as_ref().and_then(|c| c.as_str()),
+        Some("Let me check the tool."),
+        "the text a model wrote beside its tool calls was dropped"
+    );
+}
+
 /// A model that loops inside one completion is cut off mid-stream.
 ///
 /// The whole point of the circuit breaker: the loop is visible in the token stream
