@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::domain::ports::FinishReason;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolCallFunction {
     pub name: String,
@@ -66,6 +68,20 @@ pub struct Message {
     /// ask for: the field round-trips to exactly the providers that use it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_content: Option<String>,
+    /// Why the provider said the completion that produced this message stopped.
+    ///
+    /// Recorded because the ways a turn can end without an answer — the model stopped
+    /// of its own accord, the output hit a token ceiling, the provider filtered it —
+    /// leave the same thing behind: a message with no text and no tool calls. Nothing
+    /// downstream can tell those apart, and the one party that knows says so exactly
+    /// once, on the response, before it is gone. This is where that answer goes.
+    ///
+    /// The domain value rather than the dialect's spelling, so a session written
+    /// against one provider reads the same under another, and serialized as the word
+    /// `FinishReason::as_str` prints. `None` on a message no provider finished: today
+    /// only a continuation stitched on after a dropped stream.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finish_reason: Option<FinishReason>,
 }
 
 impl Message {
@@ -79,6 +95,7 @@ impl Message {
             atoma_metadata: None,
             provider_items: None,
             reasoning_content: None,
+            finish_reason: None,
         }
     }
 
@@ -92,6 +109,7 @@ impl Message {
             atoma_metadata: None,
             provider_items: None,
             reasoning_content: None,
+            finish_reason: None,
         }
     }
 
@@ -105,7 +123,19 @@ impl Message {
             atoma_metadata: None,
             provider_items: None,
             reasoning_content: None,
+            finish_reason: None,
         }
+    }
+
+    /// Record why the provider said this completion stopped.
+    ///
+    /// A builder rather than a sixth parameter on `assistant`, because the reason is
+    /// read off the response and applied as the message joins the session; every
+    /// constructor leaves the field `None`, so a message built where no response is in
+    /// hand is not silently given some other completion's ending.
+    pub fn with_finish_reason(mut self, reason: FinishReason) -> Self {
+        self.finish_reason = Some(reason);
+        self
     }
 
     pub fn tool(tool_call_id: &str, content: &str) -> Self {
@@ -118,6 +148,7 @@ impl Message {
             atoma_metadata: None,
             provider_items: None,
             reasoning_content: None,
+            finish_reason: None,
         }
     }
 
@@ -139,6 +170,7 @@ impl Message {
             atoma_metadata: None,
             provider_items: None,
             reasoning_content: None,
+            finish_reason: None,
         }
     }
 
@@ -162,12 +194,18 @@ impl Message {
         })
     }
 
-    /// Return a `serde_json::Value` with `atoma_metadata` stripped, suitable
-    /// for sending to the LLM API.
+    /// Return a `serde_json::Value` with the fields a provider must not see stripped.
+    ///
+    /// `atoma_metadata` is this program's own bookkeeping and never had a wire meaning.
+    /// `finish_reason` is what the provider said about the completion, kept for the
+    /// session and never part of a request: a chat-completions message body has no such
+    /// field, so passing it on would be this program inventing a wire format and asking
+    /// the provider to parse it.
     pub fn to_llm_value(&self) -> Value {
         let mut val = serde_json::to_value(self).expect("Message serialization is infallible");
         if let Some(obj) = val.as_object_mut() {
             obj.remove("atoma_metadata");
+            obj.remove("finish_reason");
         }
         val
     }
@@ -409,5 +447,61 @@ mod tests {
         let m = Message::system("sys");
         let val = m.to_llm_value();
         assert_eq!(val["content"].as_str(), Some("sys"));
+    }
+
+    /// The reason is a session's own fact and outlives the process that wrote it.
+    #[test]
+    fn a_finish_reason_survives_a_round_trip() {
+        let session = Session {
+            messages: vec![
+                Message::user("hi"),
+                Message::assistant(Some("partial"), None).with_finish_reason(FinishReason::Length),
+            ],
+            ..Default::default()
+        };
+
+        let written = serde_json::to_value(&session).unwrap();
+        assert_eq!(written["messages"][1]["finish_reason"], "length");
+
+        let read: Session = serde_json::from_value(written).unwrap();
+        assert_eq!(
+            read.messages[1].finish_reason,
+            Some(FinishReason::Length),
+            "the reason did not survive being written and read back"
+        );
+    }
+
+    /// A session the program did not write carries no reason, and that is not an error.
+    #[test]
+    fn an_absent_finish_reason_loads_as_none() {
+        let read: Message =
+            serde_json::from_value(serde_json::json!({ "role": "assistant", "content": "hi" }))
+                .unwrap();
+        assert_eq!(read.finish_reason, None);
+    }
+
+    /// The provider never asked for this field, so it must not be sent one.
+    #[test]
+    fn a_finish_reason_is_stripped_before_sending() {
+        let m = Message::assistant(Some("partial"), None)
+            .with_finish_reason(FinishReason::ContentFilter);
+        let obj = m.to_llm_value();
+        let obj = obj.as_object().unwrap();
+        assert!(
+            !obj.contains_key("finish_reason"),
+            "finish_reason should be stripped, got {obj:?}"
+        );
+        assert_eq!(obj["content"].as_str(), Some("partial"));
+    }
+
+    /// A message no provider finished writes no field at all, so an old session and a
+    /// new one that never got a reason differ by nothing.
+    #[test]
+    fn a_message_without_a_reason_omits_the_field() {
+        let written = serde_json::to_value(Message::assistant(Some("done"), None)).unwrap();
+        assert!(
+            written.as_object().unwrap().get("finish_reason").is_none(),
+            "an unreasoned message wrote {written}"
+        );
     }
 }

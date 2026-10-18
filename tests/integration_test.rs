@@ -917,6 +917,277 @@ async fn test_repeated_empty_completions_abort() {
     assert!(!message.contains("maximum iterations"), "{message}");
 }
 
+/// The regression this issue is about: a `length` truncation that produced nothing used
+/// to be pushed to the session as an empty string and reported as a completed run.
+///
+/// It is the non-answer an empty `stop` is, so it shares that ending -- three in a row
+/// fails, and the failure names the reason rather than the count alone.
+#[tokio::test]
+async fn test_empty_length_completions_abort() {
+    let llm = MockLlmClient::new()
+        .enqueue_text_with_reason("", FinishReason::Length)
+        .enqueue_text_with_reason("", FinishReason::Length)
+        .enqueue_text_with_reason("", FinishReason::Length)
+        .enqueue_text_with_reason("", FinishReason::Length);
+
+    let agent_port = StubAgentDefPort {
+        agent_def: minimal_agent("TruncatingProviderAgent"),
+    };
+    let session_port = StubSessionPort;
+    let tool_def_port = StubToolDefPort;
+    let mcp_factory = StubMcpFactory::new(MockMcpRegistry::new());
+
+    let dir = tempdir().unwrap();
+    let agent_path = dir.path().join("agent.md");
+    std::fs::write(&agent_path, "").unwrap();
+
+    let error = run(
+        RunSettings {
+            agent_def_path: agent_path,
+            in_session: None,
+            prompt_file: None,
+            out_session: None,
+            template_path: None,
+            tools_file: None,
+            skills_dir: None,
+            max_iterations: Some(50),
+            max_runtime: None,
+            stop_file: None,
+            loop_retries: false,
+        },
+        RunDeps {
+            llm: &llm,
+            agent_def: &agent_port,
+            session: &session_port,
+            tool_def: &tool_def_port,
+            skill: &atoma::infra::persistence::skill::FileSkillAdapter,
+            template: &atoma::infra::template::FileTemplateAdapter,
+            mcp_factory: &mcp_factory,
+        },
+        &mut atoma::application::runner::RunFacts::default(),
+    )
+    .await
+    .unwrap_err();
+
+    let message = error.to_string();
+    assert!(message.contains("empty response"), "{message}");
+    assert!(message.contains("finish_reason: length"), "{message}");
+    assert!(message.contains("times in a row"), "{message}");
+    assert!(!message.contains("maximum iterations"), "{message}");
+}
+
+/// A truncation that carried nothing is retried, and the retry is visible in the session.
+///
+/// Two things are asserted that the old `length` arm made impossible: that the empty
+/// attempt is answered again rather than reported as the run's answer, and that the
+/// recovered run's session says it happened -- a note recording the stumble, and a final
+/// message naming the reason that ended it.
+#[tokio::test]
+async fn test_empty_length_completion_is_retried_and_the_retry_is_recorded() {
+    let llm = MockLlmClient::new()
+        .enqueue_text_with_reason("", FinishReason::Length)
+        .enqueue_text_with_reason("Partial, but something.", FinishReason::Length);
+
+    let agent_port = StubAgentDefPort {
+        agent_def: minimal_agent("TruncatingThenAnsweringAgent"),
+    };
+    let session_port = RecordingSessionPort::default();
+    let saved = session_port.saved.clone();
+    let tool_def_port = StubToolDefPort;
+    let mcp_factory = StubMcpFactory::new(MockMcpRegistry::new());
+
+    let dir = tempdir().unwrap();
+    let agent_path = dir.path().join("agent.md");
+    std::fs::write(&agent_path, "").unwrap();
+    let out_session = dir.path().join("session.json");
+
+    let result = run(
+        RunSettings {
+            agent_def_path: agent_path,
+            in_session: None,
+            prompt_file: None,
+            out_session: Some(out_session),
+            template_path: None,
+            tools_file: None,
+            skills_dir: None,
+            max_iterations: Some(10),
+            max_runtime: None,
+            stop_file: None,
+            loop_retries: false,
+        },
+        RunDeps {
+            llm: &llm,
+            agent_def: &agent_port,
+            session: &session_port,
+            tool_def: &tool_def_port,
+            skill: &atoma::infra::persistence::skill::FileSkillAdapter,
+            template: &atoma::infra::template::FileTemplateAdapter,
+            mcp_factory: &mcp_factory,
+        },
+        &mut atoma::application::runner::RunFacts::default(),
+    )
+    .await;
+
+    match result {
+        Ok(RunOutcome::Completed { text, reason }) => {
+            assert_eq!(text, "Partial, but something.");
+            assert_eq!(reason, CompletionReason::Length);
+        }
+        other => panic!("expected the second attempt to be reported, got {other:?}"),
+    }
+
+    let session = saved.lock().unwrap().clone().expect("a session was saved");
+
+    assert!(
+        session.messages.iter().any(|m| {
+            m.role == "user"
+                && m.content
+                    .as_ref()
+                    .and_then(|c| c.as_str())
+                    .is_some_and(|t| t.contains("returned an empty response"))
+        }),
+        "the empty attempt left no note: {:?}",
+        session.messages
+    );
+
+    let last = session.messages.last().expect("a last message");
+    assert_eq!(last.role, "assistant");
+    assert_eq!(last.finish_reason, Some(FinishReason::Length));
+}
+
+/// A message a run leaves behind names the reason the provider gave for it, and that
+/// field is this program's own -- it must not reach the provider.
+#[tokio::test]
+async fn test_a_completed_message_names_the_reason_it_stopped() {
+    let llm = MockLlmClient::new().enqueue_text("All done.");
+
+    let agent_port = StubAgentDefPort {
+        agent_def: minimal_agent("OrdinaryAgent"),
+    };
+    let session_port = RecordingSessionPort::default();
+    let saved = session_port.saved.clone();
+    let tool_def_port = StubToolDefPort;
+    let mcp_factory = StubMcpFactory::new(MockMcpRegistry::new());
+
+    let dir = tempdir().unwrap();
+    let agent_path = dir.path().join("agent.md");
+    std::fs::write(&agent_path, "").unwrap();
+    let out_session = dir.path().join("session.json");
+
+    run(
+        RunSettings {
+            agent_def_path: agent_path,
+            in_session: None,
+            prompt_file: None,
+            out_session: Some(out_session),
+            template_path: None,
+            tools_file: None,
+            skills_dir: None,
+            max_iterations: Some(10),
+            max_runtime: None,
+            stop_file: None,
+            loop_retries: false,
+        },
+        RunDeps {
+            llm: &llm,
+            agent_def: &agent_port,
+            session: &session_port,
+            tool_def: &tool_def_port,
+            skill: &atoma::infra::persistence::skill::FileSkillAdapter,
+            template: &atoma::infra::template::FileTemplateAdapter,
+            mcp_factory: &mcp_factory,
+        },
+        &mut atoma::application::runner::RunFacts::default(),
+    )
+    .await
+    .expect("a plain completion should succeed");
+
+    let session = saved.lock().unwrap().clone().expect("a session was saved");
+    let last = session.messages.last().expect("a last message");
+    assert_eq!(last.role, "assistant");
+    assert_eq!(last.finish_reason, Some(FinishReason::Stop));
+    assert!(
+        !last
+            .to_llm_value()
+            .as_object()
+            .unwrap()
+            .contains_key("finish_reason"),
+        "finish_reason was sent to the provider"
+    );
+}
+
+/// A turn that asked for tools names that reason on its own message, so a long run's
+/// turns can each say how they ended.
+#[tokio::test]
+async fn test_a_tool_call_turn_names_tool_calls() {
+    use common::mock_llm::make_tool_call;
+
+    let llm = MockLlmClient::new()
+        .enqueue_tool_calls(vec![make_tool_call("c1", "test_tool", r#"{"input":"x"}"#)])
+        .enqueue_text("Done!");
+
+    let registry = MockMcpRegistry::new()
+        .with_tool("test_tool", "A test tool")
+        .with_response("test_tool", "tool result");
+
+    let agent_def = AgentDef {
+        mcp_servers: vec!["test_server".to_string()],
+        ..minimal_agent("ToolAgent")
+    };
+    let agent_port = StubAgentDefPort { agent_def };
+    let session_port = RecordingSessionPort::default();
+    let saved = session_port.saved.clone();
+    let tool_def_port = SingleEntryToolDefPort::new("test_server");
+    let mcp_factory = StubMcpFactory::new(registry);
+
+    let dir = tempdir().unwrap();
+    let agent_path = dir.path().join("agent.md");
+    std::fs::write(&agent_path, "").unwrap();
+    let tools_path = dir.path().join("tools.yaml");
+    std::fs::write(&tools_path, "").unwrap();
+    let out_session = dir.path().join("session.json");
+
+    run(
+        RunSettings {
+            agent_def_path: agent_path,
+            in_session: None,
+            prompt_file: None,
+            out_session: Some(out_session),
+            template_path: None,
+            tools_file: Some(tools_path),
+            skills_dir: None,
+            max_iterations: Some(10),
+            max_runtime: None,
+            stop_file: None,
+            loop_retries: false,
+        },
+        RunDeps {
+            llm: &llm,
+            agent_def: &agent_port,
+            session: &session_port,
+            tool_def: &tool_def_port,
+            skill: &atoma::infra::persistence::skill::FileSkillAdapter,
+            template: &atoma::infra::template::FileTemplateAdapter,
+            mcp_factory: &mcp_factory,
+        },
+        &mut atoma::application::runner::RunFacts::default(),
+    )
+    .await
+    .expect("the run should complete");
+
+    let session = saved.lock().unwrap().clone().expect("a session was saved");
+    let tool_turn = session
+        .messages
+        .iter()
+        .find(|m| m.tool_calls.is_some())
+        .expect("a tool-call turn");
+    assert_eq!(tool_turn.finish_reason, Some(FinishReason::ToolCalls));
+    assert_eq!(
+        session.messages.last().unwrap().finish_reason,
+        Some(FinishReason::Stop)
+    );
+}
+
 /// A model that loops inside one completion is cut off mid-stream.
 ///
 /// The whole point of the circuit breaker: the loop is visible in the token stream
