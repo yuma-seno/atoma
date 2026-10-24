@@ -208,6 +208,79 @@ pub async fn run_after_hook(script: &str, payload: Value) -> Option<String> {
     }
 }
 
+/// Invoke one `before_compaction` hook, and say whether it archived the session.
+///
+/// The script receives JSON on stdin:
+/// `{"agent": "...", "session_path": "...", "prompt_tokens": N, "context_limit": N}`.
+/// Its job is the caller's to decide -- for the delivery machinery that is copying
+/// the session into its own durable storage before atoma replaces it -- and its
+/// ANSWER is one thing: whether that copy was made. `{"archived": true}` says it
+/// was; anything else (no output, other JSON, a crash, a timeout) reads as "not
+/// archived", which is recorded and changes nothing else.
+///
+/// Fail-open, like the after-hook and unlike the before-hook: the compaction is
+/// happening because the session no longer fits the model's window, and refusing
+/// to proceed cannot un-fill it -- it would only end the run with the same
+/// over-budget session a hook failure would have compacted. What a failed hook
+/// costs is the ARCHIVE, and that is the embedder's own choice to skip; the log
+/// line says so, which is the part a person can act on.
+pub async fn run_before_compaction_hook(script: &str, payload: Value) -> bool {
+    match run_before_compaction_inner(script, payload).await {
+        Ok(archived) => archived,
+        Err(e) => {
+            tracing::warn!("before_compaction hook '{}' error: {}", script, e);
+            false
+        }
+    }
+}
+
+async fn run_before_compaction_inner(script: &str, payload: Value) -> Result<bool> {
+    use tokio::io::AsyncWriteExt;
+
+    let input = serde_json::to_vec(&payload)?;
+
+    let mut child = tokio::process::Command::new(script)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::inherit())
+        .spawn()
+        .with_context(|| format!("Failed to spawn before_compaction hook: {}", script))?;
+
+    let mut stdin = child
+        .stdin
+        .take()
+        .context("Failed to get before_compaction hook stdin")?;
+    stdin.write_all(&input).await?;
+    drop(stdin);
+
+    let timeout = hook_timeout();
+    let output = tokio::time::timeout(timeout, child.wait_with_output())
+        .await
+        .with_context(|| {
+            format!(
+                "before_compaction hook '{}' timed out after {}s",
+                script,
+                timeout.as_secs()
+            )
+        })?
+        .with_context(|| format!("Failed to wait for before_compaction hook: {}", script))?;
+
+    if !output.status.success() {
+        anyhow::bail!(
+            "before_compaction hook '{}' exited with status {}",
+            script,
+            output.status
+        );
+    }
+
+    let response: Value = serde_json::from_slice(&output.stdout)
+        .with_context(|| format!("before_compaction hook '{}' returned invalid JSON", script))?;
+    Ok(response
+        .get("archived")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false))
+}
+
 async fn run_after_hook_inner(script: &str, payload: Value) -> Result<Option<String>> {
     use tokio::io::AsyncWriteExt;
 
@@ -351,6 +424,7 @@ mod tests {
             tool_denylist: vec![],
             before_tool: vec![],
             after_tool: vec![],
+            before_compaction: vec![],
         };
         assert!(check_access(&hooks, "any_tool").is_ok());
     }
@@ -362,6 +436,7 @@ mod tests {
             tool_denylist: vec!["dangerous_*".to_string()],
             before_tool: vec![],
             after_tool: vec![],
+            before_compaction: vec![],
         };
         assert!(check_access(&hooks, "dangerous_rm").is_err());
         assert!(check_access(&hooks, "safe_read").is_ok());
@@ -374,6 +449,7 @@ mod tests {
             tool_denylist: vec![],
             before_tool: vec![],
             after_tool: vec![],
+            before_compaction: vec![],
         };
         assert!(check_access(&hooks, "read_file").is_ok());
         assert!(check_access(&hooks, "write_file").is_err());
@@ -446,6 +522,7 @@ mod tests {
             tool_denylist: vec!["rm_*".to_string()],
             before_tool: vec![],
             after_tool: vec![],
+            before_compaction: vec![],
         };
         assert!(check_access(&hooks, "rm_all").is_err());
         assert!(check_access(&hooks, "read_file").is_ok());

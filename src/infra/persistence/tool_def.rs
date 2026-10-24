@@ -108,6 +108,14 @@ struct HooksConfig {
     pub before_tool: Option<HookScripts>,
     #[serde(default)]
     pub after_tool: Option<HookScripts>,
+    /// Scripts run before atoma replaces an over-budget session with its compacted
+    /// form. One payload per script, in order:
+    /// `{"agent", "session_path", "prompt_tokens", "context_limit"}`; answer
+    /// `{"archived": true}` when the old session has been copied somewhere safe.
+    /// Fail-open: a hook that crashes cannot un-fill the window, and the only cost
+    /// of the failure is the archive.
+    #[serde(default)]
+    pub before_compaction: Option<HookScripts>,
 }
 
 /// Which of the four combinations of `command` and `url` this entry is, or an
@@ -248,6 +256,7 @@ pub fn load(path: &Path, credentials: &Credentials) -> Result<HashMap<String, To
     // a missing file should be reported once rather than once per server.
     let file_wide_before = resolve(file.hooks.before_tool)?;
     let file_wide_after = resolve(file.hooks.after_tool)?;
+    let file_wide_compaction = resolve(file.hooks.before_compaction)?;
 
     file.servers
         .into_iter()
@@ -268,6 +277,16 @@ pub fn load(path: &Path, credentials: &Credentials) -> Result<HashMap<String, To
                     .iter()
                     .cloned()
                     .chain(resolve(cfg.hooks.after_tool)?)
+                    .collect(),
+                // File-wide only: a session is the run's, not one server's, so the
+                // per-server hooks take no compaction key. `HooksConfig` still
+                // parses one (and it is ignored here) so a misplaced entry is
+                // config noise rather than a parse error -- the same treatment
+                // `unprefixed` on the wrong level gets.
+                before_compaction: file_wide_compaction
+                    .iter()
+                    .cloned()
+                    .chain(resolve(cfg.hooks.before_compaction)?)
                     .collect(),
             };
             let def = ToolDef {

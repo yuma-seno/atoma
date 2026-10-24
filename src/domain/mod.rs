@@ -1,4 +1,5 @@
 pub mod agent;
+pub mod context_budget;
 pub mod ports;
 pub mod repetition;
 pub mod session;

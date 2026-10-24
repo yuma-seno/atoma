@@ -31,6 +31,20 @@ pub struct AgentDef {
     /// reports itself instead of looking like the image was never produced.
     #[serde(default)]
     pub vision: bool,
+    /// The context window this agent's model serves, in tokens.
+    ///
+    /// `None` — the default — means no compaction: every agent written before this
+    /// field existed runs unchanged, and an agent whose runs are short does not
+    /// need one. The number is the model's real window, not a target: atoma
+    /// compacts when the PROMPT has grown past it (see
+    /// `domain::context_budget`), and the provider's 400 is what happens when
+    /// this number is a lie.
+    ///
+    /// Declared here rather than guessed from the model name, for the same reason
+    /// every other definition fact lives in the definition: a table of model names
+    /// in this crate is wrong the week a new model ships.
+    #[serde(default)]
+    pub context_limit: Option<u64>,
     #[serde(default)]
     pub knows_about: Vec<String>,
     // `callable_by` was here. It listed who may invoke an agent -- `"user"`,

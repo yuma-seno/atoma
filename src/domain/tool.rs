@@ -41,6 +41,24 @@ pub struct Hooks {
     /// condition discovered after the run -- when the workspace is saved, say -- is
     /// discovered too late to be fixed by the run that caused it.
     pub after_tool: Vec<String>,
+    /// Scripts run before atoma replaces an over-budget session with its compacted
+    /// form (#12).
+    ///
+    /// This is the one hook that runs in the RUNNER rather than around a tool call,
+    /// and its payload names the session, not a call:
+    /// `{"agent": "...", "session_path": "...", "prompt_tokens": N, "context_limit": N}`.
+    /// Answer `{"archived": true}` when the old session has been copied somewhere
+    /// safe -- that is the embedder's decision and the embedder's reward, because
+    /// atoma is a stateless CLI and does not know where archives live. The scripts
+    /// run in order; each is told the same facts, and any of them may make the copy.
+    ///
+    /// Fail-open: the compaction is happening because the session no longer fits
+    /// the model's window, and refusing to proceed cannot un-fill it. A hook that
+    /// crashes costs the archive, which is logged -- the part a person can act on.
+    ///
+    /// Declared per tools FILE (the file-wide key), not per server: a session is
+    /// the run's, not one server's, and archiving it is about the whole conversation.
+    pub before_compaction: Vec<String>,
 }
 
 /// A fully resolved tool server definition.
