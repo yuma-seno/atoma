@@ -132,8 +132,17 @@ pub struct RunRecord {
     /// over the wrong population.
     pub ended_because: String,
     /// Messages in the session when it was saved: the cheapest proxy for how much work
-    /// the run did.
+    /// the run did. See `compactions` for the other size fact.
+    #[serde(default)]
     pub messages: usize,
+    /// How many times this run replaced the session with its compacted form (#12).
+    ///
+    /// Zero is the ordinary run. A session carrying compactions in its history tells
+    /// a resumed run -- and a person reading it -- that the summary near the top is
+    /// load-bearing: it replaced messages nobody can read anymore, and the archive
+    /// of them, if one was made, lives wherever the embedder's hook put it.
+    #[serde(default)]
+    pub compactions: usize,
     /// Inferences this run made -- round trips to the model, which is what a run waits
     /// on and what it is billed for.
     ///
@@ -197,6 +206,7 @@ fn record_run(session: &mut Session, facts: &RunFacts) {
         seconds: facts.seconds,
         ended_because: facts.ended_because.to_string(),
         messages: session.messages.len(),
+        compactions: facts.compactions,
         iterations: facts.iterations,
         server_calls: facts.server_calls.clone(),
     };
@@ -354,6 +364,18 @@ async fn run_inner(
             })
             .collect::<Result<Vec<_>>>()?;
 
+        // The compaction hooks (#12): the tools file's file-wide
+        // `before_compaction` scripts. A session is the run's, not one server's,
+        // so the scripts are gathered once here and de-duplicated -- a delivery
+        // that ships a required archiver onto every server it declares would
+        // otherwise run the shared script once per server.
+        let mut compaction_hooks: Vec<String> = tool_defs
+            .iter()
+            .flat_map(|def| def.hooks.before_compaction.clone())
+            .collect();
+        compaction_hooks.sort();
+        compaction_hooks.dedup();
+
         let reg = deps.mcp_factory.build(&tool_defs).await?;
         tracing::info!(
             "Connected to {} MCP server(s), discovered {} tool(s)",
@@ -450,6 +472,11 @@ async fn run_inner(
         Some(tool_definitions)
     };
 
+    // No MCP servers means no tools file was read, and the compaction hooks live
+    // in that file: an agent without servers has none, which is also the honest
+    // answer for an agent that declared no limit.
+    let compaction_hooks: Vec<String> = Vec::new();
+
     let out_path = out_session.or(in_session);
     // Recorded whether or not the save below succeeds, and recorded here rather than on
     // the one path that returns an outcome: a run that was interrupted still wrote its
@@ -474,10 +501,15 @@ async fn run_inner(
         stop_file.as_deref(),
         agent.vision,
         loop_retries,
+        // The context budget (#12): the limit is the definition's, the hooks are
+        // the tools file's file-wide `before_compaction` list, and the path the
+        // hooks are told is the one this run saves to.
+        agent.context_limit,
+        &compaction_hooks,
+        out_path.as_deref(),
         facts,
     )
     .await;
-
     let (response_text, completion_reason) = match inference_result {
         Ok(InferenceResult::Completed { text, reason }) => (text, reason),
         Ok(InferenceResult::SessionEnded) => {

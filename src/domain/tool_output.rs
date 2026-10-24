@@ -39,13 +39,20 @@
 /// How much of one tool result reaches the model, for a server that does not say
 /// otherwise.
 ///
-/// 50,000 characters, about 12.5k tokens: a tenth of the smallest context window
-/// worth designing for. A tool call that wants more than a tenth of the window is a
-/// call that should have returned less.
+/// 8,000 characters, about 2k tokens. Was 50,000 -- a tenth of the smallest context
+/// window worth designing for -- and the number moved for the reason the cap exists
+/// at all (#334, in the delivery that embeds this crate): a prompt token is resent
+/// every turn, so a result's size is paid on every later turn, and a single result
+/// taking a seventh of the window in one message was the largest line item in the
+/// measured sessions. 8,000 keeps a build log's errors and its summary (the same
+/// shape the delivery's save-side cap kept at 4,000), and it moves the choice from
+/// "what may a result cost" to "should this call have returned less" -- which is the
+/// question the tool's caller can act on.
 ///
-/// The same number the delivery template chose for the servers it writes. Adopting
-/// it rather than picking another keeps one answer in two places.
-pub const DEFAULT_MAX_OUTPUT_CHARS: usize = 50_000;
+/// One number, held here, because the delivery used to cap AGAIN, at save time, and
+/// two caps in two places meant two ideas of how big a result is. This is the only
+/// cap now.
+pub const DEFAULT_MAX_OUTPUT_CHARS: usize = 8_000;
 
 /// A capped result, and how much of it was dropped.
 #[derive(Debug, PartialEq, Eq)]

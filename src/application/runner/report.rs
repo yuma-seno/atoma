@@ -88,6 +88,21 @@ pub struct RunFacts {
     /// an ending that is not a completion, which is the honest answer: a run that failed
     /// on its fourth turn still spent what its first three cost.
     pub usage: LlmUsage,
+    /// The prompt tokens the most recent inference reported, if it reported any.
+    ///
+    /// The context budget's measurement (#12): a compaction decision compares THIS
+    /// against the definition's `context_limit`, because it is the one number nobody
+    /// has to estimate -- the provider said it about the request that just went out.
+    /// Reset to `None` by a compaction, whose replacement session has a prompt no
+    /// larger than the summary plus the recent turns; the next inference reports
+    /// its own.
+    pub last_prompt_tokens: Option<u64>,
+    /// How many times this run compacted its session (#12).
+    ///
+    /// Zero is the ordinary case, and `None`-shaped facts (a run that never saved)
+    /// record it the same way: a count, not a flag, so a session holding two
+    /// compactions reads as two rather than as "some".
+    pub compactions: usize,
     /// Where the session was written, if the caller asked for it to be.
     pub session_path: Option<PathBuf>,
 }
@@ -124,6 +139,8 @@ impl Default for RunFacts {
             iterations: 0,
             server_calls: BTreeMap::new(),
             usage: LlmUsage::default(),
+            last_prompt_tokens: None,
+            compactions: 0,
             session_path: None,
         }
     }
@@ -197,6 +214,10 @@ pub fn envelope(facts: &RunFacts, outcome: Option<&RunOutcome>) -> Value {
         "ended_because": facts.ended_because,
         "seconds": facts.seconds,
         "iterations": facts.iterations,
+        // #12. A count, not a flag, for the same reason `iterations` is: a session
+        // holding two compactions reads as two. Zero is the ordinary case and stays
+        // in the envelope, so a caller parsing this today keeps parsing it tomorrow.
+        "compactions": facts.compactions,
     })
 }
 
@@ -296,6 +317,8 @@ mod tests {
                 cached_prompt_tokens: Some(80),
                 written_prompt_tokens: Some(10),
             },
+            last_prompt_tokens: Some(100),
+            compactions: 0,
             session_path: Some(PathBuf::from("/tmp/session.json")),
         }
     }

@@ -7,6 +7,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
+use crate::domain::context_budget;
 use crate::domain::ports::{FinishReason, LlmPort, ToolCallResult, ToolPort};
 use crate::domain::repetition::{Repetition, RepetitionDetector};
 use crate::domain::session::{Message, Session, ToolCall};
@@ -121,6 +122,42 @@ impl std::fmt::Display for StopRequested {
 
 impl std::error::Error for StopRequested {}
 
+/// Sentinel error returned when the session no longer fits the model's context
+/// window and a compaction could not rescue it (#12).
+///
+/// The fourth soft stop. Like the other three, the session is worth saving and the
+/// exit is the soft one -- but unlike them, this one usually ends a run an agent
+/// believed was going well, so its message names the escape: the session on disk
+/// is whole, and resuming it (after a smaller `context_limit`, or after the
+/// embedder has compacted it by hand) is the way back.
+///
+/// Reached when the budget check fires and either the definition declares no
+/// compaction path could help -- the recent turns alone fill the budget, so
+/// `domain::context_budget::compact` returned `None` -- or the summarizing
+/// inference itself failed. Compaction RAN and failed here, which is different
+/// from never being attempted: the hook (if any) has already run, so an embedder
+/// that archives has the pre-compaction state either way.
+#[derive(Debug, Clone, Copy)]
+pub struct ContextBudgetExceeded {
+    /// The prompt tokens the provider last reported.
+    pub prompt_tokens: u64,
+    /// The limit the agent definition declared.
+    pub context_limit: u64,
+}
+
+impl std::fmt::Display for ContextBudgetExceeded {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "Session exceeded its context limit ({} of {} tokens) and could not be compacted; \
+             the session on disk is intact and resumable",
+            self.prompt_tokens, self.context_limit
+        )
+    }
+}
+
+impl std::error::Error for ContextBudgetExceeded {}
+
 /// Whether an error is a stop the caller asked for rather than something going wrong.
 ///
 /// All three sentinels mean the same thing downstream: the session is worth saving and
@@ -139,6 +176,7 @@ pub fn is_soft_stop(error: &anyhow::Error) -> bool {
         || error.downcast_ref::<RunTimeExceeded>().is_some()
         || error.downcast_ref::<StopRequested>().is_some()
         || error.downcast_ref::<Repetition>().is_some()
+        || error.downcast_ref::<ContextBudgetExceeded>().is_some()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -297,6 +335,122 @@ const IMAGE_WITHHELD: &str =
     "[image withheld: this agent's model is not configured to read images. \
      Set `vision: true` in its agent definition if the model supports them.]";
 
+/// Compact the session in place: summarize the old history, keep the recent turns.
+///
+/// The order is the whole design (#12):
+///
+/// 1. the `before_compaction` hooks run FIRST, each told the session's path and the
+///    numbers that triggered this -- so whoever embeds atoma archives the session
+///    BEFORE it is replaced. Archiving is the embedder's decision; atoma is a
+///    stateless CLI and does not know where archives live;
+/// 2. ONE inference with [`context_budget::SUMMARY_PROMPT`] produces the summary.
+///    The request carries the current session, so the model that has been reading
+///    it writes it -- no second reading of the transcript from scratch;
+/// 3. `context_budget::compact` assembles the replacement -- notice, summary,
+///    recent turns, never splitting a tool batch -- and it is written over the
+///    session in place.
+///
+/// `Err` when there is nothing to compact (`compact` returned `None`: the recent
+/// turns already fill the budget) or when the summarizing inference failed. The
+/// session is untouched on both paths -- the caller turns that into the soft stop
+/// whose message says the session on disk is intact and resumable.
+///
+/// Eight parameters, and the clippy lint is allowed rather than obeyed for the same
+/// reason `inference_loop`'s is: they are one call's own facts, and a struct to carry
+/// them would move the names one hop away from the code that reads them.
+#[allow(clippy::too_many_arguments)]
+async fn compact_session(
+    session: &mut Session,
+    session_path: Option<&Path>,
+    llm_client: &dyn LlmPort,
+    model: &str,
+    extra_body: &HashMap<String, Value>,
+    agent_name: &str,
+    compaction_hooks: &[String],
+    exceeded: context_budget::BudgetExceeded,
+) -> Result<()> {
+    // 1. The hooks, before anything moves. Each is told the same facts; any of
+    // them may make the archive copy. Fail-open, and the "archived" answer is
+    // recorded per hook -- the log is where a missing archive is diagnosed from.
+    for script in compaction_hooks {
+        let payload = serde_json::json!({
+            "agent": agent_name,
+            // The path the caller passed, not a field of the session: the session
+            // does not know where it lives, and the hook is the embedder's script
+            // reading the same value the runner will save over.
+            "session_path": session_path.map(|p| p.to_string_lossy()).unwrap_or_default(),
+            "prompt_tokens": exceeded.prompt_tokens,
+            "context_limit": exceeded.context_limit,
+        });
+        let archived = crate::infra::hooks::run_before_compaction_hook(script, payload).await;
+        tracing::info!(
+            "before_compaction hook '{}' {}",
+            script,
+            if archived {
+                "archived the session"
+            } else {
+                "reported no archive"
+            }
+        );
+    }
+
+    // 2. The summary: one inference, carrying the session that is being replaced.
+    let outgoing = messages_for_provider(&session.messages, true);
+    let mut detector = RepetitionDetector::new();
+    let mut on_delta = |delta: &str| -> Result<()> {
+        match detector.observe(delta) {
+            Some(repetition) => Err(anyhow::Error::new(repetition)),
+            None => Ok(()),
+        }
+    };
+    let mut summary_request = outgoing.to_vec();
+    summary_request.push(Message::user(context_budget::SUMMARY_PROMPT));
+    let response = llm_client
+        .chat_completion_streaming(model, &summary_request, None, extra_body, &mut on_delta)
+        .await
+        .context("the summarizing inference failed")?;
+    let summary = response
+        .choices
+        .into_iter()
+        .next()
+        .context("the summarizing inference returned no choices")?
+        .message
+        .content
+        .as_ref()
+        .and_then(|c| c.as_str())
+        .unwrap_or("")
+        .to_owned();
+    anyhow::ensure!(
+        !summary.trim().is_empty(),
+        "the summarizing inference returned no text"
+    );
+
+    // 3. The replacement, over the session in place. The caller saves it -- this
+    // function only builds it, because saving is the caller's one remaining act
+    // and the caller saves on EVERY path.
+    let messages = std::mem::take(&mut session.messages);
+    let dropped = messages.len();
+    match context_budget::compact(&messages, &summary, exceeded.context_limit) {
+        Some(compacted) => {
+            let replaced = compacted.dropped_messages;
+            session.messages = compacted.messages;
+            tracing::info!(
+                "ATOMA_COMPACTION: {} of {} messages replaced by a summary",
+                replaced,
+                dropped
+            );
+            Ok(())
+        }
+        None => {
+            session.messages = messages;
+            anyhow::bail!(
+                "the recent turns already fill the context budget, so there is nothing \
+                 to compact away"
+            );
+        }
+    }
+}
+
 /// Build the session message for a tool result.
 ///
 /// A text-only result keeps the plain-string form every session written so far holds,
@@ -415,6 +569,12 @@ pub async fn inference_loop(
     stop_file: Option<&Path>,
     vision: bool,
     loop_retries: bool,
+    context_limit: Option<u64>,
+    compaction_hooks: &[String],
+    // The path this run saves its session to, when it saves one -- the
+    // `before_compaction` hooks are told it, so the embedder's script can find the
+    // file it is archiving without being told twice.
+    out_session_path: Option<&Path>,
     facts: &mut RunFacts,
 ) -> Result<InferenceResult> {
     let mut loop_tracker = LoopTracker::default();
@@ -454,6 +614,53 @@ pub async fn inference_loop(
                     iteration - 1,
                 );
                 return Err(anyhow::Error::new(RunTimeExceeded(limit)));
+            }
+        }
+
+        // The context budget (#12), checked beside the three stops and for the same
+        // reason: a session saved between exchanges is a resumable one. The limit
+        // comes from the agent definition (`context_limit`); the measurement is the
+        // PREVIOUS inference's own report of its prompt, which is the one number
+        // nobody has to estimate.
+        //
+        // Two outcomes, both through `compact_session` below: a compaction replaces
+        // the session in place and the loop continues, or the ending is the soft
+        // stop a rescuable-but-uncompacted session deserves. Either way the
+        // session saved this iteration is one a run can pick up.
+        if let Some(exceeded) =
+            context_budget::budget_exceeded(context_limit, facts.last_prompt_tokens)
+        {
+            match compact_session(
+                session,
+                out_session_path,
+                llm_client,
+                model,
+                extra_body,
+                agent_name,
+                compaction_hooks,
+                exceeded,
+            )
+            .await
+            {
+                Ok(()) => {
+                    facts.compactions += 1;
+                    // The count rides the run's record and the envelope; this log
+                    // line is the person-facing note that the session changed
+                    // shape underneath the work (the per-compaction detail is in
+                    // the ATOMA_COMPACTION line the helper wrote).
+                    tracing::info!(
+                        "Context budget compacted the session (prompt was {} of {} tokens)",
+                        exceeded.prompt_tokens,
+                        exceeded.context_limit
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!("{}", e);
+                    return Err(anyhow::Error::new(ContextBudgetExceeded {
+                        prompt_tokens: exceeded.prompt_tokens,
+                        context_limit: exceeded.context_limit,
+                    }));
+                }
             }
         }
 
@@ -654,6 +861,10 @@ pub async fn inference_loop(
             facts.usage.prompt_tokens += u.prompt_tokens;
             facts.usage.completion_tokens += u.completion_tokens;
             facts.usage.total_tokens += u.total_tokens;
+            // The budget's measurement (#12): what the provider just said about THIS
+            // request, held for the top-of-loop check. The provider's number, not an
+            // estimate -- the same reason the totals above are summed here.
+            facts.last_prompt_tokens = Some(u.prompt_tokens);
             // Summed only over the inferences that reported one, and left as `None`
             // when not one did. Starting the accumulator at zero would turn a run
             // against a provider that says nothing about its cache into a run whose
