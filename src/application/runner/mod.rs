@@ -342,6 +342,16 @@ async fn run_inner(
     tracing::info!("Session has {} messages", session.messages.len());
 
     // 3. Connect to MCP servers and discover tools
+    //
+    // The compaction hooks (#12) live in the tools file, so they are gathered here,
+    // where the file is read -- and the vec is declared OUTSIDE this block on
+    // purpose: a `let` inside the `else` would be discarded when the block closed,
+    // and the empty vec the no-servers path needs would shadow it. That is not a
+    // hypothetical shape: the first cut of this wiring collected the hooks inside
+    // the block and re-declared an empty vec below, and every real compaction
+    // after it ran hookless -- the archive silently never happened, and the first
+    // real compaction (atomaton #149's chain, run 40166780902) is what showed it.
+    let mut compaction_hooks: Vec<String> = Vec::new();
     let external_tools: Option<Box<dyn ToolPort + Send>> = if agent.mcp_servers.is_empty() {
         None
     } else {
@@ -368,8 +378,10 @@ async fn run_inner(
         // `before_compaction` scripts. A session is the run's, not one server's,
         // so the scripts are gathered once here and de-duplicated -- a delivery
         // that ships a required archiver onto every server it declares would
-        // otherwise run the shared script once per server.
-        let mut compaction_hooks: Vec<String> = tool_defs
+        // otherwise run the shared script once per server. Assigned to the vec
+        // declared above the block, not shadowed by a new `let`: the value has to
+        // outlive this block to reach the loop.
+        compaction_hooks = tool_defs
             .iter()
             .flat_map(|def| def.hooks.before_compaction.clone())
             .collect();
@@ -471,11 +483,6 @@ async fn run_inner(
     } else {
         Some(tool_definitions)
     };
-
-    // No MCP servers means no tools file was read, and the compaction hooks live
-    // in that file: an agent without servers has none, which is also the honest
-    // answer for an agent that declared no limit.
-    let compaction_hooks: Vec<String> = Vec::new();
 
     let out_path = out_session.or(in_session);
     // Recorded whether or not the save below succeeds, and recorded here rather than on
