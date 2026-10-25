@@ -380,7 +380,9 @@ async fn a_tools_file_hook_runs_before_the_session_is_replaced() {
     let mut defs = HashMap::new();
     defs.insert("stub".to_string(), tool_def);
 
-    let llm = ScriptedLlm { calls: Mutex::new(0) };
+    let llm = ScriptedLlm {
+        calls: Mutex::new(0),
+    };
     let session_port = RecordingSessionPort::default();
     let mut facts = RunFacts::default();
     let outcome = run(
