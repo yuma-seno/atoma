@@ -123,6 +123,38 @@ impl LlmPort for BudgetedLlm {
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
+/// A session port whose load hands back a session with enough turns behind it
+/// that a compaction has something to drop. A fresh session's handful of
+/// messages is entirely recent turns, and `compact` honestly answers `None`
+/// to it -- which is the soft stop, not the hook round this file's newest
+/// test needs to observe.
+struct SeededSessionPort;
+
+impl SessionPort for SeededSessionPort {
+    fn load(&self, _path: &Path) -> Result<atoma::domain::session::Session> {
+        let mut messages = vec![Message::user("the task this session works on")];
+        for i in 0..30 {
+            messages.push(Message::user(&format!("turn {i}: please look at file {i}")));
+            messages.push(Message::assistant(
+                None,
+                Some(vec![common::mock_llm::make_tool_call(
+                    &format!("seed-{i}"),
+                    "read",
+                    &format!("{{\"path\":\"f{i}\"}}"),
+                )]),
+            ));
+            messages.push(Message::tool(&format!("seed-{i}"), &"x".repeat(100)));
+        }
+        Ok(atoma::domain::session::Session {
+            messages,
+            ..Default::default()
+        })
+    }
+    fn save(&self, _session: &atoma::domain::session::Session, _path: &Path) -> Result<()> {
+        Ok(())
+    }
+}
+
 fn agent_with_limit(limit: Option<u64>) -> AgentDef {
     AgentDef {
         name: "BudgetAgent".to_string(),
@@ -363,7 +395,7 @@ async fn a_tools_file_hook_runs_before_the_session_is_replaced() {
     let out_session = dir.path().join("session.json");
     let settings = RunSettings {
         agent_def_path: dir.path().join("agent.md"),
-        in_session: None,
+        in_session: Some(dir.path().join("seeded.json")),
         prompt_file: None,
         out_session: Some(out_session.clone()),
         template_path: None,
@@ -383,7 +415,7 @@ async fn a_tools_file_hook_runs_before_the_session_is_replaced() {
     let llm = ScriptedLlm {
         calls: Mutex::new(0),
     };
-    let session_port = RecordingSessionPort::default();
+    let session_port = SeededSessionPort;
     let mut facts = RunFacts::default();
     let outcome = run(
         settings,
