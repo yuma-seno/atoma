@@ -125,18 +125,17 @@ impl std::error::Error for StopRequested {}
 /// Sentinel error returned when the session no longer fits the model's context
 /// window and a compaction could not rescue it (#12).
 ///
-/// The fourth soft stop. Like the other three, the session is worth saving and the
-/// exit is the soft one -- but unlike them, this one usually ends a run an agent
-/// believed was going well, so its message names the escape: the session on disk
-/// is whole, and resuming it (after a smaller `context_limit`, or after the
+/// A deliberate stop like the other four. Unlike them, this one usually ends a run
+/// an agent believed was going well, so its message names the escape: the session
+/// on disk is whole, and resuming it (after a smaller `context_limit`, or after the
 /// embedder has compacted it by hand) is the way back.
 ///
-/// Reached when the budget check fires and either the definition declares no
-/// compaction path could help -- the recent turns alone fill the budget, so
-/// `domain::context_budget::compact` returned `None` -- or the summarizing
-/// inference itself failed. Compaction RAN and failed here, which is different
-/// from never being attempted: the hook (if any) has already run, so an embedder
-/// that archives has the pre-compaction state either way.
+/// Reached when the budget check fires and a compaction could not rescue it: there
+/// is nothing older than the recent window to summarize, or the summary and the
+/// newest batch would still exceed the window, or the summarizing inference itself
+/// failed. Compaction RAN and failed here, which is different from never being
+/// attempted: the hook (if any) has already run, so an embedder that archives has
+/// the pre-compaction state either way.
 #[derive(Debug, Clone, Copy)]
 pub struct ContextBudgetExceeded {
     /// The prompt tokens the provider last reported.
@@ -158,25 +157,43 @@ impl std::fmt::Display for ContextBudgetExceeded {
 
 impl std::error::Error for ContextBudgetExceeded {}
 
+/// The ending word for each deliberate stop, or `None` when the error is a failure.
+///
+/// One table, because a stop and its name are the same fact: [`is_soft_stop`] is
+/// this table's `is_some`, and the runner's `ending_of` is its `unwrap_or("failed")`.
+/// They used to be two downcast chains, and the context budget was added to one and
+/// not the other, so a run that stopped for its context was recorded as `failed`
+/// (#441). A new deliberate stop now gets its name in the same edit that teaches
+/// this function to recognise it.
+pub(crate) fn soft_stop_ending(error: &anyhow::Error) -> Option<&'static str> {
+    if error.downcast_ref::<MaxIterationsReached>().is_some() {
+        Some("iterations")
+    } else if error.downcast_ref::<RunTimeExceeded>().is_some() {
+        Some("runtime")
+    } else if error.downcast_ref::<StopRequested>().is_some() {
+        Some("stopped")
+    } else if error.downcast_ref::<Repetition>().is_some() {
+        Some("loop")
+    } else if error.downcast_ref::<ContextBudgetExceeded>().is_some() {
+        Some("context_limit")
+    } else {
+        None
+    }
+}
+
 /// Whether an error is a stop the caller asked for rather than something going wrong.
 ///
-/// All three sentinels mean the same thing downstream: the session is worth saving and
-/// the exit status is the soft-stop one, not a failure. Two call sites -- the runner
-/// and `main` -- ask this question, and each answered it with its own `downcast_ref`
-/// for a single type. Adding a third way to stop to only one of them is exactly the
-/// bug this function exists to make impossible.
+/// Every deliberate stop means the same thing downstream: the session is worth saving
+/// and the exit status is the soft-stop one, not a failure. `Repetition` is here for
+/// the same reason the ceilings and the stop request are: the run stopped itself with
+/// its conversation whole, so the session is worth saving and the caller should be
+/// able to resume it. It is not a failure in the sense that matters to a caller --
+/// nothing is broken, the model just got stuck.
 ///
-/// `Repetition` is the fourth, and it is here for the same reason the other three are:
-/// the run stopped itself with its conversation whole, so the session is worth saving
-/// and the caller should be able to resume it. It is not a failure in the sense that
-/// matters to a caller -- nothing is broken, the model just got stuck -- and treating
-/// it as one would throw away a session that a re-ask would have finished.
+/// The stop and its ending word are one table ([`soft_stop_ending`]); this is only
+/// the yes-or-no question callers outside ask.
 pub fn is_soft_stop(error: &anyhow::Error) -> bool {
-    error.downcast_ref::<MaxIterationsReached>().is_some()
-        || error.downcast_ref::<RunTimeExceeded>().is_some()
-        || error.downcast_ref::<StopRequested>().is_some()
-        || error.downcast_ref::<Repetition>().is_some()
-        || error.downcast_ref::<ContextBudgetExceeded>().is_some()
+    soft_stop_ending(error).is_some()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -190,7 +207,7 @@ pub enum CompletionReason {
 /// Carries no usage. The totals are written into the caller's `total_usage` as each
 /// round trip reports one, for the same reason the inference count is: a completion is
 /// the one ending that could have returned them, and the endings that cannot -- the
-/// three soft stops and every failure -- are the ones whose bill somebody still has to
+/// deliberate stops and every failure -- are the ones whose bill somebody still has to
 /// be told about.
 pub enum InferenceResult {
     /// Normal completion with final text response.
@@ -350,10 +367,11 @@ const IMAGE_WITHHELD: &str =
 ///    recent turns, never splitting a tool batch -- and it is written over the
 ///    session in place.
 ///
-/// `Err` when there is nothing to compact (`compact` returned `None`: the recent
-/// turns already fill the budget) or when the summarizing inference failed. The
-/// session is untouched on both paths -- the caller turns that into the soft stop
-/// whose message says the session on disk is intact and resumable.
+/// `Err` when there is nothing to compact (`compact` returned `None`: there is no
+/// older history to summarize, or even the smallest replacement would overflow the
+/// window) or when the summarizing inference failed. The session is untouched on
+/// both paths -- the caller turns that into the soft stop whose message says the
+/// session on disk is intact and resumable.
 ///
 /// Eight parameters, and the clippy lint is allowed rather than obeyed for the same
 /// reason `inference_loop`'s is: they are one call's own facts, and a struct to carry
@@ -444,8 +462,8 @@ async fn compact_session(
         None => {
             session.messages = messages;
             anyhow::bail!(
-                "the recent turns already fill the context budget, so there is nothing \
-                 to compact away"
+                "the session cannot be compacted: there is nothing older to summarize, \
+                 or even the notice and the summary would exceed the context budget"
             );
         }
     }
@@ -1002,10 +1020,10 @@ mod tests {
     /// mistaken for one: that would save a session, exit 2 and read as a pause, which
     /// is a failure reported as a hand-back.
     ///
-    /// `Repetition` is the fourth, and it belongs here rather than with the failures:
-    /// the run stopped itself with its conversation whole, so the session is worth
-    /// saving and a caller can resume it. A provider hanging up is the contrast -- it
-    /// is not something a caller can act on.
+    /// `Repetition` is one of the deliberate stops, and it belongs here rather than
+    /// with the failures: the run stopped itself with its conversation whole, so the
+    /// session is worth saving and a caller can resume it. A provider hanging up is
+    /// the contrast -- it is not something a caller can act on.
     #[test]
     fn a_deliberate_stop_is_one_and_a_failure_is_not() {
         assert!(is_soft_stop(&anyhow::Error::new(MaxIterationsReached(50))));
@@ -1020,6 +1038,10 @@ mod tests {
             window: 500,
             word: "write".to_string(),
             count: 120,
+        })));
+        assert!(is_soft_stop(&anyhow::Error::new(ContextBudgetExceeded {
+            prompt_tokens: 200_430,
+            context_limit: 200_000,
         })));
         assert!(!is_soft_stop(&anyhow::anyhow!("the provider hung up")));
     }
