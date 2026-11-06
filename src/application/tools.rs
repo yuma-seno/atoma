@@ -48,13 +48,23 @@ pub struct RuntimeTools {
 impl RuntimeTools {
     pub fn new(skills: SkillCatalog, external: Option<Box<dyn ToolPort + Send>>) -> Result<Self> {
         if let Some(ref tools) = external {
-            if let Some(name) = tools
-                .tool_definitions()
-                .iter()
-                .find_map(tool_name)
-                .filter(|name| name.starts_with(BUILTIN_PREFIX))
-            {
-                anyhow::bail!("External tool uses reserved Atoma namespace: '{}'", name);
+            for name in tools.tool_definitions().iter().filter_map(tool_name) {
+                // Two guards reading one list. The reserved namespace keeps an
+                // external server from wearing the prefix every built-in carries;
+                // the bare check keeps one from wearing the name the built-in
+                // carries now. Bailing at construction is what keeps the ambiguity
+                // from shipping: two definitions of one name in a tool list
+                // dispatch to whichever the wrapper answers, and the loser is
+                // unreachable from every prompt.
+                if name.starts_with(BUILTIN_PREFIX) {
+                    anyhow::bail!("External tool uses reserved Atoma namespace: '{}'", name);
+                }
+                if name == LOAD_SKILL_TOOL {
+                    anyhow::bail!(
+                        "External tool collides with Atoma's built-in '{}'; rename the external tool",
+                        LOAD_SKILL_TOOL
+                    );
+                }
             }
         }
         Ok(Self { skills, external })
@@ -389,5 +399,85 @@ mod tests {
             "{definition}"
         );
         assert_eq!(parameters["required"], serde_json::json!(["skill_name"]));
+    }
+
+    /// The bare name, pinned by its measurement rather than by taste.
+    ///
+    /// Six all-time calls were made under this exact name, every one untaught by the
+    /// prompt: an engineer model reaches for `load_skill` because that is what the
+    /// tool would be called anywhere else, and the prefixed registration answered
+    /// each of them with "Unknown tool". Two of the six gave up on loading skills.
+    /// The assert is the one line of the rename that has to move only deliberately:
+    /// changing it means changing every adopter's prompt template with it, and the
+    /// two ship only together -- a template still teaching the previous name teaches
+    /// a tool that dispatches to nothing, which is loud, and meant to be.
+    #[test]
+    fn the_built_in_tool_is_named_the_way_models_write_it() {
+        assert_eq!(LOAD_SKILL_TOOL, "load_skill");
+    }
+
+    /// An external port offering just the names given, for the guard tests.
+    struct ExternalTools {
+        names: Vec<&'static str>,
+    }
+
+    #[async_trait]
+    impl ToolPort for ExternalTools {
+        fn tool_definitions(&self) -> Vec<Value> {
+            self.names
+                .iter()
+                .map(|n| serde_json::json!({"type": "function", "function": {"name": n}}))
+                .collect()
+        }
+
+        fn server_for(&self, name: &str) -> Option<String> {
+            self.names.contains(&name).then(|| "stub".to_string())
+        }
+
+        async fn call_tool(
+            &mut self,
+            _agent_name: &str,
+            _name: &str,
+            _arguments: &Value,
+        ) -> Result<ToolCallResult> {
+            Ok(ToolCallResult::default())
+        }
+    }
+
+    /// The reservation holds: no external server may wear the prefix every built-in
+    /// carries, because a definition the wrapper's own dispatch answers would be a
+    /// name the model sees once and the machinery answers twice about.
+    #[test]
+    fn an_external_tool_in_the_reserved_namespace_is_refused() {
+        let error = RuntimeTools::new(
+            catalog(),
+            Some(Box::new(ExternalTools {
+                names: vec!["atoma_builtin__skill_search"],
+            })),
+        )
+        .err()
+        .expect("the reservation refuses a prefixed name");
+        assert!(
+            error.to_string().contains("reserved Atoma namespace"),
+            "{}",
+            error
+        );
+    }
+
+    /// The bare name the built-in owns is refused to external servers. Two
+    /// definitions of one name in a tool list dispatch to whichever the wrapper
+    /// answers, and the loser becomes unreachable from every prompt -- so the run
+    /// starts carrying the ambiguity rather than shipping it.
+    #[test]
+    fn an_external_tool_named_like_the_builtin_is_refused() {
+        let error = RuntimeTools::new(
+            catalog(),
+            Some(Box::new(ExternalTools {
+                names: vec!["load_skill"],
+            })),
+        )
+        .err()
+        .expect("the built-in's own name is not redefinable by a server");
+        assert!(error.to_string().contains("collides"), "{}", error);
     }
 }
