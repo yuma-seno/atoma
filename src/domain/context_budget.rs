@@ -128,18 +128,22 @@ pub struct Compacted {
 /// answer would be a session no provider accepts. The kept range extends back to
 /// the assistant message that opened the oldest kept batch.
 ///
-/// Returns `None` when compaction has nothing to offer: a session whose recent
-/// turns already fill the whole budget is one enormous message away from the
-/// same limit, and a summary would be paid for a session the next turn exceeds
-/// again -- the caller ends the run instead, with the session intact.
+/// Returns `None` when compaction has nothing to offer: a keep that reaches back
+/// to the session's own opening has nothing before it to summarize, and a
+/// replacement must itself fit the window -- a summary that does not fit would be
+/// paid for a session the next turn exceeds again. The caller ends the run
+/// instead, with the session intact.
 pub fn compact(messages: &[Message], summary: &str, context_limit: u64) -> Option<Compacted> {
     if messages.is_empty() {
         return None;
     }
-    // The recent-turns budget: a third of the limit, in characters. `RECENT_SHARE`
-    // is a share and the arithmetic sits here rather than in a constant so it
-    // reads in one place.
-    let budget_chars = ((context_limit as f64 / CHARS_PER_TOKEN as f64) * RECENT_SHARE) as usize;
+    // The whole window, in characters: `context_limit` is in tokens and
+    // `CHARS_PER_TOKEN` is characters per token, so this multiplies. The
+    // recent-turns budget is a third of the result. `RECENT_SHARE` is a share
+    // and the arithmetic sits here rather than in a constant so it reads in one
+    // place.
+    let limit_chars = (context_limit as usize).saturating_mul(CHARS_PER_TOKEN);
+    let budget_chars = (limit_chars as f64 * RECENT_SHARE) as usize;
 
     let mut keep_from = messages.len();
     let mut kept_chars = 0usize;
@@ -148,8 +152,9 @@ pub fn compact(messages: &[Message], summary: &str, context_limit: u64) -> Optio
         let start = batch_start(messages, keep_from - 1);
         let batch_chars: usize = messages[start..keep_from].iter().map(message_chars).sum();
         // The first batch is kept whatever it costs -- a session whose newest
-        // exchange alone exceeds the budget has no smaller selection to offer,
-        // and the check below is the honest answer to that, not a smaller keep.
+        // exchange alone exceeds the budget has no smaller selection to offer.
+        // Whether that selection can be compacted at all is the fit check below,
+        // not a reason to walk further back.
         if batches > 0 && kept_chars + batch_chars > budget_chars {
             break;
         }
@@ -158,16 +163,28 @@ pub fn compact(messages: &[Message], summary: &str, context_limit: u64) -> Optio
         batches += 1;
     }
 
-    // A compaction must DROP at least one whole batch, and what it drops has to be
-    // worth summarizing: a keep that reaches back to the session's own opening has
-    // nothing before it to summarize (the summary would restate the kept turns).
-    // Both shapes end the run with the session intact instead, stated as `None`.
-    if keep_from == 0 || batches <= 1 {
+    // A compaction must DROP at least one whole batch: a keep that reaches back
+    // to the session's own opening has nothing before it to summarize (the
+    // summary would restate the kept turns). Dropping everything older than a
+    // single kept batch is a legitimate compaction -- that batch is the anchor
+    // the resumed run continues from -- so the number of kept batches is not
+    // itself a refusal reason.
+    if keep_from == 0 {
         return None;
     }
 
     let kept = &messages[keep_from..];
     let notice = compaction_notice(keep_from, kept.len());
+    // The replacement has to fit the window it replaces, and the summary is the
+    // model's output: its size is not ours to assume. If the notice, the summary
+    // and the newest batch -- the smallest keep there is -- overflow the limit,
+    // a summary would be paid for a session the next turn exceeds again, so the
+    // caller ends the run with the session intact instead.
+    const NOTICE_JOINER: usize = "\n\n---\n\n".len();
+    if notice.len() + summary.len() + NOTICE_JOINER + kept_chars > limit_chars {
+        return None;
+    }
+
     let mut out = Vec::with_capacity(kept.len() + 1);
     out.push(Message::user(&format!("{}\n\n---\n\n{}", notice, summary)));
     out.extend(kept.iter().cloned());
@@ -273,10 +290,10 @@ mod tests {
     #[test]
     fn a_compaction_keeps_the_recent_turns_and_replaces_the_rest() {
         let mut messages = vec![user("the task")];
-        for i in 0..30 {
+        for i in 0..60 {
             messages.extend(turn(i, 100));
         }
-        let limit = 4_000; // tokens → 16k chars; a third of that is ~5.3k chars of recent turns
+        let limit = 4_000; // tokens → 16k chars; a third of that is ~5.3k chars, about 37 of these turns
         let out = compact(&messages, "the work so far", limit).unwrap();
         assert!(out.dropped_messages > 0);
         assert_eq!(
@@ -313,11 +330,12 @@ mod tests {
     /// assistant that opened the oldest kept batch.
     #[test]
     fn the_kept_suffix_never_splits_a_tool_batch() {
-        // Limit 100_000 tokens → 25k chars of recent budget: with 2,000-char
-        // results, several turns are kept and several are dropped -- both sides
-        // of the boundary exist, which is what this test needs.
+        // Limit 100_000 tokens → 400k chars; a third is ~133k chars of recent
+        // budget: with 2,000-char results, several turns are kept and several are
+        // dropped -- both sides of the boundary exist, which is what this test
+        // needs.
         let mut messages = vec![user("the task")];
-        for i in 0..20 {
+        for i in 0..100 {
             messages.extend(turn(i, 2_000));
         }
         let out = compact(&messages, "summary", 100_000).unwrap();
@@ -345,16 +363,16 @@ mod tests {
         assert_ne!(kept.first().unwrap().role, "tool");
     }
 
-    /// A session whose newest exchange alone exceeds the recent-turns budget has
-    /// no compaction to offer: a summary would be paid for a session the next
-    /// turn exceeds again. `None` is the caller's signal to end the run with the
+    /// A session whose smallest replacement still overflows the window has no
+    /// compaction to offer: a summary would be paid for a session the next turn
+    /// exceeds again. `None` is the caller's signal to end the run with the
     /// session intact.
     #[test]
-    fn a_session_whose_recent_turns_fill_the_budget_is_not_compacted() {
+    fn a_session_whose_smallest_replacement_overflows_is_not_compacted() {
         // Limit 1_000 tokens → 4k chars total → ~1.3k chars of recent budget.
         // Every turn below is larger than that budget on its own, so the walk
-        // keeps the first (newest) batch -- which is the whole session -- and
-        // there is nothing left to drop.
+        // keeps the newest batch; the notice and summary on top of it still
+        // exceed the 4k window, so there is nothing to offer.
         let mut messages = vec![user("the task")];
         for i in 0..3 {
             messages.extend(turn(i, 5_000));
@@ -363,14 +381,75 @@ mod tests {
     }
 
     #[test]
+    fn a_session_that_fits_the_recent_window_has_nothing_to_summarize() {
+        let mut messages = vec![user("the task")];
+        for i in 0..3 {
+            messages.extend(turn(i, 100));
+        }
+        // ~430 chars, far under a third of 4,000 tokens (16k chars): keeping it
+        // all is not a compaction, and a summary would restate the kept turns.
+        assert!(compact(&messages, "summary", 4_000).is_none());
+    }
+
+    /// The observed failure (#441): the summary succeeded, only the newest batch
+    /// fit the recent budget, and the old `batches <= 1` refusal threw the work
+    /// away. One batch is the anchor the resumed run needs; the replacement fits
+    /// the window, so it is a compaction.
+    #[test]
+    fn a_single_kept_batch_is_enough_when_the_replacement_fits() {
+        let mut messages = vec![user("the task")];
+        for i in 0..3 {
+            messages.extend(turn(i, 100));
+        }
+        messages.extend(turn(3, 5_300));
+
+        // 4,000 tokens → 16k chars, ~5.3k of recent budget: the newest batch
+        // (~5.3k chars) is the only one that fits, and everything older is
+        // dropped.
+        let out = compact(&messages, "summary", 4_000).unwrap();
+        assert!(out.dropped_messages > 0);
+        assert_eq!(out.messages.len() - 1, 2, "only the newest batch is kept");
+    }
+
+    /// The recent window is a third of the FULL window in characters. The budget
+    /// used to divide by `CHARS_PER_TOKEN` instead of multiplying it, making the
+    /// window a forty-eighth -- the observed session then kept one batch where it
+    /// should have kept dozens.
+    #[test]
+    fn the_recent_window_is_a_third_of_the_window_in_characters() {
+        let mut messages = vec![user("the task")];
+        for i in 0..40 {
+            messages.extend(turn(i, 100));
+        }
+        // 4,000 tokens → 16k chars; a third is ~5.3k chars, about 37 turns.
+        let out = compact(&messages, "s", 4_000).unwrap();
+        let kept = out.messages.len() - 1;
+        assert!(out.dropped_messages > 0);
+        assert!(kept > 60, "kept {kept} messages; expected dozens of turns");
+    }
+
+    /// The summary is the model's output, so its size is not ours to assume. One
+    /// that does not fit the window is not a compaction -- the caller ends with
+    /// the session intact instead.
+    #[test]
+    fn a_summary_that_does_not_fit_the_window_is_not_compacted() {
+        let mut messages = vec![user("the task")];
+        for i in 0..60 {
+            messages.extend(turn(i, 100));
+        }
+        let summary = "x".repeat(20_000);
+        assert!(compact(&messages, &summary, 4_000).is_none());
+    }
+
+    #[test]
     fn the_notice_counts_what_it_dropped_and_kept() {
-        // A limit small enough that several turns are dropped and several kept:
-        // 8_000 tokens → 2k chars of recent budget → about one turn kept of ten.
+        // Limit 500 tokens → 2k chars total, ~666 chars of recent budget:
+        // several turns are dropped and several kept.
         let mut messages = vec![user("the task")];
         for i in 0..10 {
             messages.extend(turn(i, 50));
         }
-        let out = compact(&messages, "s", 8_000).unwrap();
+        let out = compact(&messages, "s", 500).unwrap();
         let dropped = out.dropped_messages;
         let kept = out.messages.len() - 1;
         let text = out.messages[0].content.as_ref().unwrap().as_str().unwrap();

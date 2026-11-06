@@ -15,23 +15,23 @@ use crate::domain::ports::{
     AgentDefPort, LlmPort, McpFactory, PromptContext, SessionPort, SkillPort, TemplatePort,
     ToolDefPort, ToolPort,
 };
-use crate::domain::repetition::Repetition;
 use crate::domain::session::{
     answer_unanswered_tool_calls, Message, Session, TOOL_CALL_UNANSWERED,
 };
 use crate::domain::skill::SkillCatalog;
 use crate::domain::tool::unknown_server_message;
 
-// The three sentinel types stay unexported on purpose. `is_soft_stop` is the whole
-// question anyone outside asks about them, and exporting the types invites each caller
-// to answer it again with its own `downcast_ref` -- which is how one of the two callers
-// came to know about only one ceiling.
+// The sentinel types stay unexported on purpose. `is_soft_stop` is the whole
+// question anyone outside asks about them, and exporting the types invites each
+// caller to answer it again with its own `downcast_ref` -- which is how one of the
+// two callers came to know about only one ceiling.
 use serde_json::Value;
 
-// The three sentinels `ending_of` names. Imported rather than re-exported: naming an
-// ending is this module's own business, and exporting them again would invite a caller
-// to downcast a second time -- which is the duplication `is_soft_stop` exists to end.
-use execution::{MaxIterationsReached, RunTimeExceeded, StopRequested};
+// The one table of deliberate stops and the ending each is recorded as lives
+// beside the types (`execution::soft_stop_ending`). `ending_of` reads it rather
+// than downcasting again: two chains were how the context budget got a soft stop
+// without an ending, and a run that stopped for its context was recorded as
+// `failed`.
 
 pub use execution::{inference_loop, is_soft_stop, CompletionReason, InferenceResult};
 pub use report::{envelope, RunFacts, RunOutcome};
@@ -121,9 +121,8 @@ pub struct RunRecord {
     /// How the run ended, in the terms the runner decides them.
     ///
     /// `completed` is the only one that is not a mechanism giving up. `iterations`,
-    /// `runtime` and `stopped` are the three soft stops; `loop` is the repetition
-    /// circuit breaker firing; `failed` is everything else, including a provider
-    /// hanging up.
+    /// `runtime`, `stopped`, `context_limit` and `loop` are the deliberate stops;
+    /// `failed` is everything else, including a provider hanging up.
     ///
     /// Two endings are `completed`: the agent returning text, and a tool ending the
     /// session — which is how a run that opened a pull request ends. The second used to
@@ -224,23 +223,12 @@ fn record_run(session: &mut Session, facts: &RunFacts) {
 
 /// Which word describes an ending, from the error that produced it.
 ///
-/// The three soft stops are somebody's decision -- a ceiling that was configured, or a
-/// person asking. `loop` is the repetition circuit breaker, which is a mechanism giving
-/// up rather than a decision, and is named apart from `failed` because it is the one
-/// failure a caller can act on: the same turn asked again is often all it takes.
-/// Everything else is `failed`.
+/// `execution::soft_stop_ending` is the one table of deliberate stops and their
+/// names; every other error is `failed`. Naming them in one place is what keeps an
+/// ending from being recorded as a failure just because it was added to one of the
+/// two chains.
 fn ending_of(error: &anyhow::Error) -> &'static str {
-    if error.downcast_ref::<MaxIterationsReached>().is_some() {
-        "iterations"
-    } else if error.downcast_ref::<RunTimeExceeded>().is_some() {
-        "runtime"
-    } else if error.downcast_ref::<StopRequested>().is_some() {
-        "stopped"
-    } else if error.downcast_ref::<Repetition>().is_some() {
-        "loop"
-    } else {
-        "failed"
-    }
+    execution::soft_stop_ending(error).unwrap_or("failed")
 }
 
 fn save_whatever_was_reached(
@@ -714,11 +702,15 @@ mod tests {
         assert_eq!(Some(reported["seconds"].clone()), recorded_seconds);
     }
 
-    /// A loop is named apart from a failure, because it is the one failure a caller can
-    /// act on: the same turn asked again is often all it takes. `failed` would file it
-    /// with a provider hanging up, which nothing downstream can do anything about.
+    /// Every deliberate stop has a name, and a failure does not. In particular the
+    /// context budget was a soft stop with no ending arm, so an exit 2 was recorded
+    /// as `failed` (#441).
     #[test]
-    fn a_repetition_loop_is_named_apart_from_a_failure() {
+    fn every_deliberate_stop_is_named_and_a_failure_is_not() {
+        use crate::application::runner::execution::{
+            ContextBudgetExceeded, MaxIterationsReached, RunTimeExceeded, StopRequested,
+        };
+
         let repetition = crate::domain::repetition::Repetition {
             distinct: 3,
             window: 500,
@@ -726,7 +718,30 @@ mod tests {
             count: 120,
         };
 
+        assert_eq!(
+            ending_of(&anyhow::Error::new(MaxIterationsReached(50))),
+            "iterations"
+        );
+        assert_eq!(
+            ending_of(&anyhow::Error::new(RunTimeExceeded(
+                std::time::Duration::from_secs(60)
+            ))),
+            "runtime"
+        );
+        assert_eq!(
+            ending_of(&anyhow::Error::new(StopRequested(
+                std::path::PathBuf::from("/tmp/stop")
+            ))),
+            "stopped"
+        );
         assert_eq!(ending_of(&anyhow::Error::new(repetition)), "loop");
+        assert_eq!(
+            ending_of(&anyhow::Error::new(ContextBudgetExceeded {
+                prompt_tokens: 200_430,
+                context_limit: 200_000,
+            })),
+            "context_limit"
+        );
         assert_eq!(
             ending_of(&anyhow::anyhow!("the provider hung up")),
             "failed"
