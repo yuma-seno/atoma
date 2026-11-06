@@ -143,7 +143,10 @@ impl SessionPort for SeededSessionPort {
                     &format!("{{\"path\":\"f{i}\"}}"),
                 )]),
             ));
-            messages.push(Message::tool(&format!("seed-{i}"), &"x".repeat(100)));
+            // 2,000 chars a turn: the whole seed is ~62k chars, more than the
+            // 40k-token limit's recent-turns window (a third of 160k), so the
+            // compaction has history to drop.
+            messages.push(Message::tool(&format!("seed-{i}"), &"x".repeat(2_000)));
         }
         Ok(atoma::domain::session::Session {
             messages,

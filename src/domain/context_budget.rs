@@ -380,6 +380,17 @@ mod tests {
         assert!(compact(&messages, "summary", 1_000).is_none());
     }
 
+    #[test]
+    fn a_session_that_fits_the_recent_window_has_nothing_to_summarize() {
+        let mut messages = vec![user("the task")];
+        for i in 0..3 {
+            messages.extend(turn(i, 100));
+        }
+        // ~430 chars, far under a third of 4,000 tokens (16k chars): keeping it
+        // all is not a compaction, and a summary would restate the kept turns.
+        assert!(compact(&messages, "summary", 4_000).is_none());
+    }
+
     /// The observed failure (#441): the summary succeeded, only the newest batch
     /// fit the recent budget, and the old `batches <= 1` refusal threw the work
     /// away. One batch is the anchor the resumed run needs; the replacement fits
