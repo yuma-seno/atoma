@@ -232,7 +232,7 @@ says which of the two it used.
 | `Agent has mcp_servers configured but --tools-file was not specified` | Agent requests MCP servers and no tools file was given | Pass `--tools-file` or remove `mcp_servers` from agent |
 | `Tool 'X' not found in tools file` | Agent `mcp_servers` and tools YAML keys do not match | Align names exactly and re-run `atoma validate` |
 | Hook script not found | Relative hook path cannot be resolved from tools file directory | Fix path in `tools.yaml` and ensure file exists |
-| `Unknown skill` from `atoma_builtin__load_skill` | Skill name not present in loaded catalog | Use one of the names listed in `AVAILABLE_SKILLS` |
+| `Unknown skill` from `load_skill` | Skill name not present in loaded catalog | Use one of the names listed in `AVAILABLE_SKILLS` |
 | `LLM returned an empty response (finish_reason: X) ... times in a row` | Provider kept returning contentless completions. A `length` here means the model hit its output-token ceiling before producing anything — often a reasoning model spending the whole budget on thoughts | Check provider/endpoint health; on OpenRouter, pin routing with `extra_body.provider`. If the reason is `length`, raise the output-token ceiling or shorten the request |
 | `Failed to parse ... response` | Body did not match the expected shape (truncated bodies are retried automatically) | Verify the model is served in an OpenAI-compatible format at the configured base URL |
 | Single request takes far longer than expected | Upstream endpoint stalled; each attempt waits `ATOMA_LLM_TIMEOUT` | Lower `ATOMA_LLM_TIMEOUT` to fail faster, and route away from the stalling endpoint |

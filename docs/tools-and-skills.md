@@ -3,7 +3,7 @@
 Atoma runtime exposes two tool categories:
 
 - External MCP tools loaded from `tools.yaml` and discovered from running servers.
-- One built-in Atoma tool: `atoma_builtin__load_skill`.
+- One built-in Atoma tool: `load_skill`.
 
 The built-in skill loader is always present and is not configured in `tools.yaml`.
 
@@ -368,7 +368,7 @@ At prompt build time, Atoma reveals only skill metadata in `AVAILABLE_SKILLS`.
 
 When an agent needs details, it calls:
 
-- `atoma_builtin__load_skill` with `{"skill_name":"..."}`
+- `load_skill` with `{"skill_name":"..."}`
 
 Tool result returns full skill instructions as normal tool output, which is persisted in session history like any other tool call.
 
@@ -378,7 +378,7 @@ Tool result returns full skill instructions as normal tool output, which is pers
 
 You cannot:
 
-- remove `atoma_builtin__load_skill`
+- remove `load_skill`
 - rename it
 - add custom parameters to it
 

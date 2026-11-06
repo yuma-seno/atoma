@@ -8,8 +8,13 @@ use std::collections::BTreeMap;
 /// dependency. It was a literal in that template, so renaming this would have told every
 /// model, in every prompt, to call a tool that no longer exists -- and it would have
 /// called it, received "Unknown tool", and loaded no skill, with nothing failing at
-/// build time.
-pub const LOAD_SKILL_TOOL: &str = "atoma_builtin__load_skill";
+/// build time. A rename is therefore a pairing, not a release: the template teaching
+/// this name and the core dispatching it ship together.
+///
+/// A tool the core owns is named the way models say it. There is no namespace in front
+/// of it: the `server__` prefix that MCP tools carry exists to keep one server's tools
+/// from colliding with another's, and a built-in has no server to collide with.
+pub const LOAD_SKILL_TOOL: &str = "load_skill";
 
 /// The name of that tool's one argument.
 ///

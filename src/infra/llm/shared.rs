@@ -1668,7 +1668,7 @@ mod tests {
             "messages": [],
             "tools": [
                 { "type": "function", "function": { "name": "github__get_issue" } },
-                { "type": "function", "function": { "name": "atoma_builtin__load_skill" } },
+                { "type": "function", "function": { "name": crate::domain::skill::LOAD_SKILL_TOOL } },
             ],
             "tool_choice": "auto",
         });
@@ -1706,10 +1706,10 @@ mod tests {
         assert_eq!(
             tool_names(&body),
             vec![
-                "github__get_issue",
-                "atoma_builtin__load_skill",
-                "openrouter:web_search",
-                "openrouter:web_fetch",
+                "github__get_issue".to_string(),
+                crate::domain::skill::LOAD_SKILL_TOOL.to_string(),
+                "openrouter:web_search".to_string(),
+                "openrouter:web_fetch".to_string(),
             ],
             "runtime tool schemas must survive alongside the agent's server tools"
         );
