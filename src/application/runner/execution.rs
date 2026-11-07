@@ -1013,8 +1013,7 @@ pub async fn inference_loop(
                     // Past the bound the run ends as it did before this existed; the
                     // prompt teaches the same shape, and a provider stuck here would
                     // otherwise spend the iteration budget narrating.
-                    if introduction_nudges < MAX_INTRODUCTION_NUDGES
-                        && reads_as_introduction(&text)
+                    if introduction_nudges < MAX_INTRODUCTION_NUDGES && reads_as_introduction(&text)
                     {
                         introduction_nudges += 1;
                         tracing::warn!(
