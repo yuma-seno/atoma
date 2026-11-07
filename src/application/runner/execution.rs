@@ -28,6 +28,16 @@ use super::RunFacts;
 /// budget.
 const MAX_EMPTY_COMPLETION_RETRIES: u8 = 2;
 
+/// How many stopped-short introductions to ask the model to finish before letting
+/// the run end as it did.
+///
+/// The failure this bounds is a model that ends its turn on the sentence that
+/// introduced its next tool call — the run then reports work it has not done. One
+/// nudge usually recovers it; a provider that keeps stopping there would loop for
+/// as long as the counter allows, so past the bound the run ends the way it did
+/// before this existed and the prompt-side half of the fix carries the weight.
+const MAX_INTRODUCTION_NUDGES: u8 = 2;
+
 /// Count a contentless completion and either ask the turn again or give up.
 ///
 /// The three shapes a contentless completion arrives in — no text under `stop`, no
@@ -59,6 +69,18 @@ fn reask_contentless(session: &mut Session, consecutive_empty: &mut u8, what: &s
         what
     )));
     Ok(())
+}
+
+/// Whether a final message reads as the introduction to work that never came.
+///
+/// Crude on purpose, and measured. Every premature stop in this failure class ended
+/// its last sentence with a colon — the punctuation of a sentence that hands off to
+/// what follows it, "Now the tests:", "Committing, then a push:" — and no completed
+/// report did. The half-width and full-width colon are both counted, because a report
+/// written in Japanese ends its introductions the same way.
+fn reads_as_introduction(text: &str) -> bool {
+    let trimmed = text.trim_end();
+    trimmed.ends_with(':') || trimmed.ends_with('：')
 }
 
 /// Sentinel error returned when the inference loop runs out of iterations.
@@ -597,6 +619,7 @@ pub async fn inference_loop(
 ) -> Result<InferenceResult> {
     let mut loop_tracker = LoopTracker::default();
     let mut consecutive_empty: u8 = 0;
+    let mut introduction_nudges: u8 = 0;
     let started = Instant::now();
 
     let mut iteration: u32 = 0;
@@ -979,6 +1002,39 @@ pub async fn inference_loop(
                 // `end_turn` used to be an arm here and was dead: the Anthropic adapter
                 // has always translated it before this point.
                 FinishReason::Stop => {
+                    // A message can also stop short of its work in a way the empty
+                    // check above cannot see: the text is there, and it reads as the
+                    // introduction to a tool call the turn ended before making. The
+                    // model stopped where it meant to continue, this message becomes
+                    // the run's final answer, and the run reports work it has not
+                    // done. The sentence is kept in the session — dropping it would
+                    // invite the model to write it a second time — and the note names
+                    // both ways out: the call, or a report that states what happened.
+                    // Past the bound the run ends as it did before this existed; the
+                    // prompt teaches the same shape, and a provider stuck here would
+                    // otherwise spend the iteration budget narrating.
+                    if introduction_nudges < MAX_INTRODUCTION_NUDGES
+                        && reads_as_introduction(&text)
+                    {
+                        introduction_nudges += 1;
+                        tracing::warn!(
+                            "LLM stopped on an unfinished introduction — re-requesting ({}/{})",
+                            introduction_nudges,
+                            MAX_INTRODUCTION_NUDGES
+                        );
+                        session
+                            .messages
+                            .push(message.with_finish_reason(finish_reason));
+                        session.messages.push(Message::user(
+                            "Your last message announced a step but made no tool call, \
+                             and a message with no tool call ends the run, so the step \
+                             it announced never happened. Make that tool call now. If \
+                             the work is actually complete, write the report instead: \
+                             a finished report states what happened and does not end \
+                             with a colon.",
+                        ));
+                        continue;
+                    }
                     session
                         .messages
                         .push(message.with_finish_reason(finish_reason));
