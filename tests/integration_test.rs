@@ -918,6 +918,245 @@ async fn test_repeated_empty_completions_abort() {
     assert!(!message.contains("maximum iterations"), "{message}");
 }
 
+/// A turn that stops on the sentence introducing its next tool call is asked to make
+/// that call, and both the ask and the kept sentence are visible in the session.
+///
+/// The observed failure (#467's class): the model ends its turn on "Now the tests:"
+/// and the run completes, reporting work it has not done. The nudge names both ways
+/// out; here the model takes the first one and makes the call.
+#[tokio::test]
+async fn test_stopped_introduction_is_nudged_and_the_run_continues() {
+    use common::mock_llm::make_tool_call;
+
+    let tool_call = make_tool_call("c1", "test_tool", r#"{"input":"x"}"#);
+    let llm = MockLlmClient::new()
+        .enqueue_text("Now the contract tests:")
+        .enqueue_tool_calls(vec![tool_call])
+        .enqueue_text("All done.");
+
+    let registry = MockMcpRegistry::new()
+        .with_tool("test_tool", "A test tool")
+        .with_response("test_tool", "tool result");
+
+    let agent_def = AgentDef {
+        mcp_servers: vec!["test_server".to_string()],
+        ..minimal_agent("IntroAgent")
+    };
+    let agent_port = StubAgentDefPort { agent_def };
+    let session_port = RecordingSessionPort::default();
+    let saved = session_port.saved.clone();
+    let tool_def_port = SingleEntryToolDefPort::new("test_server");
+    let mcp_factory = StubMcpFactory::new(registry);
+
+    let dir = tempdir().unwrap();
+    let agent_path = dir.path().join("agent.md");
+    std::fs::write(&agent_path, "").unwrap();
+    let tools_path = dir.path().join("tools.yaml");
+    std::fs::write(&tools_path, "").unwrap();
+    let out_session = dir.path().join("session.json");
+
+    let result = run(
+        RunSettings {
+            agent_def_path: agent_path,
+            in_session: None,
+            prompt_file: None,
+            out_session: Some(out_session),
+            template_path: None,
+            tools_file: Some(tools_path),
+            skills_dir: None,
+            max_iterations: Some(10),
+            max_runtime: None,
+            stop_file: None,
+            loop_retries: false,
+        },
+        RunDeps {
+            llm: &llm,
+            agent_def: &agent_port,
+            session: &session_port,
+            tool_def: &tool_def_port,
+            skill: &atoma::infra::persistence::skill::FileSkillAdapter,
+            template: &atoma::infra::template::FileTemplateAdapter,
+            mcp_factory: &mcp_factory,
+        },
+        &mut atoma::application::runner::RunFacts::default(),
+    )
+    .await;
+
+    match result {
+        Ok(RunOutcome::Completed { text, .. }) => assert_eq!(text, "All done."),
+        other => panic!("expected the nudged run to finish, got {other:?}"),
+    }
+
+    let session = saved.lock().unwrap().clone().expect("a session was saved");
+
+    assert!(
+        session.messages.iter().any(|m| {
+            m.role == "user"
+                && m.content
+                    .as_ref()
+                    .and_then(|c| c.as_str())
+                    .is_some_and(|t| t.contains("announced a step but made no tool call"))
+        }),
+        "the introduction left no note: {:?}",
+        session.messages
+    );
+    // The introduced sentence is kept: dropping it would invite the model to write
+    // it again, and the recovery should read as a continuation of it.
+    assert!(
+        session.messages.iter().any(|m| {
+            m.role == "assistant"
+                && m.content
+                    .as_ref()
+                    .and_then(|c| c.as_str())
+                    .is_some_and(|t| t == "Now the contract tests:")
+        }),
+        "the introduced sentence was dropped: {:?}",
+        session.messages
+    );
+}
+
+/// Past the bound the run ends as it did before the nudge existed.
+///
+/// A provider stuck narrating would otherwise spend the iteration budget, so the
+/// second nudge is the last and the third colon-ended message completes the run,
+/// exactly as it would have before this mechanism.
+#[tokio::test]
+async fn test_repeated_introductions_end_the_run_once_the_bound_is_passed() {
+    let llm = MockLlmClient::new()
+        .enqueue_text("First step:")
+        .enqueue_text("Second step:")
+        .enqueue_text("Third step:");
+
+    let agent_port = StubAgentDefPort {
+        agent_def: minimal_agent("StuckNarratorAgent"),
+    };
+    let session_port = RecordingSessionPort::default();
+    let saved = session_port.saved.clone();
+    let tool_def_port = StubToolDefPort;
+    let mcp_factory = StubMcpFactory::new(MockMcpRegistry::new());
+
+    let dir = tempdir().unwrap();
+    let agent_path = dir.path().join("agent.md");
+    std::fs::write(&agent_path, "").unwrap();
+    let out_session = dir.path().join("session.json");
+
+    let result = run(
+        RunSettings {
+            agent_def_path: agent_path,
+            in_session: None,
+            prompt_file: None,
+            out_session: Some(out_session),
+            template_path: None,
+            tools_file: None,
+            skills_dir: None,
+            max_iterations: Some(50),
+            max_runtime: None,
+            stop_file: None,
+            loop_retries: false,
+        },
+        RunDeps {
+            llm: &llm,
+            agent_def: &agent_port,
+            session: &session_port,
+            tool_def: &tool_def_port,
+            skill: &atoma::infra::persistence::skill::FileSkillAdapter,
+            template: &atoma::infra::template::FileTemplateAdapter,
+            mcp_factory: &mcp_factory,
+        },
+        &mut atoma::application::runner::RunFacts::default(),
+    )
+    .await;
+
+    match result {
+        Ok(RunOutcome::Completed { text, .. }) => assert_eq!(text, "Third step:"),
+        other => panic!("expected the bounded run to complete as before, got {other:?}"),
+    }
+
+    let session = saved.lock().unwrap().clone().expect("a session was saved");
+    let nudges = session
+        .messages
+        .iter()
+        .filter(|m| {
+            m.role == "user"
+                && m.content
+                    .as_ref()
+                    .and_then(|c| c.as_str())
+                    .is_some_and(|t| t.contains("announced a step but made no tool call"))
+        })
+        .count();
+    assert_eq!(nudges, 2, "the nudge is bounded: {:?}", session.messages);
+}
+
+/// A finished report does not meet the nudge.
+///
+/// The test that keeps the heuristic honest in the other direction: a report states
+/// what happened, and it ends on a period rather than on the punctuation of a
+/// sentence that hands off to what follows it.
+#[tokio::test]
+async fn test_a_finished_report_is_not_nudged() {
+    let llm = MockLlmClient::new().enqueue_text("All 78 tests pass. Work complete.");
+
+    let agent_port = StubAgentDefPort {
+        agent_def: minimal_agent("ReportAgent"),
+    };
+    let session_port = RecordingSessionPort::default();
+    let saved = session_port.saved.clone();
+    let tool_def_port = StubToolDefPort;
+    let mcp_factory = StubMcpFactory::new(MockMcpRegistry::new());
+
+    let dir = tempdir().unwrap();
+    let agent_path = dir.path().join("agent.md");
+    std::fs::write(&agent_path, "").unwrap();
+    let out_session = dir.path().join("session.json");
+
+    let result = run(
+        RunSettings {
+            agent_def_path: agent_path,
+            in_session: None,
+            prompt_file: None,
+            out_session: Some(out_session),
+            template_path: None,
+            tools_file: None,
+            skills_dir: None,
+            max_iterations: Some(10),
+            max_runtime: None,
+            stop_file: None,
+            loop_retries: false,
+        },
+        RunDeps {
+            llm: &llm,
+            agent_def: &agent_port,
+            session: &session_port,
+            tool_def: &tool_def_port,
+            skill: &atoma::infra::persistence::skill::FileSkillAdapter,
+            template: &atoma::infra::template::FileTemplateAdapter,
+            mcp_factory: &mcp_factory,
+        },
+        &mut atoma::application::runner::RunFacts::default(),
+    )
+    .await;
+
+    match result {
+        Ok(RunOutcome::Completed { text, .. }) => {
+            assert_eq!(text, "All 78 tests pass. Work complete.");
+        }
+        other => panic!("expected the report to complete untouched, got {other:?}"),
+    }
+
+    let session = saved.lock().unwrap().clone().expect("a session was saved");
+    assert!(
+        !session.messages.iter().any(|m| {
+            m.role == "user"
+                && m.content
+                    .as_ref()
+                    .and_then(|c| c.as_str())
+                    .is_some_and(|t| t.contains("announced a step but made no tool call"))
+        }),
+        "a finished report was re-asked: {:?}",
+        session.messages
+    );
+}
+
 /// The regression this issue is about: a `length` truncation that produced nothing used
 /// to be pushed to the session as an empty string and reported as a completed run.
 ///
