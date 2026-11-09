@@ -128,7 +128,14 @@ impl LlmPort for BudgetedLlm {
 /// messages is entirely recent turns, and `compact` honestly answers `None`
 /// to it -- which is the soft stop, not the hook round this file's newest
 /// test needs to observe.
-struct SeededSessionPort;
+///
+/// The saves are kept rather than dropped: the replacement is what the NEXT run
+/// loads, so its shape -- system prompt at the head, summary after it -- is part
+/// of what a compaction promises (#436).
+#[derive(Clone, Default)]
+struct SeededSessionPort {
+    saved: Arc<Mutex<Vec<Vec<Message>>>>,
+}
 
 impl SessionPort for SeededSessionPort {
     fn load(&self, _path: &Path) -> Result<atoma::domain::session::Session> {
@@ -153,7 +160,8 @@ impl SessionPort for SeededSessionPort {
             ..Default::default()
         })
     }
-    fn save(&self, _session: &atoma::domain::session::Session, _path: &Path) -> Result<()> {
+    fn save(&self, session: &atoma::domain::session::Session, _path: &Path) -> Result<()> {
+        self.saved.lock().unwrap().push(session.messages.clone());
         Ok(())
     }
 }
@@ -287,6 +295,8 @@ async fn a_tools_file_hook_runs_before_the_session_is_replaced() {
     // above could not catch the shadowing: they never reached the check either.
     struct ScriptedLlm {
         calls: Mutex<usize>,
+        /// The messages the compaction's summary inference carried, when it came.
+        summary_request: Mutex<Vec<Message>>,
     }
     #[async_trait]
     impl LlmPort for ScriptedLlm {
@@ -303,7 +313,7 @@ async fn a_tools_file_hook_runs_before_the_session_is_replaced() {
         async fn chat_completion_streaming(
             &self,
             _: &str,
-            _: &[Message],
+            messages: &[Message],
             _: Option<&[serde_json::Value]>,
             _: &HashMap<String, serde_json::Value>,
             _: &mut DeltaHandler<'_>,
@@ -330,6 +340,18 @@ async fn a_tools_file_hook_runs_before_the_session_is_replaced() {
             } else {
                 Message::assistant(Some("work continues"), None)
             };
+            // Call 2 is the SUMMARY the compaction generates. Its request is kept
+            // so the test can assert what it did NOT carry -- the kept tail -- and
+            // its usage is distinct from the run's so the totals say whether it
+            // was counted (#436).
+            let (prompt_tokens, total_tokens) = match n {
+                1 => (50_000, 50_001),
+                2 => {
+                    *self.summary_request.lock().unwrap() = messages.to_vec();
+                    (7_000, 7_001)
+                }
+                _ => (1_000, 1_001),
+            };
             Ok(LlmResponse {
                 choices: vec![LlmChoice {
                     message,
@@ -340,12 +362,9 @@ async fn a_tools_file_hook_runs_before_the_session_is_replaced() {
                     }),
                 }],
                 usage: Some(LlmUsage {
-                    // Call 2 is the SUMMARY the compaction generates; its usage is
-                    // deliberately never recorded by the runner, so only call 1's
-                    // over-budget report and call 3's under-budget one matter.
-                    prompt_tokens: if n == 1 { 50_000 } else { 1_000 },
+                    prompt_tokens,
                     completion_tokens: 1,
-                    total_tokens: 1_001,
+                    total_tokens,
                     cached_prompt_tokens: None,
                     written_prompt_tokens: None,
                 }),
@@ -417,8 +436,9 @@ async fn a_tools_file_hook_runs_before_the_session_is_replaced() {
 
     let llm = ScriptedLlm {
         calls: Mutex::new(0),
+        summary_request: Mutex::new(Vec::new()),
     };
-    let session_port = SeededSessionPort;
+    let session_port = SeededSessionPort::default();
     let mut facts = RunFacts::default();
     let outcome = run(
         settings,
@@ -454,5 +474,65 @@ async fn a_tools_file_hook_runs_before_the_session_is_replaced() {
         payload["session_path"].as_str().unwrap(),
         out_session.display().to_string(),
         "the hook is told the path the runner will overwrite"
+    );
+
+    // The replacement keeps the system prompt at its head (#436), then the
+    // notice-and-summary message, then the tail. Without the system message the
+    // rest of the run had no report contract or dispatch rules.
+    let saved = session_port.saved.lock().unwrap();
+    let replacement = saved.last().expect("the run saves its session");
+    assert_eq!(
+        replacement[0].role, "system",
+        "the system prompt survives a compaction"
+    );
+    assert!(
+        replacement[1]
+            .content
+            .as_ref()
+            .and_then(|c| c.as_str())
+            .unwrap_or_default()
+            .contains("[session compacted:"),
+        "the notice-and-summary message follows the system prompt"
+    );
+
+    // The summary request carried the system prompt and the part being replaced,
+    // NOT the kept tail -- that tail is exactly what it would pay for twice (#436).
+    let summary_request = llm.summary_request.lock().unwrap();
+    assert_eq!(summary_request[0].role, "system");
+    let carried: Vec<&str> = summary_request
+        .iter()
+        .filter_map(|m| m.tool_call_id.as_deref())
+        .collect();
+    assert!(
+        !carried.contains(&"seed-29"),
+        "the kept tail must not be part of the summary request"
+    );
+    assert!(
+        carried.contains(&"seed-0"),
+        "the replaced head must be part of the summary request"
+    );
+    let instruction = summary_request
+        .last()
+        .and_then(|m| m.content.as_ref())
+        .and_then(|c| c.as_str())
+        .expect("the summary instruction is the last message");
+    assert!(instruction.contains("system prompt is preserved"));
+    assert!(instruction.contains("The final "));
+
+    // The summary inference was billed and counted. The two cache counts stay
+    // None because this scripted provider reports none, on the same rule as the
+    // per-inference path.
+    assert_eq!(
+        facts.usage.prompt_tokens, 58_000,
+        "the summary's prompt is part of the run's usage"
+    );
+    assert_eq!(facts.usage.completion_tokens, 3);
+    assert_eq!(facts.usage.total_tokens, 58_003);
+    // ...but it is not the budget's measurement: that stays the last inference of
+    // the conversation, whose replacement prompt no longer holds the old history.
+    assert_eq!(
+        facts.last_prompt_tokens,
+        Some(1_000),
+        "the summary request must not overwrite the budget's measurement"
     );
 }
