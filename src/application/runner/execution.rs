@@ -376,26 +376,36 @@ const IMAGE_WITHHELD: &str =
 
 /// Compact the session in place: summarize the old history, keep the recent turns.
 ///
-/// The order is the whole design (#12):
+/// The order is the whole design (#12, #436):
 ///
 /// 1. the `before_compaction` hooks run FIRST, each told the session's path and the
 ///    numbers that triggered this -- so whoever embeds atoma archives the session
 ///    BEFORE it is replaced. Archiving is the embedder's decision; atoma is a
 ///    stateless CLI and does not know where archives live;
-/// 2. ONE inference with [`context_budget::SUMMARY_PROMPT`] produces the summary.
-///    The request carries the current session, so the model that has been reading
-///    it writes it -- no second reading of the transcript from scratch;
-/// 3. `context_budget::compact` assembles the replacement -- notice, summary,
-///    recent turns, never splitting a tool batch -- and it is written over the
-///    session in place.
+/// 2. `context_budget::select` chooses the recent turns to keep, BEFORE the summary
+///    is asked for. The request then carries the system prompt and only the part
+///    being replaced -- not the tail that survives -- so the summarizer does not pay
+///    for turns it will keep, and the summary prompt can name the kept count exactly;
+/// 3. ONE inference with [`context_budget::summary_prompt`] produces the summary.
+///    The request is a prefix of the session the model has been reading, so the
+///    provider's prefix cache can match it;
+/// 4. `context_budget::assemble` builds the replacement -- system prompt, notice,
+///    summary, recent turns, never splitting a tool batch -- and it is written over
+///    the session in place.
 ///
-/// `Err` when there is nothing to compact (`compact` returned `None`: there is no
-/// older history to summarize, or even the smallest replacement would overflow the
-/// window) or when the summarizing inference failed. The session is untouched on
-/// both paths -- the caller turns that into the soft stop whose message says the
-/// session on disk is intact and resumable.
+/// The summarizing inference's usage is added to `facts.usage` and not to
+/// `facts.last_prompt_tokens`: the summary request is a separate prompt, and the
+/// budget's measurement has to stay the one the conversation's next inference will
+/// carry. Dropping this usage made 31 observed compactions spend at least six
+/// million tokens that no report counted (#436).
 ///
-/// Eight parameters, and the clippy lint is allowed rather than obeyed for the same
+/// `Err` when there is nothing to compact (`select` found no older history, or even
+/// the smallest replacement would overflow the window) or when the summarizing
+/// inference failed. The session is untouched on both paths -- the caller turns that
+/// into the soft stop whose message says the session on disk is intact and
+/// resumable.
+///
+/// Ten parameters, and the clippy lint is allowed rather than obeyed for the same
 /// reason `inference_loop`'s is: they are one call's own facts, and a struct to carry
 /// them would move the names one hop away from the code that reads them.
 #[allow(clippy::too_many_arguments)]
@@ -408,6 +418,8 @@ async fn compact_session(
     agent_name: &str,
     compaction_hooks: &[String],
     exceeded: context_budget::BudgetExceeded,
+    iteration: u32,
+    facts: &mut RunFacts,
 ) -> Result<()> {
     // 1. The hooks, before anything moves. Each is told the same facts; any of
     // them may make the archive copy. Fail-open, and the "archived" answer is
@@ -434,8 +446,29 @@ async fn compact_session(
         );
     }
 
-    // 2. The summary: one inference, carrying the session that is being replaced.
-    let outgoing = messages_for_provider(&session.messages, true);
+    // 2. Choose what survives BEFORE asking for the summary. The choice is what
+    // lets the request carry only the part being replaced: the kept tail would be
+    // paid for here and then carried again verbatim, and the summary prompt could
+    // not name how many messages follow it.
+    let Some(selection) = context_budget::select(&session.messages, exceeded.context_limit) else {
+        anyhow::bail!(
+            "the session cannot be compacted: there is nothing older to summarize, \
+             or even the notice and the summary would exceed the context budget"
+        );
+    };
+
+    // 3. The summary: one inference over the system prompt and the part being
+    // replaced. A prefix of the session rather than the whole of it (#436), which
+    // is what lets the provider's prefix cache match, and is also why the request
+    // can tell the model that the tail follows verbatim.
+    let mut summary_request: Vec<Message> = Vec::with_capacity(selection.replaced().len() + 2);
+    if let Some(system) = selection.system() {
+        summary_request.push(system.clone());
+    }
+    summary_request.extend(selection.replaced().iter().cloned());
+    summary_request.push(Message::user(&context_budget::summary_prompt(
+        selection.kept_messages(),
+    )));
     let mut detector = RepetitionDetector::new();
     let mut on_delta = |delta: &str| -> Result<()> {
         match detector.observe(delta) {
@@ -443,12 +476,39 @@ async fn compact_session(
             None => Ok(()),
         }
     };
-    let mut summary_request = outgoing.to_vec();
-    summary_request.push(Message::user(context_budget::SUMMARY_PROMPT));
     let response = llm_client
         .chat_completion_streaming(model, &summary_request, None, extra_body, &mut on_delta)
         .await
         .context("the summarizing inference failed")?;
+    // The summary is a round trip the run paid for, so its usage belongs in the
+    // run's totals (#436). It is deliberately NOT `last_prompt_tokens`: that number
+    // measures the conversation the next inference carries, and the summary request
+    // is not it -- recording it would make the budget compare a prompt that no
+    // longer exists against the limit.
+    if let Some(u) = response.usage {
+        tracing::info!(
+            "ATOMA_INFERENCE_USAGE: iteration={} prompt={} completion={} cached={} written={} request={} kind=compaction",
+            iteration,
+            u.prompt_tokens,
+            u.completion_tokens,
+            u.cached_prompt_tokens
+                .map_or_else(|| "unknown".to_string(), |n| n.to_string()),
+            u.written_prompt_tokens
+                .map_or_else(|| "unknown".to_string(), |n| n.to_string()),
+            response.request_id.as_deref().unwrap_or("unknown"),
+        );
+        facts.usage.prompt_tokens += u.prompt_tokens;
+        facts.usage.completion_tokens += u.completion_tokens;
+        facts.usage.total_tokens += u.total_tokens;
+        if let Some(cached) = u.cached_prompt_tokens {
+            facts.usage.cached_prompt_tokens =
+                Some(facts.usage.cached_prompt_tokens.unwrap_or(0) + cached);
+        }
+        if let Some(written) = u.written_prompt_tokens {
+            facts.usage.written_prompt_tokens =
+                Some(facts.usage.written_prompt_tokens.unwrap_or(0) + written);
+        }
+    }
     let summary = response
         .choices
         .into_iter()
@@ -465,24 +525,27 @@ async fn compact_session(
         "the summarizing inference returned no text"
     );
 
-    // 3. The replacement, over the session in place. The caller saves it -- this
+    // 4. The replacement, over the session in place. The caller saves it -- this
     // function only builds it, because saving is the caller's one remaining act
     // and the caller saves on EVERY path.
-    let messages = std::mem::take(&mut session.messages);
-    let dropped = messages.len();
-    match context_budget::compact(&messages, &summary, exceeded.context_limit) {
+    let total = session.messages.len();
+    match context_budget::assemble(selection, &summary, exceeded.context_limit) {
         Some(compacted) => {
             let replaced = compacted.dropped_messages;
             session.messages = compacted.messages;
+            // The measurement that triggered this described the history that just
+            // got replaced. It is not the summary request's number either (that was
+            // deliberately not recorded), so it is cleared rather than overwritten:
+            // the next inference reports the compacted conversation's own prompt.
+            facts.last_prompt_tokens = None;
             tracing::info!(
                 "ATOMA_COMPACTION: {} of {} messages replaced by a summary",
                 replaced,
-                dropped
+                total
             );
             Ok(())
         }
         None => {
-            session.messages = messages;
             anyhow::bail!(
                 "the session cannot be compacted: there is nothing older to summarize, \
                  or even the notice and the summary would exceed the context budget"
@@ -680,6 +743,8 @@ pub async fn inference_loop(
                 agent_name,
                 compaction_hooks,
                 exceeded,
+                iteration,
+                facts,
             )
             .await
             {

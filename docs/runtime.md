@@ -150,7 +150,7 @@ read an answer.
 | --- | --- | --- |
 | `response` | string \| null | Final assistant text. `null` on every ending that has none — a session a tool ended, a deliberate stop, a failure. |
 | `finish_reason` | `stop` \| `length` \| null | Why the model stopped. `null` wherever `response` is. |
-| `usage.prompt_tokens` | number | Summed over the inferences this run made. Partial on a run that did not finish, which is what that run actually spent. |
+| `usage.prompt_tokens` | number | Summed over the inferences this run made, a compaction's summarizing inference included. Partial on a run that did not finish, which is what that run actually spent. |
 | `usage.completion_tokens` | number | As above. |
 | `usage.total_tokens` | number | As above. |
 | `usage.cached_prompt_tokens` | number \| null | How much of the prompt the provider served from its cache. `null` means no inference reported one, which is not the same as zero and must not be read as a cache that did nothing. |
@@ -158,7 +158,7 @@ read an answer.
 | `session_path` | string \| null | Where the session was written, when `--in-session` or `--out-session` asked for one. |
 | `ended_because` | string | Why the run ended: one of the five words below. |
 | `seconds` | number | Wall clock for the whole run, including parsing the agent definition and starting every tool server. |
-| `iterations` | number | Round trips to the model. Counted as each response arrives, so a contentless completion that was re-requested counts — it was waited on and it was billed. |
+| `iterations` | number | Round trips the inference loop made. Counted as each response arrives, so a contentless completion that was re-requested counts — it was waited on and it was billed. A compaction's summarizing inference is a round trip in `usage` but not in this count: it is not a turn of the conversation. |
 
 `ended_because` is the entire vocabulary:
 
@@ -182,8 +182,10 @@ that the envelope describes one run and is always printed, while `atoma_runs` is
 history and exists only when `--in-session` or `--out-session` asked for a file.
 
 The two stderr log lines are unchanged and still carry the same numbers for callers that
-grep: `ATOMA_TOKEN_USAGE` once per run, `ATOMA_INFERENCE_USAGE` once per round trip. They
-are no longer the only place the cache counts exist.
+grep: `ATOMA_TOKEN_USAGE` once per run, `ATOMA_INFERENCE_USAGE` once per round trip. A
+compaction's summarizing inference is a round trip, so it writes an
+`ATOMA_INFERENCE_USAGE` line too, with an extra `kind=compaction` field. They are no
+longer the only place the cache counts exist.
 
 ## Machine-readable lines
 
@@ -193,6 +195,7 @@ name, a colon, then space-separated `key=value`:
 ```
 ATOMA_TOKEN_USAGE: prompt=… completion=… total=… cached=… written=…
 ATOMA_INFERENCE_USAGE: iteration=… prompt=… completion=… cached=… written=… request=…
+ATOMA_INFERENCE_USAGE: iteration=… prompt=… completion=… cached=… written=… request=… kind=compaction
 ATOMA_CONFIG_FINDING: kind=dead_guard severity=warn server=files_ro pattern=files_ro__read tools=read,grep
 ATOMA_LLM_ERROR: label=Anthropic code=free_rate_limited type=orcarouter_api_error
 ```

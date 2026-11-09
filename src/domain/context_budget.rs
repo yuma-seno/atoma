@@ -22,6 +22,11 @@
 //! and archiving it there is that caller's decision, not this crate's -- atoma is
 //! a stateless CLI and does not know where archives live.
 //!
+//! One message is NOT replaced: the system prompt. It is the agent's instructions
+//! rather than conversation, and dropping it left the rest of a compacted run
+//! without its report contract and dispatch rules (#436). It stays at the head of
+//! the replacement, and the summary is told it is preserved.
+//!
 //! # Turn boundaries only
 //!
 //! The check runs at the top of the inference loop's iteration, beside the three
@@ -98,13 +103,23 @@ pub fn compaction_notice(dropped_messages: usize, kept_messages: usize) -> Strin
 /// what a resuming run needs and cannot recover any other way -- decisions and
 /// their reasons, open threads, the state of the work -- and forbids narration
 /// of the transcript, which is what a summary prompt otherwise produces.
-pub const SUMMARY_PROMPT: &str = "\
-The conversation above is about to be compacted: everything before your answer \
-will be replaced by your summary, and the run continues from it with only the \
-most recent turns kept verbatim. Write that summary. State what the work is, \
-what has been decided and why, what is done, what is still open, and anything a \
-continuing run must not redo or must not forget. Do not narrate the transcript; \
-write the state of the work.";
+///
+/// It also states the two things the summary must not spend words on: the system
+/// prompt survives (so it need not restate the role) and the final `kept_messages`
+/// are carried verbatim (so it need not summarize them). The number is measured by
+/// [`select`] before this is asked, which is why the request can say it exactly.
+pub fn summary_prompt(kept_messages: usize) -> String {
+    format!(
+        "The conversation above is about to be compacted: everything before your answer \
+         will be replaced by your summary, and the run continues from it. The agent's \
+         system prompt is preserved, so do not restate the role or its instructions. \
+         The final {kept_messages} messages are not shown here; they continue verbatim \
+         after your summary. Write the state of the work: what the work is, what has \
+         been decided and why, what is done, what is still open, and anything a \
+         continuing run must not redo or must not forget. Do not narrate the transcript; \
+         write the state of the work."
+    )
+}
 
 /// One compacted session, ready to save over the old one.
 #[derive(Debug)]
@@ -115,28 +130,69 @@ pub struct Compacted {
     pub dropped_messages: usize,
 }
 
-/// Compact `messages` around a summary, keeping the most recent turns.
+/// The part of a session a compaction keeps, chosen before the summary is asked for.
 ///
-/// The caller has already produced `summary` (one inference with
-/// [`SUMMARY_PROMPT`]); this assembles the replacement and measures nothing on
-/// trust: the character budget is spent on the messages THEMSELVES, newest
-/// first, so whatever the session's shape, the kept suffix is the part nearest
-/// the work.
+/// The choice and the summary used to happen in the opposite order: the summary
+/// request carried the whole session, and the recent turns were measured after it
+/// answered. That made the request pay for the tail it was about to keep (a third
+/// or more of the window) and left [`summary_prompt`] unable to say how many
+/// messages survive. Choosing first fixes both, and gives the request exactly the
+/// part that is being replaced.
+pub struct Selection<'a> {
+    system: Option<&'a Message>,
+    replaced: &'a [Message],
+    kept: &'a [Message],
+    kept_chars: usize,
+}
+
+impl<'a> Selection<'a> {
+    /// The system prompt, when the session has one. It is never summarized.
+    pub fn system(&self) -> Option<&'a Message> {
+        self.system
+    }
+
+    /// The messages the summary replaces, in order. Never includes the system
+    /// prompt or the kept tail.
+    pub fn replaced(&self) -> &'a [Message] {
+        self.replaced
+    }
+
+    /// How many recent messages continue verbatim after the summary.
+    pub fn kept_messages(&self) -> usize {
+        self.kept.len()
+    }
+
+    /// How many messages the summary replaces. The system prompt is not one of
+    /// them -- it survives, so counting it would misreport what was lost.
+    pub fn dropped_messages(&self) -> usize {
+        self.replaced.len()
+    }
+}
+
+/// Choose the recent turns a compaction keeps, before any summary is asked for.
+///
+/// The character budget is spent on the messages THEMSELVES, newest first, so
+/// whatever the session's shape, the kept suffix is the part nearest the work.
+/// A system prompt, when present, is set aside first: it is never part of the
+/// suffix and never counted as dropped.
 ///
 /// The suffix never splits a tool batch: a `tool` message answers an assistant
 /// message's `tool_calls`, and a selection that kept the call and dropped its
 /// answer would be a session no provider accepts. The kept range extends back to
 /// the assistant message that opened the oldest kept batch.
 ///
-/// Returns `None` when compaction has nothing to offer: a keep that reaches back
-/// to the session's own opening has nothing before it to summarize, and a
-/// replacement must itself fit the window -- a summary that does not fit would be
-/// paid for a session the next turn exceeds again. The caller ends the run
-/// instead, with the session intact.
-pub fn compact(messages: &[Message], summary: &str, context_limit: u64) -> Option<Compacted> {
+/// `None` when there is nothing to compact: a keep that reaches back to the
+/// session's own opening (after the system prompt) has nothing before it to
+/// summarize. Whether the replacement fits is [`assemble`]'s check, because only
+/// the summary's size can answer it.
+pub fn select(messages: &[Message], context_limit: u64) -> Option<Selection<'_>> {
     if messages.is_empty() {
         return None;
     }
+    let has_system = messages[0].role == "system";
+    let system = has_system.then(|| &messages[0]);
+    let body = &messages[usize::from(has_system)..];
+
     // The whole window, in characters: `context_limit` is in tokens and
     // `CHARS_PER_TOKEN` is characters per token, so this multiplies. The
     // recent-turns budget is a third of the result. `RECENT_SHARE` is a share
@@ -145,16 +201,16 @@ pub fn compact(messages: &[Message], summary: &str, context_limit: u64) -> Optio
     let limit_chars = (context_limit as usize).saturating_mul(CHARS_PER_TOKEN);
     let budget_chars = (limit_chars as f64 * RECENT_SHARE) as usize;
 
-    let mut keep_from = messages.len();
+    let mut keep_from = body.len();
     let mut kept_chars = 0usize;
     let mut batches = 0usize;
     while keep_from > 0 {
-        let start = batch_start(messages, keep_from - 1);
-        let batch_chars: usize = messages[start..keep_from].iter().map(message_chars).sum();
+        let start = batch_start(body, keep_from - 1);
+        let batch_chars: usize = body[start..keep_from].iter().map(message_chars).sum();
         // The first batch is kept whatever it costs -- a session whose newest
         // exchange alone exceeds the budget has no smaller selection to offer.
-        // Whether that selection can be compacted at all is the fit check below,
-        // not a reason to walk further back.
+        // Whether that selection can be compacted at all is the fit check in
+        // `assemble`, not a reason to walk further back.
         if batches > 0 && kept_chars + batch_chars > budget_chars {
             break;
         }
@@ -173,24 +229,51 @@ pub fn compact(messages: &[Message], summary: &str, context_limit: u64) -> Optio
         return None;
     }
 
-    let kept = &messages[keep_from..];
-    let notice = compaction_notice(keep_from, kept.len());
+    Some(Selection {
+        system,
+        replaced: &body[..keep_from],
+        kept: &body[keep_from..],
+        kept_chars,
+    })
+}
+
+/// Build the replacement session around `summary`.
+///
+/// `selection` was chosen before the summary was asked for. The replacement keeps
+/// the system prompt at its head, then the notice and the summary, then the kept
+/// tail verbatim.
+///
+/// Returns `None` when the replacement would not fit the window: the summary is
+/// the model's output, so its size is not ours to assume, and a summary paid for
+/// a session the next turn exceeds again is worse than no compaction. The caller
+/// ends the run with the session intact instead.
+pub fn assemble(selection: Selection<'_>, summary: &str, context_limit: u64) -> Option<Compacted> {
+    let dropped_messages = selection.dropped_messages();
+    let kept = selection.kept;
+    let notice = compaction_notice(dropped_messages, kept.len());
+    let limit_chars = (context_limit as usize).saturating_mul(CHARS_PER_TOKEN);
+    let system_chars = selection.system.map(message_chars).unwrap_or(0);
     // The replacement has to fit the window it replaces, and the summary is the
-    // model's output: its size is not ours to assume. If the notice, the summary
-    // and the newest batch -- the smallest keep there is -- overflow the limit,
-    // a summary would be paid for a session the next turn exceeds again, so the
-    // caller ends the run with the session intact instead.
+    // model's output: its size is not ours to assume. If the system prompt, the
+    // notice, the summary and the newest batch -- the smallest keep there is --
+    // overflow the limit, a summary would be paid for a session the next turn
+    // exceeds again, so the caller ends the run with the session intact instead.
     const NOTICE_JOINER: usize = "\n\n---\n\n".len();
-    if notice.len() + summary.len() + NOTICE_JOINER + kept_chars > limit_chars {
+    if system_chars + notice.len() + summary.len() + NOTICE_JOINER + selection.kept_chars
+        > limit_chars
+    {
         return None;
     }
 
-    let mut out = Vec::with_capacity(kept.len() + 1);
+    let mut out = Vec::with_capacity(kept.len() + 2);
+    if let Some(system) = selection.system {
+        out.push(system.clone());
+    }
     out.push(Message::user(&format!("{}\n\n---\n\n{}", notice, summary)));
     out.extend(kept.iter().cloned());
     Some(Compacted {
         messages: out,
-        dropped_messages: keep_from,
+        dropped_messages,
     })
 }
 
@@ -242,6 +325,13 @@ mod tests {
 
     fn tool(id: &str, text: &str) -> Message {
         Message::tool(id, text)
+    }
+
+    /// The two-step fold, in one call. The runner keeps `select` and `assemble`
+    /// apart so the summary request can carry only the replaced part; the tests
+    /// below have a summary already, so they compose them here.
+    fn compact(messages: &[Message], summary: &str, context_limit: u64) -> Option<Compacted> {
+        assemble(select(messages, context_limit)?, summary, context_limit)
     }
 
     fn assistant_with_calls(id: &str, args: &str) -> Message {
@@ -322,6 +412,47 @@ mod tests {
                 .as_str()
                 .unwrap()
         );
+    }
+
+    /// The system prompt is instructions, not history: a compaction keeps it at the
+    /// head and does not count it as replaced (#436). Without it, the rest of the
+    /// compacted run has no report contract or dispatch rules.
+    #[test]
+    fn the_system_prompt_survives_and_is_not_counted_as_dropped() {
+        let mut messages = vec![Message::system("You are the agent.")];
+        for i in 0..60 {
+            messages.extend(turn(i, 100));
+        }
+        let selection = select(&messages, 4_000).unwrap();
+        assert_eq!(selection.system().unwrap().role, "system");
+        assert_eq!(
+            selection.dropped_messages(),
+            selection.replaced().len(),
+            "the system prompt is not one of the replaced messages"
+        );
+        assert!(
+            !selection.replaced().iter().any(|m| m.role == "system"),
+            "the summary is never asked to rewrite the system prompt"
+        );
+
+        let out = assemble(selection, "the work so far", 4_000).unwrap();
+        assert_eq!(out.messages[0].role, "system");
+        assert_eq!(
+            out.messages[0].content.as_ref().unwrap().as_str().unwrap(),
+            "You are the agent."
+        );
+        let notice = out.messages[1].content.as_ref().unwrap().as_str().unwrap();
+        assert!(notice.contains("[session compacted:"));
+        assert!(notice.contains("the work so far"));
+    }
+
+    /// The summary prompt names the kept count, which is only knowable because the
+    /// selection is made before the summary is asked for (#436).
+    #[test]
+    fn the_summary_prompt_names_the_kept_count() {
+        let prompt = summary_prompt(7);
+        assert!(prompt.contains("The final 7 messages"));
+        assert!(prompt.contains("system prompt is preserved"));
     }
 
     /// A `tool` message answers its assistant message's `tool_calls`, and a
