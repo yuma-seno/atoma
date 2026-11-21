@@ -86,7 +86,7 @@ impl LlmPort for OpenAIResponsesClient {
         })
         .await?;
 
-        Ok(reply_to_llm_response(raw.body, raw.request_id))
+        reply_to_llm_response(raw.body, raw.request_id)
     }
 
     /// Streamed, so a reasoning loop can be cut off mid-completion.
@@ -141,7 +141,7 @@ impl LlmPort for OpenAIResponsesClient {
         )
         .await?;
 
-        Ok(accumulator.into_llm_response(request_id))
+        accumulator.into_llm_response(request_id)
     }
 }
 
@@ -167,6 +167,13 @@ struct ResponsesStreamAccumulator {
     tool_calls: Vec<ToolCall>,
     status: Option<String>,
     incomplete_reason: Option<String>,
+    /// The provider's own error, when `response.failed` carried one. It used to be
+    /// dropped, which turned a refusal into an empty normal finish — the runner then
+    /// treated it as a contentless answer and paid for two more attempts that could
+    /// never succeed.
+    error: Option<ResponsesError>,
+    /// Beside `error` in the response object, as in the non-streaming shape.
+    error_type: Option<String>,
     usage: Option<ResponsesUsage>,
 }
 
@@ -223,6 +230,14 @@ impl ResponsesStreamAccumulator {
                         .and_then(|d| d.get("reason"))
                         .and_then(Value::as_str)
                         .map(str::to_string);
+                    self.error = response
+                        .get("error")
+                        .filter(|e| !e.is_null())
+                        .and_then(|e| serde_json::from_value::<ResponsesError>(e.clone()).ok());
+                    self.error_type = response
+                        .get("error_type")
+                        .and_then(Value::as_str)
+                        .map(str::to_string);
                     if let Some(usage) = response.get("usage").filter(|u| !u.is_null()) {
                         if let Ok(parsed) = serde_json::from_value::<ResponsesUsage>(usage.clone())
                         {
@@ -237,7 +252,19 @@ impl ResponsesStreamAccumulator {
     }
 
     /// The reply the non-streaming path would have produced.
-    fn into_llm_response(self, request_id: Option<String>) -> LlmResponse {
+    fn into_llm_response(self, request_id: Option<String>) -> Result<LlmResponse> {
+        // `response.failed` is not an empty answer. It is HTTP 200 with no output
+        // and the reason in `error`, and collapsing it to `Stop` made the runner
+        // re-ask the same request -- billed, and guaranteed to fail again when the
+        // cause was a block or a refusal.
+        if self.status.as_deref() == Some("failed") || self.error.is_some() {
+            return Err(failed_response(
+                self.status.as_deref(),
+                self.error.as_ref(),
+                self.error_type.as_deref(),
+            ));
+        }
+
         // The same mapping `reply_to_llm_response` makes, and for the same reason:
         // collapsing everything but `max_output_tokens` to `stop` is what made filtered
         // output arrive as an empty normal finish.
@@ -258,7 +285,7 @@ impl ResponsesStreamAccumulator {
             _ => FinishReason::Stop,
         };
 
-        LlmResponse {
+        Ok(LlmResponse {
             choices: vec![LlmChoice {
                 message: Message {
                     provider_items: (!self.carried.is_empty()).then_some(self.carried),
@@ -283,7 +310,7 @@ impl ResponsesStreamAccumulator {
                 }
             }),
             request_id,
-        }
+        })
     }
 }
 
@@ -297,8 +324,70 @@ struct ResponsesReply {
     status: Option<String>,
     #[serde(default)]
     incomplete_details: Option<IncompleteDetails>,
+    /// The provider's reason when it reports `status: "failed"`. HTTP 200 with no
+    /// output is not the same thing as an empty answer: the upstream is naming a
+    /// block, a refusal, or an invalid prompt, and all of those are worth saying.
+    #[serde(default)]
+    error: Option<ResponsesError>,
+    /// Why the provider classed the failure -- `refusal` in the measured case. It
+    /// sits beside `error`, not inside it, in this API's shape.
+    #[serde(default)]
+    error_type: Option<String>,
     #[serde(default)]
     usage: Option<ResponsesUsage>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ResponsesError {
+    #[serde(default)]
+    code: Option<String>,
+    #[serde(default)]
+    message: Option<String>,
+}
+
+impl ResponsesError {
+    /// The provider's own words, so a log line or a failed run names the cause
+    /// instead of sending the reader back to a raw HTTP request.
+    fn describe(&self, error_type: Option<&str>) -> String {
+        let mut parts: Vec<String> = Vec::new();
+        if let Some(code) = &self.code {
+            parts.push(code.clone());
+        }
+        if let Some(message) = &self.message {
+            parts.push(message.clone());
+        }
+        if let Some(error_type) = error_type {
+            parts.push(format!("type: {error_type}"));
+        }
+        if parts.is_empty() {
+            "no code or message".to_string()
+        } else {
+            parts.join(": ")
+        }
+    }
+}
+
+/// A failed Responses reply, as an error the runner will not retry.
+///
+/// `send_json_with_retry` already retries transport failures and non-2xx statuses;
+/// by the time this is reached the request succeeded and the answer did not. Asking
+/// again is the one thing that cannot help a block or a refusal, and it is billed.
+fn failed_response(
+    status: Option<&str>,
+    error: Option<&ResponsesError>,
+    error_type: Option<&str>,
+) -> anyhow::Error {
+    let status = status.unwrap_or("failed");
+    match error {
+        Some(error) => anyhow::anyhow!(
+            "the Responses API reported a failed response (status '{status}'): {}",
+            error.describe(error_type)
+        ),
+        None => anyhow::anyhow!(
+            "the Responses API reported a failed response (status '{status}') with no error \
+             detail; this is not an empty answer, and it was not retried"
+        ),
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -507,7 +596,15 @@ fn tool_output(content: Option<&Value>) -> Value {
 ///
 /// `request_id` arrives alongside rather than inside `raw`, because it is a header on
 /// the HTTP exchange and not an item in this API's `output`.
-fn reply_to_llm_response(raw: ResponsesReply, request_id: Option<String>) -> LlmResponse {
+fn reply_to_llm_response(raw: ResponsesReply, request_id: Option<String>) -> Result<LlmResponse> {
+    if raw.status.as_deref() == Some("failed") || raw.error.is_some() {
+        return Err(failed_response(
+            raw.status.as_deref(),
+            raw.error.as_ref(),
+            raw.error_type.as_deref(),
+        ));
+    }
+
     let mut text = String::new();
     let mut tool_calls: Vec<ToolCall> = Vec::new();
     // Everything this adapter does NOT turn into text or a tool call. `reasoning` is
@@ -580,7 +677,7 @@ fn reply_to_llm_response(raw: ResponsesReply, request_id: Option<String>) -> Llm
         _ => FinishReason::Stop,
     };
 
-    LlmResponse {
+    Ok(LlmResponse {
         choices: vec![LlmChoice {
             message: Message {
                 provider_items: (!carried.is_empty()).then_some(carried),
@@ -606,7 +703,7 @@ fn reply_to_llm_response(raw: ResponsesReply, request_id: Option<String>) -> Llm
             }
         }),
         request_id,
-    }
+    })
 }
 
 #[cfg(test)]
@@ -722,7 +819,7 @@ mod tests {
         }))
         .unwrap();
 
-        let response = reply_to_llm_response(raw, None);
+        let response = reply_to_llm_response(raw, None).unwrap();
         let choice = &response.choices[0];
         assert_eq!(choice.message.content, Some(json!("done")));
         let calls = choice.message.tool_calls.as_ref().unwrap();
@@ -750,7 +847,11 @@ mod tests {
             ]
         }))
         .unwrap();
-        let message = reply_to_llm_response(raw, None).choices.remove(0).message;
+        let message = reply_to_llm_response(raw, None)
+            .unwrap()
+            .choices
+            .remove(0)
+            .message;
 
         let carried = message.provider_items.expect("the reasoning item is kept");
         assert_eq!(carried.len(), 1, "{carried:?}");
@@ -804,7 +905,11 @@ mod tests {
             "output": [{"type": "message", "content": [{"text": "hello"}]}]
         }))
         .unwrap();
-        let message = reply_to_llm_response(raw, None).choices.remove(0).message;
+        let message = reply_to_llm_response(raw, None)
+            .unwrap()
+            .choices
+            .remove(0)
+            .message;
         assert!(message.provider_items.is_none());
     }
 
@@ -825,9 +930,14 @@ mod tests {
             output: vec![],
             status: None,
             incomplete_details: None,
+            error: None,
+            error_type: None,
             usage: Some(raw),
         };
-        let usage = reply_to_llm_response(reply, None).usage.expect("usage");
+        let usage = reply_to_llm_response(reply, None)
+            .unwrap()
+            .usage
+            .expect("usage");
         assert_eq!(usage.prompt_tokens, 1000);
         // A part of the prompt, not extra beside it.
         assert_eq!(usage.cached_prompt_tokens, Some(800));
@@ -850,9 +960,14 @@ mod tests {
             output: vec![],
             status: None,
             incomplete_details: None,
+            error: None,
+            error_type: None,
             usage: Some(raw),
         };
-        let usage = reply_to_llm_response(reply, None).usage.expect("usage");
+        let usage = reply_to_llm_response(reply, None)
+            .unwrap()
+            .usage
+            .expect("usage");
         assert_eq!(usage.cached_prompt_tokens, None);
     }
 
@@ -864,10 +979,74 @@ mod tests {
             "incomplete_details": {"reason": "max_output_tokens"},
         }))
         .unwrap();
-        let response = reply_to_llm_response(raw, None);
+        let response = reply_to_llm_response(raw, None).unwrap();
         assert_eq!(
             response.choices[0].finish_reason,
             Some(FinishReason::Length)
+        );
+    }
+
+    /// A failed reply is a failure, not an empty answer.
+    ///
+    /// Measured: a router answered HTTP 200 with
+    /// `{"status":"failed","error":{"code":"invalid_prompt","message":"Policy
+    /// Violation…"},"output":[]}`. Collapsing that to `Stop` made the runner call it
+    /// an empty response and buy two more attempts that could never succeed, while
+    /// the provider's own words -- the only actionable part -- were dropped.
+    #[test]
+    fn a_failed_reply_is_an_error_naming_the_provider_reason() {
+        let raw: ResponsesReply = serde_json::from_value(json!({
+            "status": "failed",
+            "error": {
+                "code": "invalid_prompt",
+                "message": "Policy Violation: this user has been blocked for a previous policy violation.",
+            },
+            "error_type": "refusal",
+            "output": [],
+        }))
+        .unwrap();
+
+        let error = reply_to_llm_response(raw, None).expect_err("a failed reply is not a reply");
+        let text = format!("{error:#}");
+        assert!(text.contains("failed"), "{text}");
+        assert!(text.contains("invalid_prompt"), "{text}");
+        assert!(text.contains("Policy Violation"), "{text}");
+        assert!(text.contains("refusal"), "{text}");
+    }
+
+    /// `failed` without an `error` object still fails. The status alone is the
+    /// provider saying the answer did not happen; an empty `output` beside it is
+    /// not permission to call it a normal finish.
+    #[test]
+    fn a_failed_status_without_error_detail_still_fails() {
+        let raw: ResponsesReply = serde_json::from_value(json!({
+            "status": "failed",
+            "output": [],
+        }))
+        .unwrap();
+
+        let error = reply_to_llm_response(raw, None).expect_err("failed means failed");
+        assert!(
+            format!("{error:#}").contains("no error detail"),
+            "{error:#}"
+        );
+    }
+
+    /// An `error` is a failure even when the status does not say `failed`: a
+    /// provider that names a problem is not also reporting a finished answer.
+    #[test]
+    fn an_error_beside_another_status_is_still_a_failure() {
+        let raw: ResponsesReply = serde_json::from_value(json!({
+            "status": "completed",
+            "error": {"code": "server_error", "message": "the upstream gave up"},
+            "output": [],
+        }))
+        .unwrap();
+
+        let error = reply_to_llm_response(raw, None).expect_err("an error is an error");
+        assert!(
+            format!("{error:#}").contains("the upstream gave up"),
+            "{error:#}"
         );
     }
 }
@@ -901,7 +1080,7 @@ mod streaming_tests {
             },
         }));
 
-        let response = acc.into_llm_response(None);
+        let response = acc.into_llm_response(None).unwrap();
         assert_eq!(
             response.choices[0].message.content.as_ref().unwrap(),
             "Hello"
@@ -929,7 +1108,7 @@ mod streaming_tests {
             },
         }));
 
-        let response = acc.into_llm_response(None);
+        let response = acc.into_llm_response(None).unwrap();
         let calls = response.choices[0].message.tool_calls.as_ref().unwrap();
         assert_eq!(calls[0].id, "call_1");
         assert_eq!(calls[0].function.name, "shell");
@@ -950,7 +1129,7 @@ mod streaming_tests {
             "item": {"type": "reasoning", "id": "rs_1", "encrypted_content": "abc"},
         }));
 
-        let response = acc.into_llm_response(None);
+        let response = acc.into_llm_response(None).unwrap();
         let carried = response.choices[0]
             .message
             .provider_items
@@ -977,11 +1156,52 @@ mod streaming_tests {
                 },
             }));
             assert_eq!(
-                acc.into_llm_response(None).choices[0].finish_reason,
+                acc.into_llm_response(None).unwrap().choices[0].finish_reason,
                 Some(expected),
                 "{reason}"
             );
         }
+    }
+
+    /// The streamed form of the same failure: `response.failed` carries the error
+    /// object, and dropping it turned a refusal into an empty normal finish.
+    #[test]
+    fn a_failed_stream_event_is_an_error_naming_the_provider_reason() {
+        let mut acc = ResponsesStreamAccumulator::default();
+        acc.absorb(&json!({
+            "type": "response.failed",
+            "response": {
+                "status": "failed",
+                "error": {
+                    "code": "invalid_prompt",
+                    "message": "Policy Violation: this user has been blocked for a previous policy violation.",
+                },
+                "error_type": "refusal",
+            },
+        }));
+
+        let error = acc
+            .into_llm_response(None)
+            .expect_err("a failed stream is not a reply");
+        let text = format!("{error:#}");
+        assert!(text.contains("invalid_prompt"), "{text}");
+        assert!(text.contains("Policy Violation"), "{text}");
+        assert!(text.contains("refusal"), "{text}");
+    }
+
+    /// The terminal event with no text and no error is still a normal empty finish:
+    /// a model may legitimately answer with nothing, and that is not this bug.
+    #[test]
+    fn a_completed_stream_with_nothing_in_it_stays_a_normal_finish() {
+        let mut acc = ResponsesStreamAccumulator::default();
+        acc.absorb(&json!({
+            "type": "response.completed",
+            "response": {"status": "completed", "output": []},
+        }));
+
+        let response = acc.into_llm_response(None).unwrap();
+        assert_eq!(response.choices[0].finish_reason, Some(FinishReason::Stop));
+        assert!(response.choices[0].message.content.is_none());
     }
 
     /// An event kind this adapter has not heard of must be ignored rather than
