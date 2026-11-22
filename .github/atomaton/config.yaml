@@ -1,0 +1,162 @@
+# Everything this project declares, in one file.
+#
+# Every setting is explained in docs/, one entry per key. The comments here name
+# what a key is; the entry says why, and where the key goes is indexed here:
+#
+#   https://github.com/yuma-seno/atomaton/blob/main/docs/config/reference.md
+#
+# Grouped by who consumes the value. Nothing here says where a file lives --
+# .github/atomaton/README.md has that, and why.
+#
+# The first five sections are yours. `tools` is the machinery's own.
+
+
+# Where work branches from and merges back to. Empty = the default branch.
+base_branch: ""
+
+
+# Run before checks, before deployments, and before an agent starts.
+environment:
+  setup_commands: []
+  # Rebuilds of the environment one piece of work may ask for. The refusal goes
+  # to the agent, which carries on -- unlike the counters under `chain`.
+  max_reloads: 3
+
+
+# How a change is verified. Either let Atomaton run your checks, or name
+# `your_workflow` instead. Both is a configuration error.
+#
+# Atomaton's side has two halves, and which one a check belongs in is decided by
+# whose commands run — not by preference.
+checks:
+  # The commands THIS PULL REQUEST declares, run in its own tree. No repository
+  # secret reaches them, and there is nowhere here to name one: a pull request may
+  # rewrite any command below, so a credential would be one the change being judged
+  # can read.
+  #
+  # Each entry is its own job: it picks its own runner, they run in parallel, and a
+  # failure names itself. `commands` run in order, stopping at the first failure.
+  from_pull_request:
+    - name: secrets
+      commands:
+        - bun run "${ATOMATON_MACHINERY_ROOT:-.}/.github/atomaton-runtime/scripts/scan_secrets.ts"
+    # - name: test-macos
+    #   runs_on: macos-latest
+    #   commands: ["bun test"]
+
+  # Checks that need a credential. The commands come from the DEFAULT BRANCH, so a
+  # pull request cannot choose what runs. The pull request arrives as a path to read
+  # at $ATOMATON_PR_TREE: data, never something to execute.
+  #
+  # Each entry names its own secrets, so a token reaches the one check that asked
+  # for it rather than every check you have.
+  from_default_branch: []
+  # from_default_branch:
+  #   - name: cloud-names
+  #     secrets: [AWS_ROLE_ARN]
+  #     commands:
+  #       - ./scripts/check-env-names.sh "$ATOMATON_PR_TREE"
+
+  # your_workflow: ci.yml
+
+
+# How a merged change ships. One list per event that ships it, or name
+# `your_workflow` instead. Both is a configuration error.
+#
+# Every entry is a name, the commands that ship it, and — like a check — its own
+# runner and its own secrets. They run one at a time, in declared order, and the
+# first failure stops the rest.
+deploy:
+  # Ships when a change lands on a branch. `branches` is how you say which; leave it
+  # out and it means the default branch.
+  on_merge: []
+  # on_merge:
+  #   - name: staging
+  #     branches: [develop]
+  #     secrets: [STAGING_TOKEN]
+  #     commands: ["./deploy.sh staging"]
+
+  # Ships when a matching tag is pushed. A literal tag, or a prefix and a `*`.
+  #
+  # `branches` here says which branch the tag has to point INTO — a tag names a
+  # commit, not a branch, and a commit that is not on your release branch is one
+  # nobody reviewed. Leave it out and it means the default branch, as above.
+  on_tag: []
+  # on_tag:
+  #   - name: production
+  #     tags: ["v*"]
+  #     branches: [main]
+  #     secrets: [PROD_TOKEN]
+  #     commands: ["./deploy.sh production"]
+
+  # Never ships by itself. Run one of these by name from the Actions tab, or with
+  # `gh workflow run atomaton-deploy.yml -f target=rollback`.
+  on_demand: []
+  # on_demand:
+  #   - name: rollback
+  #     commands: ["./rollback.sh"]
+
+  # your_workflow: cd.yml
+
+
+# When a person, not an agent, performs the merge. Any one of these firing is
+# enough.
+merge:
+  policy: auto                # auto = an agent may merge; manual = an agent never merges
+  governed_paths:             # changes here are a person's to merge
+    - ".github/**"
+  gates: []                   # conditional escalations, each with its reason
+
+
+# When a chain of runs stops and asks a person.
+chain:
+  after_handoffs: 5                 # handoffs with nobody else commenting
+  after_runs_without_change: 2      # runs that pushed, opened and merged nothing
+  # State one run leaves for the next. Change only on a name collision.
+  labels:
+    in_progress: atomaton/in-progress
+    sub_issue: atomaton/sub-issue
+    launched: atomaton/launched
+
+
+# The agents a workflow starts when no issue or pull request can name one.
+#
+# Almost every run is started by something that already knows who it wants: a
+# person types `/<agent>`, an agent writes a handoff, a pull request carries the
+# agent that opened it, a parent issue carries the agent that was working on it.
+# Those are read from the thread at run time, and naming one here would be a
+# second answer to a question the thread already answers.
+#
+# What is left is the runs with no thread to read -- a workflow reacting to a
+# condition rather than to a request. Every key is REQUIRED: a default would be
+# this file naming an agent, and a project that renamed its engineer would get a
+# run for an agent that does not exist. A missing key fails the pull request's
+# own check.
+agents:
+  # Started on the issue opened for an `ATOMA_CONFIG_FINDING` line -- atoma's
+  # report that the tools file it was handed has a defect it carried on past.
+  on_config_finding: engineer
+
+
+# What an agent can reach, and under what watch.
+#
+# The machinery's own configuration. This project owns the runtime it uses, so it
+# is declared here rather than in a second file; the generator writes the part the
+# core reads. Most projects never edit past this line.
+tools:
+  # Repository secrets the servers may reach. Separate from the ones a check or a
+  # deployment names on its own entry: only these enter an agent's own environment.
+  secrets: []
+
+  # Your own tool servers, and overrides of the ones Atomaton ships.
+  #
+  # A name Atomaton does not ship is added. A name it does ship is overridden field by
+  # field, so raising one timeout does not mean copying an argv. The shipped set is
+  # listed in .github/atomaton/README.md and in docs/tools/reference.md; it is not here
+  # because deleting one breaks a run, and an agent only starts the servers its own
+  # `mcp_servers` names.
+  servers: {}
+
+  # Your own hooks, run after Atomaton's on every call to every server.
+  # Added to what Atomaton watches, never replacing it.
+  watch: {}

@@ -1,0 +1,297 @@
+# The tool servers every run starts with, and the hooks that watch all of them.
+#
+# Not yours to edit: this file is replaced wholesale on upgrade, and removing a
+# server takes a capability from every agent that names it. It is here to be READ —
+# so that overriding one in .github/atomaton/config.yaml means seeing what you are
+# overriding.
+#
+# Same schema as `tools.servers` there. A name you write with the same spelling
+# overrides this entry field by field; a name that is not here is added.
+# `description` is this project's own and never reaches the core.
+
+watch:
+  after_tool:
+    - ./hooks/workspace_guard.ts
+  # #12: the session that is about to be compacted is archived to atomaton-data
+  # first. atoma runs the file-wide `before_compaction` hooks before it replaces
+  # the session with its compacted form (summary + recent turns), so the turns the
+  # summary replaces land on the data branch. Fail-open by contract: a hook that
+  # cannot archive does not stop the compaction, which cannot be refused anyway --
+  # the window is already full.
+  before_compaction:
+    - ./hooks/archive_before_compaction.ts
+servers:
+  # Every server here is `unprefixed`, so a tool is called by its own name -- `read`,
+  # `bash`, `create_pr` -- rather than by `server__name`. Those are the names every
+  # mature harness uses and the ones a model has seen most, and a name it has seen is
+  # a call it makes correctly on the first try.
+  #
+  # It is a setting rather than the only behaviour because a second server could then
+  # claim a name the first already has, and the core refuses two that do. Naming a
+  # tool is therefore also what decides which server a call reaches, which is why the
+  # pairs below that share an implementation -- `atomaton` with `atomaton_env`, the
+  # four delegate entries -- are still separate entries: each names a different set of
+  # tools, and no agent is given two servers that claim one.
+  #
+  # A `tool_allowlist` or `tool_denylist` is written with these same bare names. The
+  # list sits inside one server's entry, so a pattern naming that server would be the
+  # entry repeating a label atoma assembles afterwards.
+  #
+  # `files` and `files_readonly` replace `@modelcontextprotocol/server-filesystem`,
+  # which has no line range and no content search: measured over two runs, 37 of 63
+  # shell calls were `sed -n A,Bp` and `grep -rn`, rebuilding both by hand. See
+  # `tools/mcp/files.ts` for what was evaluated before writing one.
+  files:
+    description: Reads, searches and changes files in the work tree.
+    unprefixed: true
+    command: bun
+    args:
+      - run
+      - "${ATOMATON_MACHINERY_ROOT:-.}/.github/atomaton-runtime/tools/mcp/files.ts"
+    env:
+      {}
+    hooks:
+      # Counts `grep`, `glob` and `list` towards the same search streak `shell_guard`
+      # keeps, and refuses past the same limit. Without it, giving the agents a real
+      # search tool would have opened an uncounted path around a rule that already
+      # exists -- the same act, through a better door.
+      before_tool: ./hooks/files_guard.ts
+      after_tool: ./hooks/note_file_opened.ts
+  files_readonly:
+    description: "Reads and searches files and changes nothing, for agents that must not write."
+    unprefixed: true
+    command: bun
+    args:
+      - run
+      - "${ATOMATON_MACHINERY_ROOT:-.}/.github/atomaton-runtime/tools/mcp/files.ts"
+    env:
+      {}
+    hooks:
+      # Named as operations rather than as a list of every tool that exists, which is
+      # the failure this replaces: the old list held five names, so every read the
+      # server had that nobody thought of on the day was refused by a server whose whole
+      # purpose is reading -- 64 calls, all of them reads. Six tools now, and the three
+      # that write are the ones left out.
+      #
+      # A pattern here that matches nothing is reported at startup, in the run's log,
+      # so this list cannot quietly stop applying.
+      #
+      # Atomaton's own release checks it against the live server as well:
+      # `.github/atomaton/scripts/publish-release.sh` asks these servers what they offer and holds every
+      # pattern here to it before publishing. That is Atomaton's release, not this
+      # repository's -- `deploy` ships empty, so nothing here
+      # runs it for you unless you wire it. Whichever release runs it, it runs after
+      # a merge and never on a pull request: starting a pull request's declared
+      # servers is not something a check that reads its configuration as data may do.
+      tool_allowlist:
+        - read
+        - grep
+        - glob
+        - list
+      before_tool: ./hooks/files_guard.ts
+      after_tool: ./hooks/note_file_opened.ts
+  shell:
+    description: "Runs one foreground command. Guarded, and holds no credentials of its own."
+    unprefixed: true
+    command: bun
+    args:
+      - run
+      - "${ATOMATON_MACHINERY_ROOT:-.}/.github/atomaton-runtime/tools/mcp/shell.ts"
+    env:
+      {}
+    request_timeout_secs: 3600
+    hooks:
+      before_tool: ./hooks/shell_guard.ts
+  github:
+    description: "Issues, pull requests, comments, and every Git mutation."
+    unprefixed: true
+    command: bun
+    args:
+      - run
+      - "${ATOMATON_MACHINERY_ROOT:-.}/.github/atomaton-runtime/tools/mcp/github.ts"
+    env:
+      GH_TOKEN: "${GH_TOKEN}"
+    hooks:
+      {}
+  web:
+    description: "Fetches a URL. Searching the web is a skill, not a tool."
+    unprefixed: true
+    command: bun
+    args:
+      - run
+      - "${ATOMATON_MACHINERY_ROOT:-.}/.github/atomaton-runtime/tools/mcp/web.ts"
+    env:
+      {}
+    hooks:
+      {}
+  search:
+    description: "Ranked search over this repository's issues and code."
+    unprefixed: true
+    command: bun
+    args:
+      - run
+      - "${ATOMATON_MACHINERY_ROOT:-.}/.github/atomaton-runtime/tools/mcp/search.ts"
+    env:
+      GH_TOKEN: "${GH_TOKEN}"
+    request_timeout_secs: 300
+    hooks:
+      {}
+    settings:
+      reranker_model: onnx-community/bge-reranker-v2-m3-ONNX
+  atomaton:
+    description: "Atomaton's own operations: sub-issues, handoffs, stopping a run."
+    unprefixed: true
+    command: bun
+    args:
+      - run
+      - "${ATOMATON_MACHINERY_ROOT:-.}/.github/atomaton-runtime/tools/mcp/atomaton.ts"
+    env:
+      GH_TOKEN: "${GH_TOKEN}"
+    hooks:
+      {}
+  # Where a file a person attached to an issue comes in, where one a run produces
+  # goes back out, and where a run attaches one of its own. None of the three can
+  # run through the shell: `curl` and `wget` are routed away from it, and every
+  # mutating `git` subcommand is refused. So `fetch_attachment` GETs the attachment
+  # URL and writes the bytes under `/tmp`, `publish_draft` builds a commit out of
+  # objects and pushes one raw refspec onto an orphan branch, and `attach_file`
+  # POSTs a file's bytes to GitHub's own upload endpoint.
+  #
+  # Added as its own server rather than a tool on `github`: a published document
+  # leaves the reviewed tree, and an agent that does that should have to name the
+  # server it does it with.
+  #
+  # `publish_draft` runs `git` in this process, which inherits the checkout's own
+  # `.git/config` -- where `actions/checkout` left the credential. No token is read
+  # for that. The server also reads `AGENT` (for the commit identity), which the
+  # runner passes to it already.
+  #
+  # `GH_TOKEN` is declared below and exactly ONE tool sends it: `attach_file`, and
+  # it sends it to two hosts -- `api.github.com` for the repository's numeric id,
+  # and `uploads.github.com` for the bytes, which is the endpoint GitHub CLI's own
+  # `--attach` posts to and the only host this change added. `fetch_attachment`
+  # reads anonymously and `publish_draft` uses the credential already in
+  # `.git/config`, so the tools of one server differ in whether they spend it and
+  # each description says which it is.
+  attachments:
+    description: "The three directions a file moves, none of which the shell can do. `fetch_attachment` saves a file a person attached under /tmp, so a document can be opened and edited — and then published — instead of being pasted into the conversation; it reads only GitHub's two attachment hosts and sends no credential. `attach_file` uploads an image, a video or a document to GitHub's own attachment store and returns a URL and pasteable markdown for each, so it appears in a comment the way a drag-and-drop does; it is the one tool here that sends the run's GitHub token: to `api.github.com` for the repository's numeric id, and to `uploads.github.com` for the upload itself, which is the one host this change added. `publish_draft` puts drafts on an orphan branch and returns a blob URL for each — plus, for an image, a raw URL and the `![alt](raw_url)` markdown that a comment renders in place."
+    unprefixed: true
+    command: bun
+    args:
+      - run
+      - "${ATOMATON_MACHINERY_ROOT:-.}/.github/atomaton-runtime/tools/mcp/attachments.ts"
+    env:
+      GH_TOKEN: "${GH_TOKEN}"
+    # Above the server's own 120-second abort, so a call that never answers is
+    # reported BY the server rather than cut off here. At the 60-second default the
+    # `tools/call` is discarded while the server keeps working and nobody is waiting
+    # for the answer. The same shape as `delegate`'s 660 over its sub-run's
+    # 600-second limit.
+    #
+    # Every tool is served by the same value. `fetch_attachment` moves up to 25MB
+    # over the network; `publish_draft` runs a handful of `git` commands (two
+    # `ls-remote`s, a `fetch`, a `push`), which is seconds on a repository of any
+    # ordinary size -- and unlike a transfer a push is safe to be cut off, because it
+    # either happened or did not and the answer is in the ref. `attach_file` is the
+    # one that needs headroom: it makes one read plus one POST per file, so it holds
+    # its own ATTACH_BUDGET_MS (150 seconds) across all of them. The entry has to sit
+    # above that, or atoma discards the call while the server is still uploading and
+    # the assets it creates can be neither deleted nor reported.
+    request_timeout_secs: 180
+    hooks:
+      {}
+  atomaton_env:
+    description: "Rebuilding the run's environment, and concluding the run's own issue."
+    unprefixed: true
+    command: bun
+    args:
+      - run
+      - "${ATOMATON_MACHINERY_ROOT:-.}/.github/atomaton-runtime/tools/mcp/atomaton.ts"
+    env:
+      GH_TOKEN: "${GH_TOKEN}"
+    hooks:
+      # The same program as `atomaton`, with one tool withheld -- so an engineer can
+      # rebuild its environment and conclude its own issue, and cannot dispatch an
+      # agent. `launch_sub_agent` is what the core's own `duplicate_tool` check would
+      # otherwise see this server claim a second time.
+      tool_allowlist:
+        - reload_environment
+        - request_close_issue
+  # The one server that starts another `atoma`. It holds the provider keys because
+  # a tool server receives a credential only through its `env:` block, and it hands
+  # them to the sub-run through `--credentials-file` rather than the environment --
+  # see `mcp/delegate.ts` for why that distinction is the whole of the arrangement.
+  #
+  # `GH_TOKEN` is deliberately absent: the sub-run is given `files` and `shell` and
+  # no `github`, so a token it cannot use is a token that can only leak.
+  #
+  # `ATOMA_PROVIDER` is deliberately absent too, and for the opposite reason: it is
+  # not a credential, so it is inherited rather than stripped, and writing it here
+  # would expand it against the credentials (where it is not) to an empty string and
+  # overwrite the inherited value.
+  delegate:
+    description: "Runs one small piece of work in a sub-run and returns what it found. Offers the writing pair, from `delegates.yaml`: the free one and the one that takes a task the free tier refused."
+    unprefixed: true
+    command: bun
+    args:
+      - run
+      - "${ATOMATON_MACHINERY_ROOT:-.}/.github/atomaton-runtime/tools/mcp/delegate.ts"
+      # The roster key, which is this server's own name. `delegates.yaml` says which
+      # folders it offers, so which delegates exist and which model each runs on are
+      # one decision in one file, under `.github/atomaton/` where an upgrade does not
+      # reach it.
+      - --roster
+      - delegate
+      # Layout-relative, NOT root-prefixed. `delegate.ts` resolves this with
+      # `machineryPath()`, which is the one place that reads
+      # `ATOMATON_MACHINERY_ROOT`; prefixing it here as well produced
+      # `<root>/<root>/.github/...` and the server refused to start. The script
+      # path above is the opposite case -- nothing resolves it but the shell, so
+      # it carries the root itself.
+      - --delegates-dir
+      - ".github/atomaton/delegates"
+    env:
+      OPENAI_API_KEY: "${OPENAI_API_KEY}"
+      OPENROUTER_API_KEY: "${OPENROUTER_API_KEY}"
+      ORCAROUTER_API_KEY: "${ORCAROUTER_API_KEY}"
+      ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY}"
+      ATOMA_COPILOT_TOKEN: "${ATOMA_COPILOT_TOKEN}"
+    # Above the sub-run's own ten-minute limit, so the sub-run stops itself and
+    # reports why rather than being killed mid-inference with nothing to say.
+    request_timeout_secs: 660
+    hooks: {}
+  # The same program, with a sub-run that cannot write. It exists so that an agent
+  # holding `files_readonly` — the reviewer — cannot reach a writing server by
+  # delegating to one: a sub-run's servers must be a subset of its caller's, and
+  # that is a configuration fact rather than something a runtime check can see.
+  #
+  # `files_readonly` and no `shell`, because a shell is a way to write.
+  #
+  # One program, started twice: the entry above offers the writing half of the
+  # roster and this one the read-only half. What tells them apart is the roster key,
+  # not the program.
+  #
+  # Two servers rather than one offering all four, and that is the point of the
+  # split: an agent given the writing delegate can reach a write through it, so an
+  # agent that must not write must not be given it. Which definitions a server
+  # offers IS the confinement.
+  delegate_readonly:
+    description: "Runs one small piece of reading or searching in a sub-run and returns what it found, changing nothing. Offers the read-only pair, from `delegates.yaml`."
+    unprefixed: true
+    command: bun
+    args:
+      - run
+      - "${ATOMATON_MACHINERY_ROOT:-.}/.github/atomaton-runtime/tools/mcp/delegate.ts"
+      - --roster
+      - delegate_readonly
+      # Layout-relative, for the same reason as `delegate` above.
+      - --delegates-dir
+      - ".github/atomaton/delegates"
+    env:
+      OPENAI_API_KEY: "${OPENAI_API_KEY}"
+      OPENROUTER_API_KEY: "${OPENROUTER_API_KEY}"
+      ORCAROUTER_API_KEY: "${ORCAROUTER_API_KEY}"
+      ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY}"
+      ATOMA_COPILOT_TOKEN: "${ATOMA_COPILOT_TOKEN}"
+    request_timeout_secs: 660
+    hooks: {}

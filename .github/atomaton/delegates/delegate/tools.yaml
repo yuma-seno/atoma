@@ -1,0 +1,52 @@
+# The tool servers a delegated sub-run starts with.
+#
+# NOT `tools/defaults.yaml`. That file is the servers every agent run starts with,
+# and this is the surface of a run that is not an agent: no `github`, no `web`, no
+# `atomaton`, no `delegate`, and no hooks.
+#
+# ## Why the hooks are absent, which is the part worth explaining
+#
+# `shell_guard` routes `gh` and `curl` to the `github` and `web` tools, and this
+# sub-run has neither — so the guard would refuse a command and name a tool that is
+# not there. `files_guard` counts a search streak, which is a run-level concern a
+# ten-minute sub-run does not have. And the file-wide `workspace_guard` reports on a
+# shared workspace the delegate is not asked to manage.
+#
+# So the file declares none, and that is a difference from the parent's rather than
+# an omission. It is also why this is a separate file: a sub-run whose servers were
+# selected out of `tools/defaults.yaml` would inherit whatever hooks that file
+# gained, and the first one to gain a routing rule would break every delegate.
+#
+# ## How it is read
+#
+# Same schema as `tools/defaults.yaml`. `mcp/delegate.ts` reads this file, adds the
+# core's output cap from the module that owns it, and hands the result to the
+# sub-run. Nothing else reads it, and no agent names these servers.
+watch: {}
+servers:
+  # Every server here is `unprefixed`, for the same reason as every entry in
+  # `tools/defaults.yaml`: a tool is called by its own name — `read`, `bash` — which
+  # is what this server's own tool description promises its caller, and what a bare
+  # `tool_allowlist` pattern requires. Patterns are matched against the name the
+  # sub-run calls the tool by, so without this a tool arrives as `files__read` and
+  # a bare pattern matches nothing at all.
+  files:
+    unprefixed: true
+    command: bun
+    args:
+      - run
+      - "${ATOMATON_MACHINERY_ROOT:-.}/.github/atomaton-runtime/tools/mcp/files.ts"
+    env: {}
+    hooks: {}
+  shell:
+    unprefixed: true
+    command: bun
+    args:
+      - run
+      - "${ATOMATON_MACHINERY_ROOT:-.}/.github/atomaton-runtime/tools/mcp/shell.ts"
+    env: {}
+    # A backstop for the server itself dying, not a limit on the work: the sub-run's
+    # own ten-minute limit is what stops a long command, and it is enforced by the
+    # `atoma` process rather than here.
+    request_timeout_secs: 3600
+    hooks: {}
