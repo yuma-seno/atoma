@@ -1,0 +1,193 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  deck.fodp — the default presentation template: three slides, 16:9.
+
+  Flat ODF rather than a .pptx, because this file is the thing a person edits: a
+  frame's position, a fill colour and the words inside it are one XML text,
+  readable in a diff. A name in double braces is a placeholder and
+  `customer-doc.mjs fill` substitutes it, converting this file to pptx.
+
+  Three things here are not free choices, and each was measured by re-rendering
+  after the first draft came out wrong:
+
+  - the page is 28 x 15.75 cm, which is LibreOffice's own 16:9 slide, not the
+    25.4 x 14.29 some other tools use. A `style:page-layout` naming another size
+    is ignored, and every frame laid out for it lands in the wrong place.
+  - the paragraph styles are `style:family="paragraph"`, not `"presentation"`,
+    and carry names no built-in Impress style uses. A presentation-family
+    automatic style is ignored — the text renders at Impress' default size and
+    colour — and a name like `Title` resolves to the built-in style of that
+    name instead.
+  - every style states the East Asian font and size beside the Latin one: without
+    them LibreOffice derives the CJK face from the document language and picks a
+    serif one, and the deck no longer matches the report it accompanies.
+
+  Adding a slide means copying a draw:page block and its draw:layer-set. Every
+  frame states its own geometry in cm, so nothing depends on a layout the
+  presentation happens to inherit.
+
+  The footer carries the brand and no page number: one data object fills the
+  whole deck, so a key has one value and a number that differs per slide cannot
+  come from it. Slide numbering is left to the master the deck is opened in.
+
+  The template holds structure and formatting only: every word a reader sees is a
+  placeholder, so the language of the deck is the data's choice, not this file's.
+  The agenda's "01".."04" and the bullet glyph in front of each content line are
+  layout, not language, and stay here.
+-->
+<office:document
+  xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0"
+  xmlns:style="urn:oasis:names:tc:opendocument:xmlns:style:1.0"
+  xmlns:text="urn:oasis:names:tc:opendocument:xmlns:text:1.0"
+  xmlns:draw="urn:oasis:names:tc:opendocument:xmlns:drawing:1.0"
+  xmlns:presentation="urn:oasis:names:tc:opendocument:xmlns:presentation:1.0"
+  xmlns:svg="urn:oasis:names:tc:opendocument:xmlns:svg-compatible:1.0"
+  xmlns:fo="urn:oasis:names:tc:opendocument:xmlns:xsl-fo-compatible:1.0"
+  office:version="1.3"
+  office:mimetype="application/vnd.oasis.opendocument.presentation">
+
+  <office:font-face-decls>
+    <style:font-face style:name="Noto Sans CJK JP" svg:font-family="'Noto Sans CJK JP'" style:font-family-generic="swiss" style:font-pitch="variable"/>
+  </office:font-face-decls>
+
+  <office:styles>
+    <style:default-style style:family="presentation">
+      <style:paragraph-properties fo:line-height="130%"/>
+      <style:text-properties
+        style:font-name="Noto Sans CJK JP" style:font-name-asian="Noto Sans CJK JP" style:font-name-complex="Noto Sans CJK JP"
+        fo:font-size="14pt" style:font-size-asian="14pt"
+        fo:language="en" fo:country="US" style:language-asian="ja" style:country-asian="JP"
+        fo:color="#1c1c1c"/>
+    </style:default-style>
+    <style:page-layout style:name="pm1">
+      <style:page-layout-properties fo:page-width="28cm" fo:page-height="15.75cm" style:print-orientation="landscape"/>
+    </style:page-layout>
+  </office:styles>
+
+  <office:automatic-styles>
+    <style:style style:name="TxTitle" style:family="paragraph">
+      <style:paragraph-properties fo:text-align="start" fo:margin-bottom="0cm"/>
+      <style:text-properties style:font-name="Noto Sans CJK JP" style:font-name-asian="Noto Sans CJK JP" fo:font-size="30pt" style:font-size-asian="30pt" fo:font-weight="bold" fo:color="#ffffff" fo:language="en" fo:country="US" style:language-asian="ja" style:country-asian="JP"/>
+    </style:style>
+    <style:style style:name="TxSubtitle" style:family="paragraph">
+      <style:paragraph-properties fo:text-align="start" fo:margin-bottom="0cm"/>
+      <style:text-properties style:font-name="Noto Sans CJK JP" style:font-name-asian="Noto Sans CJK JP" fo:font-size="15pt" style:font-size-asian="15pt" fo:color="#c8d6e5" fo:language="en" fo:country="US" style:language-asian="ja" style:country-asian="JP"/>
+    </style:style>
+    <style:style style:name="TxMeta" style:family="paragraph">
+      <style:paragraph-properties fo:text-align="start" fo:margin-bottom="0cm"/>
+      <style:text-properties style:font-name="Noto Sans CJK JP" style:font-name-asian="Noto Sans CJK JP" fo:font-size="11.5pt" style:font-size-asian="11.5pt" fo:color="#e8eef5" fo:language="en" fo:country="US" style:language-asian="ja" style:country-asian="JP"/>
+    </style:style>
+    <style:style style:name="TxSlideHead" style:family="paragraph">
+      <style:paragraph-properties fo:text-align="start" fo:margin-bottom="0cm"/>
+      <style:text-properties style:font-name="Noto Sans CJK JP" style:font-name-asian="Noto Sans CJK JP" fo:font-size="22pt" style:font-size-asian="22pt" fo:font-weight="bold" fo:color="#12324f" fo:language="en" fo:country="US" style:language-asian="ja" style:country-asian="JP"/>
+    </style:style>
+    <style:style style:name="TxBody" style:family="paragraph">
+      <style:paragraph-properties fo:text-align="start" fo:line-height="190%" fo:margin-bottom="0cm"/>
+      <style:text-properties style:font-name="Noto Sans CJK JP" style:font-name-asian="Noto Sans CJK JP" fo:font-size="14pt" style:font-size-asian="14pt" fo:color="#26313d" fo:language="en" fo:country="US" style:language-asian="ja" style:country-asian="JP"/>
+    </style:style>
+    <style:style style:name="TxAgenda" style:family="paragraph">
+      <style:paragraph-properties fo:text-align="start" fo:margin-bottom="0.55cm"/>
+      <style:text-properties style:font-name="Noto Sans CJK JP" style:font-name-asian="Noto Sans CJK JP" fo:font-size="16pt" style:font-size-asian="16pt" fo:font-weight="bold" fo:color="#1f6feb" fo:language="en" fo:country="US" style:language-asian="ja" style:country-asian="JP"/>
+    </style:style>
+    <style:style style:name="TxBrand" style:family="paragraph">
+      <style:paragraph-properties fo:text-align="start" fo:margin-bottom="0cm"/>
+      <style:text-properties style:font-name="Noto Sans CJK JP" style:font-name-asian="Noto Sans CJK JP" fo:font-size="11pt" style:font-size-asian="11pt" fo:font-weight="bold" fo:color="#12324f"/>
+    </style:style>
+    <style:style style:name="TxFooter" style:family="paragraph">
+      <style:paragraph-properties fo:text-align="end" fo:margin-bottom="0cm"/>
+      <style:text-properties style:font-name="Noto Sans CJK JP" style:font-name-asian="Noto Sans CJK JP" fo:font-size="9pt" style:font-size-asian="9pt" fo:color="#8a8a8a" fo:language="en" fo:country="US" style:language-asian="ja" style:country-asian="JP"/>
+    </style:style>
+
+    <style:style style:name="grNavy" style:family="graphic">
+      <style:graphic-properties draw:fill="solid" draw:fill-color="#12324f" draw:stroke="none"/>
+    </style:style>
+    <style:style style:name="grAccent" style:family="graphic">
+      <style:graphic-properties draw:fill="solid" draw:fill-color="#1f6feb" draw:stroke="none"/>
+    </style:style>
+    <style:style style:name="grPlain" style:family="graphic">
+      <style:graphic-properties draw:fill="none" draw:stroke="none" draw:textarea-vertical-align="top" draw:auto-grow-height="false" fo:padding="0cm"/>
+    </style:style>
+  </office:automatic-styles>
+
+  <office:master-styles>
+    <style:master-page style:name="Default" style:page-layout-name="pm1"/>
+  </office:master-styles>
+
+  <office:body>
+    <office:presentation>
+
+      <draw:page draw:name="title" draw:master-page-name="Default">
+        <draw:rect draw:style-name="grNavy" svg:x="0cm" svg:y="0cm" svg:width="28cm" svg:height="10.2cm" draw:layer="layout"/>
+        <draw:rect draw:style-name="grAccent" svg:x="1.8cm" svg:y="2.7cm" svg:width="0.22cm" svg:height="3.5cm" draw:layer="layout"/>
+        <draw:frame draw:style-name="grPlain" draw:name="Title" svg:x="2.4cm" svg:y="2.6cm" svg:width="23.4cm" svg:height="2.1cm" draw:layer="layout">
+          <draw:text-box>
+            <text:p text:style-name="TxTitle">{{TITLE}}</text:p>
+          </draw:text-box>
+        </draw:frame>
+        <draw:frame draw:style-name="grPlain" draw:name="Subtitle" svg:x="2.4cm" svg:y="4.9cm" svg:width="23.4cm" svg:height="1.2cm" draw:layer="layout">
+          <draw:text-box>
+            <text:p text:style-name="TxSubtitle">{{SUBTITLE}}</text:p>
+          </draw:text-box>
+        </draw:frame>
+        <draw:frame draw:style-name="grPlain" draw:name="Meta" svg:x="2.4cm" svg:y="8.1cm" svg:width="23.4cm" svg:height="1.1cm" draw:layer="layout">
+          <draw:text-box>
+            <text:p text:style-name="TxMeta">{{CLIENT}} / {{AUTHOR}} / {{DATE}}</text:p>
+          </draw:text-box>
+        </draw:frame>
+        <draw:frame draw:style-name="grPlain" draw:name="Brand" svg:x="1.8cm" svg:y="13.2cm" svg:width="24.4cm" svg:height="0.9cm" draw:layer="layout">
+          <draw:text-box>
+            <text:p text:style-name="TxBrand">{{BRAND}}</text:p>
+          </draw:text-box>
+        </draw:frame>
+      </draw:page>
+
+      <draw:page draw:name="agenda" draw:master-page-name="Default">
+        <draw:frame draw:style-name="grPlain" draw:name="AgendaHead" svg:x="1.8cm" svg:y="1.2cm" svg:width="24.4cm" svg:height="1.3cm" draw:layer="layout">
+          <draw:text-box>
+            <text:p text:style-name="TxSlideHead">{{AGENDA_HEADING}}</text:p>
+          </draw:text-box>
+        </draw:frame>
+        <draw:rect draw:style-name="grAccent" svg:x="1.8cm" svg:y="2.7cm" svg:width="24.4cm" svg:height="0.07cm" draw:layer="layout"/>
+        <draw:frame draw:style-name="grPlain" draw:name="Agenda1" svg:x="1.8cm" svg:y="3.5cm" svg:width="24.4cm" svg:height="0.95cm" draw:layer="layout">
+          <draw:text-box><text:p text:style-name="TxAgenda">01&#160;&#160;{{SECTION_1}}</text:p></draw:text-box>
+        </draw:frame>
+        <draw:frame draw:style-name="grPlain" draw:name="Agenda2" svg:x="1.8cm" svg:y="4.95cm" svg:width="24.4cm" svg:height="0.95cm" draw:layer="layout">
+          <draw:text-box><text:p text:style-name="TxAgenda">02&#160;&#160;{{SECTION_2}}</text:p></draw:text-box>
+        </draw:frame>
+        <draw:frame draw:style-name="grPlain" draw:name="Agenda3" svg:x="1.8cm" svg:y="6.4cm" svg:width="24.4cm" svg:height="0.95cm" draw:layer="layout">
+          <draw:text-box><text:p text:style-name="TxAgenda">03&#160;&#160;{{SECTION_3}}</text:p></draw:text-box>
+        </draw:frame>
+        <draw:frame draw:style-name="grPlain" draw:name="Agenda4" svg:x="1.8cm" svg:y="7.85cm" svg:width="24.4cm" svg:height="0.95cm" draw:layer="layout">
+          <draw:text-box><text:p text:style-name="TxAgenda">04&#160;&#160;{{SECTION_4}}</text:p></draw:text-box>
+        </draw:frame>
+        <draw:frame draw:style-name="grPlain" draw:name="AgendaFooter" svg:x="1.8cm" svg:y="13.7cm" svg:width="24.4cm" svg:height="0.8cm" draw:layer="layout">
+          <draw:text-box><text:p text:style-name="TxFooter">{{BRAND}}</text:p></draw:text-box>
+        </draw:frame>
+      </draw:page>
+
+      <draw:page draw:name="content" draw:master-page-name="Default">
+        <draw:frame draw:style-name="grPlain" draw:name="SlideHead" svg:x="1.8cm" svg:y="1.2cm" svg:width="24.4cm" svg:height="1.3cm" draw:layer="layout">
+          <draw:text-box>
+            <text:p text:style-name="TxSlideHead">{{SLIDE_TITLE}}</text:p>
+          </draw:text-box>
+        </draw:frame>
+        <draw:rect draw:style-name="grAccent" svg:x="1.8cm" svg:y="2.7cm" svg:width="24.4cm" svg:height="0.07cm" draw:layer="layout"/>
+        <draw:frame draw:style-name="grPlain" draw:name="Bullets" svg:x="1.8cm" svg:y="3.4cm" svg:width="24.4cm" svg:height="8.4cm" draw:layer="layout">
+          <draw:text-box>
+            <text:p text:style-name="TxBody">●&#160;{{BULLET_1}}</text:p>
+            <text:p text:style-name="TxBody">●&#160;{{BULLET_2}}</text:p>
+            <text:p text:style-name="TxBody">●&#160;{{BULLET_3}}</text:p>
+            <text:p text:style-name="TxBody">●&#160;{{BULLET_4}}</text:p>
+          </draw:text-box>
+        </draw:frame>
+        <draw:frame draw:style-name="grPlain" draw:name="Note" svg:x="1.8cm" svg:y="12.5cm" svg:width="24.4cm" svg:height="0.9cm" draw:layer="layout">
+          <draw:text-box><text:p text:style-name="TxFooter">{{NOTE}}</text:p></draw:text-box>
+        </draw:frame>
+        <draw:frame draw:style-name="grPlain" draw:name="Footer" svg:x="1.8cm" svg:y="13.7cm" svg:width="24.4cm" svg:height="0.8cm" draw:layer="layout">
+          <draw:text-box><text:p text:style-name="TxFooter">{{BRAND}}</text:p></draw:text-box>
+        </draw:frame>
+      </draw:page>
+
+    </office:presentation>
+  </office:body>
+</office:document>

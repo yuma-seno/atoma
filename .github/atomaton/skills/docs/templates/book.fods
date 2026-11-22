@@ -1,0 +1,332 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  book.fods — the default spreadsheet: a quotation with a summary sheet.
+
+  Flat ODF rather than a .xlsx, because this file is the thing a person edits: a
+  column width, a cell's number format and the words in it are one XML text,
+  readable in a diff. A name in double braces is a placeholder and
+  `customer-doc.mjs fill` substitutes it, converting this file to xlsx.
+
+  Three rules in here are not stylistic, and each was measured by rendering the
+  first draft and looking at it:
+
+  - a formula cell carries `table:formula` and no `office:value`. LibreOffice
+    trusts a cached value and does not recalculate on load, so a template that
+    ships one renders as a page of zeros however right the formula is. With none,
+    the amounts below are evaluated on load.
+  - every number lives in two places, `office:value` and the text a reader sees,
+    so a numeric placeholder is written in both. In `office:value` it is a
+    number once the fill has substituted it, and the cell keeps its type.
+  - the columns add up to 16.5cm and the table names a page layout of A4 with
+    1.5cm margins. A sheet wider than that prints across pages, which is what
+    the first draft did: four pages for a one-page quotation.
+
+  The ranges in `table:formula` are the ODF spelling, `[.D7:.D10]`, not
+  `D7:D10`.
+
+  The template holds structure and formatting only: every word a reader sees is a
+  placeholder, so the language of the quotation is the data's choice, not this
+  file's. That reaches further here than in text: the currency is a placeholder
+  in the number format (`N_Currency`), the tax rate is a placeholder inside the
+  formula, and even the sheet names are placeholders. Each label placeholder
+  carries its own punctuation, so a locale writes "Subject: " or its own word and
+  colon together.
+-->
+<office:document
+  xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0"
+  xmlns:style="urn:oasis:names:tc:opendocument:xmlns:style:1.0"
+  xmlns:text="urn:oasis:names:tc:opendocument:xmlns:text:1.0"
+  xmlns:table="urn:oasis:names:tc:opendocument:xmlns:table:1.0"
+  xmlns:fo="urn:oasis:names:tc:opendocument:xmlns:xsl-fo-compatible:1.0"
+  xmlns:svg="urn:oasis:names:tc:opendocument:xmlns:svg-compatible:1.0"
+  xmlns:number="urn:oasis:names:tc:opendocument:xmlns:datastyle:1.0"
+  xmlns:of="urn:oasis:names:tc:opendocument:xmlns:of:1.2"
+  office:version="1.3"
+  office:mimetype="application/vnd.oasis.opendocument.spreadsheet">
+
+  <office:font-face-decls>
+    <style:font-face style:name="Noto Sans CJK JP" svg:font-family="'Noto Sans CJK JP'" style:font-family-generic="swiss" style:font-pitch="variable"/>
+  </office:font-face-decls>
+
+  <office:styles>
+    <style:default-style style:family="table-cell">
+      <style:table-cell-properties fo:padding="0.1cm"/>
+      <style:text-properties
+        style:font-name="Noto Sans CJK JP" style:font-name-asian="Noto Sans CJK JP" style:font-name-complex="Noto Sans CJK JP"
+        fo:font-size="10.5pt" style:font-size-asian="10.5pt" style:font-size-complex="10.5pt"
+        fo:language="en" fo:country="US" style:language-asian="ja" style:country-asian="JP"/>
+    </style:default-style>
+
+    <number:number-style style:name="N_Amount">
+      <number:number number:decimal-places="0" number:min-integer-digits="1" number:grouping="true"/>
+    </number:number-style>
+    <number:number-style style:name="N_Currency">
+      <number:number number:decimal-places="0" number:min-integer-digits="1" number:grouping="true"/>
+      <number:text> {{CURRENCY}}</number:text>
+    </number:number-style>
+
+  </office:styles>
+
+  <office:automatic-styles>
+    <style:page-layout style:name="pmA4">
+      <style:page-layout-properties
+        fo:page-width="21cm" fo:page-height="29.7cm" style:print-orientation="portrait"
+        fo:margin-top="2.0cm" fo:margin-bottom="1.6cm" fo:margin-left="1.5cm" fo:margin-right="1.5cm"
+        style:scale-to-pages="1"/>
+      <style:header-style>
+        <style:header-footer-properties fo:min-height="0.7cm" fo:margin-bottom="0.35cm"/>
+      </style:header-style>
+      <style:footer-style>
+        <style:header-footer-properties fo:min-height="0.6cm" fo:margin-top="0.3cm"/>
+      </style:footer-style>
+    </style:page-layout>
+    <style:style style:name="T_Quote" style:family="table" style:master-page-name="Default">
+      <style:table-properties table:display="true" style:page-layout-name="pmA4"/>
+    </style:style>
+
+    <style:style style:name="ColA" style:family="table-column">
+      <style:table-column-properties style:column-width="5.2cm"/>
+    </style:style>
+    <style:style style:name="ColB" style:family="table-column">
+      <style:table-column-properties style:column-width="1.5cm"/>
+    </style:style>
+    <style:style style:name="ColC" style:family="table-column">
+      <style:table-column-properties style:column-width="2.4cm"/>
+    </style:style>
+    <style:style style:name="ColD" style:family="table-column">
+      <style:table-column-properties style:column-width="3.2cm"/>
+    </style:style>
+    <style:style style:name="ColE" style:family="table-column">
+      <style:table-column-properties style:column-width="4.2cm"/>
+    </style:style>
+
+    <style:style style:name="R_Title" style:family="table-row">
+      <style:table-row-properties style:row-height="1.4cm"/>
+    </style:style>
+    <style:style style:name="R_Head" style:family="table-row">
+      <style:table-row-properties style:row-height="0.85cm"/>
+    </style:style>
+    <style:style style:name="R_Body" style:family="table-row">
+      <style:table-row-properties style:row-height="0.8cm"/>
+    </style:style>
+    <style:style style:name="R_BodyAuto" style:family="table-row">
+      <style:table-row-properties style:use-optimal-row-height="true" style:row-height="0.8cm"/>
+    </style:style>
+
+    <style:style style:name="C_Title" style:family="table-cell">
+      <style:table-cell-properties fo:padding="0.1cm" style:vertical-align="middle"/>
+      <style:paragraph-properties fo:text-align="start"/>
+      <style:text-properties style:font-size-asian="18pt" fo:font-size="18pt" fo:font-weight="bold" fo:color="#12324f" style:font-name-asian="Noto Sans CJK JP"/>
+    </style:style>
+    <style:style style:name="C_Label" style:family="table-cell">
+      <style:table-cell-properties fo:padding="0.1cm" style:vertical-align="middle"/>
+      <style:paragraph-properties fo:text-align="start"/>
+      <style:text-properties style:font-size-asian="10.5pt" fo:font-size="10.5pt" fo:color="#4a5568" style:font-name-asian="Noto Sans CJK JP"/>
+    </style:style>
+    <style:style style:name="C_Client" style:family="table-cell">
+      <style:table-cell-properties fo:padding="0.1cm" style:vertical-align="middle"/>
+      <style:paragraph-properties fo:text-align="start"/>
+      <style:text-properties style:font-size-asian="12.5pt" fo:font-size="12.5pt" fo:font-weight="bold" fo:color="#1c1c1c" style:font-name-asian="Noto Sans CJK JP"/>
+    </style:style>
+    <style:style style:name="C_Head" style:family="table-cell">
+      <style:table-cell-properties fo:background-color="#12324f" fo:border="0.5pt solid #12324f" fo:padding="0.12cm" style:vertical-align="middle"/>
+      <style:paragraph-properties fo:text-align="center"/>
+      <style:text-properties style:font-size-asian="10pt" fo:font-size="10pt" fo:font-weight="bold" fo:color="#ffffff" style:font-name-asian="Noto Sans CJK JP"/>
+    </style:style>
+    <style:style style:name="C_HeadLeft" style:family="table-cell">
+      <style:table-cell-properties fo:background-color="#12324f" fo:border="0.5pt solid #12324f" fo:padding="0.12cm" style:vertical-align="middle"/>
+      <style:paragraph-properties fo:text-align="start"/>
+      <style:text-properties style:font-size-asian="10pt" fo:font-size="10pt" fo:font-weight="bold" fo:color="#ffffff" style:font-name-asian="Noto Sans CJK JP"/>
+    </style:style>
+    <style:style style:name="C_Text" style:family="table-cell">
+      <style:table-cell-properties fo:border="0.5pt solid #c9d2dc" fo:padding="0.12cm" style:vertical-align="middle"/>
+      <style:paragraph-properties fo:text-align="start"/>
+      <style:text-properties style:font-size-asian="10pt" fo:font-size="10pt" style:font-name-asian="Noto Sans CJK JP"/>
+    </style:style>
+    <style:style style:name="C_Wrap" style:family="table-cell">
+      <style:table-cell-properties fo:border="0.5pt solid #c9d2dc" fo:padding="0.12cm" style:vertical-align="middle" fo:wrap-option="wrap"/>
+      <style:paragraph-properties fo:text-align="start"/>
+      <style:text-properties style:font-size-asian="10pt" fo:font-size="10pt" style:font-name-asian="Noto Sans CJK JP"/>
+    </style:style>
+    <style:style style:name="C_Num" style:family="table-cell" style:data-style-name="N_Amount">
+      <style:table-cell-properties fo:border="0.5pt solid #c9d2dc" fo:padding="0.12cm" style:vertical-align="middle"/>
+      <style:paragraph-properties fo:text-align="end"/>
+      <style:text-properties style:font-size-asian="10pt" fo:font-size="10pt" style:font-name-asian="Noto Sans CJK JP"/>
+    </style:style>
+    <style:style style:name="C_Amount" style:family="table-cell" style:data-style-name="N_Currency">
+      <style:table-cell-properties fo:border="0.5pt solid #c9d2dc" fo:padding="0.12cm" style:vertical-align="middle"/>
+      <style:paragraph-properties fo:text-align="end"/>
+      <style:text-properties style:font-size-asian="10pt" fo:font-size="10pt" style:font-name-asian="Noto Sans CJK JP"/>
+    </style:style>
+    <style:style style:name="C_TotalLabel" style:family="table-cell">
+      <style:table-cell-properties fo:background-color="#eaf0f7" fo:border="0.5pt solid #c9d2dc" fo:padding="0.12cm" style:vertical-align="middle"/>
+      <style:paragraph-properties fo:text-align="end"/>
+      <style:text-properties style:font-size-asian="10.5pt" fo:font-size="10.5pt" fo:font-weight="bold" fo:color="#12324f" style:font-name-asian="Noto Sans CJK JP"/>
+    </style:style>
+    <style:style style:name="C_TotalValue" style:family="table-cell" style:data-style-name="N_Currency">
+      <style:table-cell-properties fo:background-color="#eaf0f7" fo:border="0.5pt solid #c9d2dc" fo:padding="0.12cm" style:vertical-align="middle"/>
+      <style:paragraph-properties fo:text-align="end"/>
+      <style:text-properties style:font-size-asian="10.5pt" fo:font-size="10.5pt" fo:font-weight="bold" fo:color="#12324f" style:font-name-asian="Noto Sans CJK JP"/>
+    </style:style>
+    <style:style style:name="C_GrandLabel" style:family="table-cell">
+      <style:table-cell-properties fo:background-color="#12324f" fo:border="0.5pt solid #12324f" fo:padding="0.14cm" style:vertical-align="middle"/>
+      <style:paragraph-properties fo:text-align="end"/>
+      <style:text-properties style:font-size-asian="11pt" fo:font-size="11pt" fo:font-weight="bold" fo:color="#ffffff" style:font-name-asian="Noto Sans CJK JP"/>
+    </style:style>
+    <style:style style:name="C_GrandValue" style:family="table-cell" style:data-style-name="N_Currency">
+      <style:table-cell-properties fo:background-color="#12324f" fo:border="0.5pt solid #12324f" fo:padding="0.14cm" style:vertical-align="middle"/>
+      <style:paragraph-properties fo:text-align="end"/>
+      <style:text-properties style:font-size-asian="12pt" fo:font-size="12pt" fo:font-weight="bold" fo:color="#ffffff" style:font-name-asian="Noto Sans CJK JP"/>
+    </style:style>
+  </office:automatic-styles>
+
+  <office:master-styles>
+    <style:master-page style:name="Default" style:page-layout-name="pmA4">
+      <style:header>
+        <text:p>{{QUOTE_TITLE}}</text:p>
+      </style:header>
+      <style:footer>
+        <text:p>{{ORG_NAME}} | {{QUOTE_NO}}</text:p>
+      </style:footer>
+    </style:master-page>
+  </office:master-styles>
+
+  <office:body>
+    <office:spreadsheet>
+      <table:table table:name="{{SHEET_QUOTE_NAME}}" table:style-name="T_Quote">
+        <table:table-column table:style-name="ColA"/>
+        <table:table-column table:style-name="ColB"/>
+        <table:table-column table:style-name="ColC"/>
+        <table:table-column table:style-name="ColD"/>
+        <table:table-column table:style-name="ColE"/>
+
+        <table:table-row table:style-name="R_Title">
+          <table:table-cell table:style-name="C_Title" table:number-columns-spanned="5" office:value-type="string"><text:p>{{QUOTE_TITLE}}</text:p></table:table-cell>
+          <table:covered-table-cell table:number-columns-repeated="4"/>
+        </table:table-row>
+        <table:table-row>
+          <table:table-cell table:style-name="C_Client" table:number-columns-spanned="5" office:value-type="string"><text:p>{{CLIENT}}{{CLIENT_SUFFIX}}</text:p></table:table-cell>
+          <table:covered-table-cell table:number-columns-repeated="4"/>
+        </table:table-row>
+        <table:table-row>
+          <table:table-cell table:style-name="C_Label" table:number-columns-spanned="5" office:value-type="string"><text:p>{{LABEL_PROJECT}}{{PROJECT}}</text:p></table:table-cell>
+          <table:covered-table-cell table:number-columns-repeated="4"/>
+        </table:table-row>
+        <table:table-row>
+          <table:table-cell table:style-name="C_Label" table:number-columns-spanned="3" office:value-type="string"><text:p>{{LABEL_QUOTE_NO}}{{QUOTE_NO}}</text:p></table:table-cell>
+          <table:covered-table-cell table:number-columns-repeated="2"/>
+          <table:table-cell table:style-name="C_Label" table:number-columns-spanned="2" office:value-type="string"><text:p>{{LABEL_DATE}}{{DATE}}</text:p></table:table-cell>
+          <table:covered-table-cell/>
+        </table:table-row>
+        <table:table-row>
+          <table:table-cell table:style-name="C_Label" table:number-columns-spanned="5" office:value-type="string"><text:p> </text:p></table:table-cell>
+          <table:covered-table-cell table:number-columns-repeated="4"/>
+        </table:table-row>
+
+        <table:table-row table:style-name="R_Head">
+          <table:table-cell table:style-name="C_HeadLeft" office:value-type="string"><text:p>{{COL_HEAD_ITEM}}</text:p></table:table-cell>
+          <table:table-cell table:style-name="C_Head" office:value-type="string"><text:p>{{COL_HEAD_QTY}}</text:p></table:table-cell>
+          <table:table-cell table:style-name="C_Head" office:value-type="string"><text:p>{{COL_HEAD_UNIT_PRICE}}</text:p></table:table-cell>
+          <table:table-cell table:style-name="C_Head" office:value-type="string"><text:p>{{COL_HEAD_AMOUNT}}</text:p></table:table-cell>
+          <table:table-cell table:style-name="C_HeadLeft" office:value-type="string"><text:p>{{COL_HEAD_NOTE}}</text:p></table:table-cell>
+        </table:table-row>
+
+        <table:table-row table:style-name="R_Body">
+          <table:table-cell table:style-name="C_Text" office:value-type="string"><text:p>{{ITEM_1}}</text:p></table:table-cell>
+          <table:table-cell table:style-name="C_Num" office:value-type="float" office:value="{{QTY_1}}"><text:p>{{QTY_1}}</text:p></table:table-cell>
+          <table:table-cell table:style-name="C_Num" office:value-type="float" office:value="{{PRICE_1}}"><text:p>{{PRICE_1}}</text:p></table:table-cell>
+          <table:table-cell table:style-name="C_Amount" table:formula="of:=[.B7]*[.C7]" office:value-type="float"><text:p/></table:table-cell>
+          <table:table-cell table:style-name="C_Text" office:value-type="string"><text:p>{{NOTE_1}}</text:p></table:table-cell>
+        </table:table-row>
+        <table:table-row table:style-name="R_Body">
+          <table:table-cell table:style-name="C_Text" office:value-type="string"><text:p>{{ITEM_2}}</text:p></table:table-cell>
+          <table:table-cell table:style-name="C_Num" office:value-type="float" office:value="{{QTY_2}}"><text:p>{{QTY_2}}</text:p></table:table-cell>
+          <table:table-cell table:style-name="C_Num" office:value-type="float" office:value="{{PRICE_2}}"><text:p>{{PRICE_2}}</text:p></table:table-cell>
+          <table:table-cell table:style-name="C_Amount" table:formula="of:=[.B8]*[.C8]" office:value-type="float"><text:p/></table:table-cell>
+          <table:table-cell table:style-name="C_Text" office:value-type="string"><text:p>{{NOTE_2}}</text:p></table:table-cell>
+        </table:table-row>
+        <table:table-row table:style-name="R_Body">
+          <table:table-cell table:style-name="C_Text" office:value-type="string"><text:p>{{ITEM_3}}</text:p></table:table-cell>
+          <table:table-cell table:style-name="C_Num" office:value-type="float" office:value="{{QTY_3}}"><text:p>{{QTY_3}}</text:p></table:table-cell>
+          <table:table-cell table:style-name="C_Num" office:value-type="float" office:value="{{PRICE_3}}"><text:p>{{PRICE_3}}</text:p></table:table-cell>
+          <table:table-cell table:style-name="C_Amount" table:formula="of:=[.B9]*[.C9]" office:value-type="float"><text:p/></table:table-cell>
+          <table:table-cell table:style-name="C_Text" office:value-type="string"><text:p>{{NOTE_3}}</text:p></table:table-cell>
+        </table:table-row>
+        <table:table-row table:style-name="R_Body">
+          <table:table-cell table:style-name="C_Text" office:value-type="string"><text:p>{{ITEM_4}}</text:p></table:table-cell>
+          <table:table-cell table:style-name="C_Num" office:value-type="float" office:value="{{QTY_4}}"><text:p>{{QTY_4}}</text:p></table:table-cell>
+          <table:table-cell table:style-name="C_Num" office:value-type="float" office:value="{{PRICE_4}}"><text:p>{{PRICE_4}}</text:p></table:table-cell>
+          <table:table-cell table:style-name="C_Amount" table:formula="of:=[.B10]*[.C10]" office:value-type="float"><text:p/></table:table-cell>
+          <table:table-cell table:style-name="C_Text" office:value-type="string"><text:p>{{NOTE_4}}</text:p></table:table-cell>
+        </table:table-row>
+
+        <table:table-row>
+          <table:table-cell table:style-name="C_TotalLabel" table:number-columns-spanned="3" office:value-type="string"><text:p>{{SUBTOTAL_LABEL}}</text:p></table:table-cell>
+          <table:covered-table-cell table:number-columns-repeated="2"/>
+          <table:table-cell table:style-name="C_TotalValue" table:formula="of:=SUM([.D7:.D10])" office:value-type="float"><text:p/></table:table-cell>
+          <table:table-cell/>
+        </table:table-row>
+        <table:table-row>
+          <table:table-cell table:style-name="C_TotalLabel" table:number-columns-spanned="3" office:value-type="string"><text:p>{{TAX_LABEL}}</text:p></table:table-cell>
+          <table:covered-table-cell table:number-columns-repeated="2"/>
+          <table:table-cell table:style-name="C_TotalValue" table:formula="of:=ROUND([.D11]*{{TAX_RATE}};0)" office:value-type="float"><text:p/></table:table-cell>
+          <table:table-cell/>
+        </table:table-row>
+        <table:table-row table:style-name="R_Head">
+          <table:table-cell table:style-name="C_GrandLabel" table:number-columns-spanned="3" office:value-type="string"><text:p>{{GRAND_TOTAL_LABEL}}</text:p></table:table-cell>
+          <table:covered-table-cell table:number-columns-repeated="2"/>
+          <table:table-cell table:style-name="C_GrandValue" table:formula="of:=[.D11]+[.D12]" office:value-type="float"><text:p/></table:table-cell>
+          <table:table-cell table:style-name="C_GrandValue"><text:p/></table:table-cell>
+        </table:table-row>
+
+        <table:table-row>
+          <table:table-cell table:number-columns-repeated="5"/>
+        </table:table-row>
+        <table:table-row>
+          <table:table-cell table:style-name="C_Label" table:number-columns-spanned="5" office:value-type="string"><text:p>{{LABEL_DELIVERY}}{{DELIVERY}}</text:p></table:table-cell>
+          <table:covered-table-cell table:number-columns-repeated="4"/>
+        </table:table-row>
+        <table:table-row>
+          <table:table-cell table:style-name="C_Label" table:number-columns-spanned="5" office:value-type="string"><text:p>{{LABEL_VALID_UNTIL}}{{VALID_UNTIL}} / {{LABEL_PAYMENT}}{{PAYMENT}}</text:p></table:table-cell>
+          <table:covered-table-cell table:number-columns-repeated="4"/>
+        </table:table-row>
+        <table:table-row>
+          <table:table-cell table:style-name="C_Label" table:number-columns-spanned="5" office:value-type="string"><text:p>{{LABEL_REMARKS}}{{REMARKS}}</text:p></table:table-cell>
+          <table:covered-table-cell table:number-columns-repeated="4"/>
+        </table:table-row>
+      </table:table>
+
+      <table:table table:name="{{SHEET_ASSUMPTIONS_NAME}}" table:style-name="T_Quote">
+        <table:table-column table:style-name="ColA"/>
+        <table:table-column table:style-name="ColB"/>
+        <table:table-column table:style-name="ColC"/>
+        <table:table-column table:style-name="ColD"/>
+        <table:table-column table:style-name="ColE"/>
+        <table:table-row table:style-name="R_Title">
+          <table:table-cell table:style-name="C_Title" table:number-columns-spanned="5" office:value-type="string"><text:p>{{ASSUMPTIONS_TITLE}}</text:p></table:table-cell>
+          <table:covered-table-cell table:number-columns-repeated="4"/>
+        </table:table-row>
+        <table:table-row table:style-name="R_Head">
+          <table:table-cell table:style-name="C_HeadLeft" office:value-type="string"><text:p>{{COL_HEAD_ITEM}}</text:p></table:table-cell>
+          <table:table-cell table:style-name="C_HeadLeft" table:number-columns-spanned="4" office:value-type="string"><text:p>{{COL_HEAD_CONTENT}}</text:p></table:table-cell>
+          <table:covered-table-cell table:number-columns-repeated="3"/>
+        </table:table-row>
+        <table:table-row table:style-name="R_BodyAuto">
+          <table:table-cell table:style-name="C_Text" office:value-type="string"><text:p>{{ASSUMPTION_LABEL}} 1</text:p></table:table-cell>
+          <table:table-cell table:style-name="C_Wrap" table:number-columns-spanned="4" office:value-type="string"><text:p>{{ASSUMPTION_1}}</text:p></table:table-cell>
+          <table:covered-table-cell table:number-columns-repeated="3"/>
+        </table:table-row>
+        <table:table-row table:style-name="R_BodyAuto">
+          <table:table-cell table:style-name="C_Text" office:value-type="string"><text:p>{{ASSUMPTION_LABEL}} 2</text:p></table:table-cell>
+          <table:table-cell table:style-name="C_Wrap" table:number-columns-spanned="4" office:value-type="string"><text:p>{{ASSUMPTION_2}}</text:p></table:table-cell>
+          <table:covered-table-cell table:number-columns-repeated="3"/>
+        </table:table-row>
+        <table:table-row table:style-name="R_BodyAuto">
+          <table:table-cell table:style-name="C_Text" office:value-type="string"><text:p>{{ASSUMPTION_LABEL}} 3</text:p></table:table-cell>
+          <table:table-cell table:style-name="C_Wrap" table:number-columns-spanned="4" office:value-type="string"><text:p>{{ASSUMPTION_3}}</text:p></table:table-cell>
+          <table:covered-table-cell table:number-columns-repeated="3"/>
+        </table:table-row>
+      </table:table>
+    </office:spreadsheet>
+  </office:body>
+</office:document>

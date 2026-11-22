@@ -1,0 +1,40 @@
+# Which delegate each server offers.
+#
+# A server in `tools/defaults.yaml` names ONE key here, and that key is the list
+# of folders under this directory whose `agent.md` becomes a tool. The key is the
+# server, not the folder, because a server is what an agent's `mcp_servers` names —
+# so `delegate` and `delegate_readonly` stay two entries there, and this file says
+# what each of them offers.
+#
+# ## What a folder holds
+#
+#   <name>/agent.md     the sub-run's definition: frontmatter (provider, model,
+#                       vision, extra_headers, extra_body, mcp_servers) and the
+#                       role prompt.
+#   <name>/tools.yaml   the servers the sub-run is actually handed.
+#
+# Both are required. `agent.md`'s `mcp_servers` and `tools.yaml`'s `servers` must
+# list the same names: atoma resolves the definition against the tools file, and a
+# name in one that is not in the other is a server that does not start.
+#
+# The folder name IS the tool name, which is why there is no `--agent-defs` beside
+# the server any more. Adding a delegate is a folder and a line here.
+#
+# ## Setting the model
+#
+# `provider`, `model`, `extra_headers` and `extra_body` are in each folder's
+# `agent.md`, and editing them is the expected thing to do: one provider is not
+# another's, and neither is one model. What ships is OrcaRouter, because that is
+# what this template was built against — see `../../docs/agents/reference.md` for
+# what each field accepts.
+#
+# ## A folder that is not listed here
+#
+# Ignored, silently. A folder being written, or one kept for reference, is a
+# normal state and not something to warn about.
+delegate:
+  - delegate
+  - delegate_large
+delegate_readonly:
+  - delegate_readonly
+  - delegate_readonly_large
