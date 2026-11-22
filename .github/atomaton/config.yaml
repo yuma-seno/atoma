@@ -40,9 +40,15 @@ checks:
     - name: secrets
       commands:
         - bun run "${ATOMATON_MACHINERY_ROOT:-.}/.github/atomaton-runtime/scripts/scan_secrets.ts"
-    # - name: test-macos
-    #   runs_on: macos-latest
-    #   commands: ["bun test"]
+    # What .github/workflows/ci.yml runs on a pull request: one job, three commands
+    # in this order, stopping at the first failure -- which is why they are one entry
+    # and not three: one job, one target directory, so a later command reuses what an
+    # earlier one compiled.
+    - name: test
+      commands:
+        - cargo fmt --check
+        - cargo clippy -- -D warnings
+        - cargo test --locked
 
   # Checks that need a credential. The commands come from the DEFAULT BRANCH, so a
   # pull request cannot choose what runs. The pull request arrives as a path to read
@@ -69,7 +75,16 @@ checks:
 deploy:
   # Ships when a change lands on a branch. `branches` is how you say which; leave it
   # out and it means the default branch.
-  on_merge: []
+  #
+  # A release is decided here and published under `on_tag` below. `release.yml`
+  # released on a push to main when Cargo.toml's version had no vX.Y.Z tag yet: the
+  # decision is a merge, so it is an `on_merge` step, and the tag it creates is what
+  # names the release, so the building and publishing hang off the tag instead of
+  # running on every merge and skipping themselves.
+  on_merge:
+    - name: release-tag
+      commands:
+        - bash .github/atomaton/scripts/release.sh tag
   # on_merge:
   #   - name: staging
   #     branches: [develop]
@@ -80,8 +95,39 @@ deploy:
   #
   # `branches` here says which branch the tag has to point INTO — a tag names a
   # commit, not a branch, and a commit that is not on your release branch is one
-  # nobody reviewed. Leave it out and it means the default branch, as above.
-  on_tag: []
+  # nobody reviewed. It is left out below, so a tag releases only when the commit it
+  # points at is on the default branch, which is the branch that requires a pull
+  # request.
+  #
+  # One entry per platform, because a darwin binary cannot be built on Linux and an
+  # msvc binary cannot either. They run one at a time in this order: the draft, then
+  # the three builds, then the publish.
+  on_tag:
+    - name: release-prepare
+      tags: ["v*"]
+      runs_on: ubuntu-latest
+      commands:
+        - bash .github/atomaton/scripts/release.sh prepare
+    - name: release-linux
+      tags: ["v*"]
+      runs_on: ubuntu-latest
+      commands:
+        - bash .github/atomaton/scripts/release.sh linux
+    - name: release-macos
+      tags: ["v*"]
+      runs_on: macos-latest
+      commands:
+        - bash .github/atomaton/scripts/release.sh macos
+    - name: release-windows
+      tags: ["v*"]
+      runs_on: windows-latest
+      commands:
+        - bash .github/atomaton/scripts/release.sh windows
+    - name: release-publish
+      tags: ["v*"]
+      runs_on: ubuntu-latest
+      commands:
+        - bash .github/atomaton/scripts/release.sh publish
   # on_tag:
   #   - name: production
   #     tags: ["v*"]
