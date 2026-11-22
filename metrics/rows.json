@@ -1,0 +1,61 @@
+[
+  {
+    "path": "sessions/issue-29/engineer.json",
+    "agent": "engineer",
+    "messages": 137,
+    "calls": 80,
+    "failed": 0,
+    "refused": 3,
+    "skills": [
+      "delivery/pipeline-setup",
+      "writing/japanese"
+    ],
+    "reported": false,
+    "tools": {
+      "bash": 52,
+      "read": 14,
+      "load_skill": 2,
+      "grep": 1,
+      "write": 2,
+      "edit": 4,
+      "list_prs": 1,
+      "get_pr": 1,
+      "list_issues": 1,
+      "commit_and_push": 1,
+      "create_pr": 1
+    },
+    "acts": {
+      "other": 50,
+      "edit": 2
+    },
+    "runs": [
+      {
+        "compactions": 0,
+        "ended": "2026-11-22T15:58:43Z",
+        "ended_because": "completed",
+        "iterations": 54,
+        "messages": 137,
+        "seconds": 325,
+        "server_calls": {
+          "files": {
+            "edit": 4,
+            "grep": 1,
+            "read": 14,
+            "write": 2
+          },
+          "github": {
+            "commit_and_push": 1,
+            "create_pr": 1,
+            "get_pr": 1,
+            "list_issues": 1,
+            "list_prs": 1
+          },
+          "shell": {
+            "bash": 52
+          }
+        },
+        "started": "2026-11-22T15:53:18Z"
+      }
+    ]
+  }
+]
