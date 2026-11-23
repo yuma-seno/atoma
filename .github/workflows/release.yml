@@ -1,0 +1,527 @@
+# Release — one button: declare a version in `Cargo.toml`, merge the pull
+# request that declares it, and wait for the tag to build and publish.
+#
+# ## Why this file is hand-written
+#
+# It is not part of what Atomaton ships, so the update machinery never touches it:
+# a path the release does not ship is a path it leaves alone, and this file lives
+# in `.github/workflows/` beside the eleven generated ones. It is also a file an
+# agent cannot merge — `.github/**` is in `merge.governed_paths` — which is the
+# right owner for a button that ships the whole repository. `atomaton`'s own
+# release workflow is hand-written for the same reasons; this is that file,
+# adapted to where a Rust repository keeps its version.
+#
+# ## What a release is here
+#
+# `Cargo.toml`'s `version` is the single declaration. `release.sh tag` derives the
+# tag from it, so declaring a version and merging IS the release:
+#
+#     Cargo.toml version -> deploy.on_merge -> release.sh tag       -> vX.Y.Z
+#                         -> deploy.on_tag   -> release.sh prepare  -> draft
+#                                            -> linux/macos/windows -> assets
+#                                            -> release.sh publish  -> release
+#
+# Nothing else declares a version, so nothing else has to be kept in step. This
+# workflow exists to make the one edit that starts that chain, and to refuse the
+# edits that should never start it.
+#
+# ## What it refuses, and what it does not
+#
+# A downgrade. That is the only thing checked, because it is the only thing that is
+# not a judgement: a version is a claim about what is being shipped, and this
+# workflow is not positioned to make it. It checks that the number goes up, not
+# down, and leaves the rest to the person pressing the button.
+#
+# It also refuses a version that is already released, because there is nothing to
+# do: the tag exists, the release exists, and re-declaring it changes nothing.
+#
+# ## What an empty input means
+#
+# An empty `version` is the default, and it means "the next one": the last segment
+# of the declared version is incremented, with no carry (`0.4.8` -> `0.4.9`). It is
+# a convenience for the common case, not a judgement: a person who wants any other
+# number types it, and the same checks run on whatever results.
+#
+# ## Why there is no PAT
+#
+# Every write here runs on `GITHUB_TOKEN`, and events never fire for the token's
+# own actions -- each one is bridged explicitly, the same way the machinery bridges
+# an agent's own merges:
+#
+# - the release pull request fires no `pull_request` event, so its required check
+#   would never start: `dispatch_pr_validation.ts` starts it, through the same
+#   bridge an agent's pull request is validated with, and the validator writes
+#   `atomaton-check` itself through the Checks API;
+# - the merge fires no `push`, so `deploy.on_merge` would never run:
+#   `dispatch_cd.ts` starts the deploy, through `dispatchCd`;
+# - the tag `release.sh tag` creates fires no `push` either, so the publish would
+#   never run: the deploy workflow's own `dispatch-new-tags` job bridges that one,
+#   and nothing here needs to.
+#
+# No secret is read. `ATOMATON_UPDATE_TOKEN` is the update workflow's own, used
+# there, not here.
+#
+# ## What is deliberately absent
+#
+# atomaton's release ends by taking its own release onto its own `.github/`
+# through the update machinery. This repository's `.github/` does not come from its
+# own releases: it comes from Atomaton's releases, through the update machinery and
+# `!upgrade`. A release here ships the CLI binary, and there is nothing to apply.
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to release, e.g. 0.5.0 (a leading "v" is accepted). Names the version directly; leave empty to derive it from the bump.'
+        required: false
+        default: ''
+        type: string
+      bump:
+        description: 'Which part of the declared version to bump. Required unless "version" names one.'
+        required: false
+        default: '(choose)'
+        type: choice
+        options:
+          - '(choose)'
+          - patch
+          - minor
+          - major
+
+# Read-only at the workflow level; each job grants exactly what its steps need.
+permissions:
+  contents: read
+
+# One release at a time, and the second waits rather than cancelling the first: a
+# release is a version of the whole of main, and two interleaved declarations would
+# race for which version the next one is derived from.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  refuse-bot:
+    name: Refuse a non-human trigger
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - name: Refuse a non-human trigger
+        env:
+          ACTOR: ${{ github.triggering_actor }}
+        run: |
+          case "$ACTOR" in
+            *'[bot]'|github-actions)
+              echo "::error::$ACTOR is not a person. This workflow is dispatched by hand, on purpose."
+              exit 1
+              ;;
+          esac
+          echo "dispatched by $ACTOR"
+
+  release:
+    name: Prepare the release pull request, and start its check
+    needs: refuse-bot
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # The branch push, the pull request, and the check dispatch: three writes the
+    # job makes itself, all on the workflow's own token.
+    permissions:
+      contents: write
+      pull-requests: write
+      actions: write
+    outputs:
+      version: ${{ steps.version.outputs.new }}
+      tag: ${{ steps.version.outputs.tag }}
+      changed: ${{ steps.write.outputs.changed }}
+      pr: ${{ steps.open.outputs.pr }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Bun
+        with:
+          bun-version: 1.4.2
+        uses: oven-sh/setup-bun@v2
+
+      - name: Validate the version
+        id: version
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REQUESTED: ${{ inputs.version }}
+          BUMP: ${{ inputs.bump }}
+        run: |
+          set -euo pipefail
+
+          # The declared version, read the same way `release.sh tag` reads it:
+          # `cargo metadata`, not a grep, so this workflow and the tag script can
+          # never disagree about what is declared. `RUSTUP_TOOLCHAIN=stable`
+          # because the lock entry does not depend on the toolchain, and honoring
+          # rust-toolchain.toml's pin would spend minutes downloading one for a
+          # read.
+          CURRENT=$(RUSTUP_TOOLCHAIN=stable cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version')
+
+          # A leading `v` is how a tag is written and how a person says it out
+          # loud; the declaration is bare. Accept both, store one.
+          #
+          # With no version named, the bump is required -- the input is a choice
+          # whose first option is a sentinel, so a person pressing the button picks
+          # which segment moves. '(choose)' reaching here means it was not picked,
+          # and a run that guessed would release under a number nobody chose. The
+          # last segment is required to be a number so that `0.5.0-rc` (a valid
+          # prerelease with no number to bump) fails loudly rather than deriving
+          # nonsense -- a person names that one.
+          if [ -n "$REQUESTED" ]; then
+            NEW="${REQUESTED#v}"
+          else
+            case "$BUMP" in
+              patch)
+                LAST="${CURRENT##*.}"
+                if ! [[ "$LAST" =~ ^[0-9]+$ ]]; then
+                  echo "::error::cannot bump the last segment of '${CURRENT}': it is not a number. Name the version explicitly."
+                  exit 1
+                fi
+                NEW="${CURRENT%.*}.$(( LAST + 1 ))"
+                ;;
+              minor)
+                MIDDLE="${CURRENT#*.}"; MIDDLE="${MIDDLE%%.*}"
+                if ! [[ "$MIDDLE" =~ ^[0-9]+$ ]]; then
+                  echo "::error::cannot bump the middle segment of '${CURRENT}': it is not a number. Name the version explicitly."
+                  exit 1
+                fi
+                NEW="${CURRENT%%.*}.$(( MIDDLE + 1 )).0"
+                ;;
+              major)
+                FIRST="${CURRENT%%.*}"
+                if ! [[ "$FIRST" =~ ^[0-9]+$ ]]; then
+                  echo "::error::cannot bump the first segment of '${CURRENT}': it is not a number. Name the version explicitly."
+                  exit 1
+                fi
+                NEW="$(( FIRST + 1 )).0.0"
+                ;;
+              *)
+                echo "::error::no version was named and no bump was chosen. Pick 'patch', 'minor' or 'major' in the form, or type the version. Nothing has been derived."
+                exit 1
+                ;;
+            esac
+            echo "::notice::bumping ${BUMP}: ${CURRENT} -> ${NEW}"
+          fi
+
+          if ! [[ "$NEW" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::'${NEW}' is not a plain semver version. Expected X.Y.Z, optionally with a -prerelease suffix."
+            exit 1
+          fi
+
+          # The one thing that is not a judgement: does the number go up? Equal
+          # is allowed -- re-declaring the same version is how a release whose
+          # publish failed is retried.
+          #
+          # Not `sort -V` on the whole string. GNU version sort orders a
+          # prerelease ABOVE its release, so it would call 1.0.0-rc.1 -> 1.0.0 a
+          # downgrade. The core is compared with it; the prerelease is not.
+          is_downgrade() {
+            local cur="$1" new="$2"
+            local cur_core="${cur%%-*}" new_core="${new%%-*}"
+            local lower_core
+            lower_core=$(printf '%s\n%s\n' "$cur_core" "$new_core" | sort -V | head -n1)
+            if [ "$lower_core" != "$cur_core" ]; then
+              return 0
+            fi
+            if [ "$cur_core" != "$new_core" ]; then
+              return 1
+            fi
+
+            # Equal cores. A prerelease is below its release, so a final version
+            # is never below its own prerelease, and the reverse is a downgrade.
+            local cur_pre="" new_pre=""
+            if [ "$cur" != "$cur_core" ]; then cur_pre="${cur#*-}"; fi
+            if [ "$new" != "$new_core" ]; then new_pre="${new#*-}"; fi
+            if [ -z "$cur_pre" ] && [ -n "$new_pre" ]; then return 0; fi
+            if [ -n "$cur_pre" ] && [ -z "$new_pre" ]; then return 1; fi
+            if [ -z "$cur_pre" ] && [ -z "$new_pre" ]; then return 1; fi
+
+            local lower_pre
+            lower_pre=$(printf '%s\n%s\n' "$cur_pre" "$new_pre" | sort -V | head -n1)
+            if [ "$lower_pre" != "$cur_pre" ]; then
+              return 0
+            fi
+            return 1
+          }
+
+          if is_downgrade "$CURRENT" "$NEW"; then
+            echo "::error::${NEW} is below the declared ${CURRENT}. A release does not go backwards; if this is a correction, ship it as a new version."
+            exit 1
+          fi
+
+          # Already out. The tag exists and the release exists, so declaring it
+          # again would change nothing and open a pull request for no diff.
+          if gh release view "v${NEW}" >/dev/null 2>&1; then
+            echo "::error::v${NEW} is already released. There is nothing to do."
+            exit 1
+          fi
+
+          # The tag exists but the release does not: a publish that did not
+          # finish. `release.sh tag` will not create the tag twice, so declaring
+          # the version again would open a pull request that merges to nothing.
+          # The fix is to re-run the release steps, which are idempotent.
+          if gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/v${NEW}" >/dev/null 2>&1; then
+            echo "::error::v${NEW} is tagged but not released, so its publish did not finish. Re-run the release steps for the tag: gh workflow run atomaton-deploy.yml --ref v${NEW} -f target=prepare, then the platform steps, then -f target=publish"
+            exit 1
+          fi
+
+          echo "current=${CURRENT}" >> "$GITHUB_OUTPUT"
+          echo "new=${NEW}" >> "$GITHUB_OUTPUT"
+          echo "tag=v${NEW}" >> "$GITHUB_OUTPUT"
+          echo "declaring ${CURRENT} -> ${NEW}"
+
+      - name: Write the version
+        id: write
+        env:
+          NEW: ${{ steps.version.outputs.new }}
+          CURRENT: ${{ steps.version.outputs.current }}
+        run: |
+          set -euo pipefail
+
+          # Same version, no release. That is a publish that did not finish, not a
+          # change to make: the declaration is already right, so the fix is to
+          # re-run the release steps rather than open a pull request for no diff.
+          if [ "$NEW" = "$CURRENT" ]; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::Cargo.toml already declares ${NEW}. If its release is missing, re-run the release steps: gh workflow run atomaton-deploy.yml --ref v${NEW} -f target=prepare"
+            exit 0
+          fi
+
+          # Line-anchored, and matched against the exact current value: in this
+          # manifest no dependency's version ever starts a line, so the one line
+          # this can touch is the package's own declaration, and the diff is the
+          # one line that changed.
+          sed -i "s/^version = \"${CURRENT}\"/version = \"${NEW}\"/" Cargo.toml
+
+          # `cargo test --locked` in the checks fails on a stale Cargo.lock, so
+          # the declaration is not done until the lock agrees. `-p atoma` moves
+          # only this package's own entry, never its dependencies' versions.
+          RUSTUP_TOOLCHAIN=stable cargo update -p atoma
+
+          if [ -z "$(git status --porcelain)" ]; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::Cargo.toml already declares ${NEW}; nothing to open a pull request for."
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            git --no-pager diff -- Cargo.toml Cargo.lock
+          fi
+
+      - name: Open the pull request, and start its check
+        id: open
+        if: steps.write.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          NEW: ${{ steps.version.outputs.new }}
+          CURRENT: ${{ steps.version.outputs.current }}
+          ACTOR: ${{ github.triggering_actor }}
+        run: |
+          set -euo pipefail
+          BRANCH="release/v${NEW}"
+
+          git config user.name "atoma-release"
+          git config user.email "atoma-release@users.noreply.github.com"
+          git checkout -q -b "$BRANCH"
+          git add Cargo.toml Cargo.lock
+
+          # Through a file, not `-m`: a multi-line message written inline has to
+          # start its continuation lines at column 0 to keep them out of the
+          # commit body's indentation -- and column 0 leaves this block scalar,
+          # which makes the whole workflow unparseable.
+          MSG=$(mktemp)
+          {
+            echo "release: declare ${NEW}"
+            echo
+            echo "Prepared by .github/workflows/release.yml, dispatched by ${ACTOR}."
+            echo
+            echo "Cargo.toml version ${CURRENT} -> ${NEW}. Merging this tags v${NEW}"
+            echo "and publishes it; nothing else declares a version."
+          } > "$MSG"
+          git commit -q -F "$MSG"
+          rm -f "$MSG"
+
+          # Force, because the branch is derived from the input: re-running for the
+          # same version should reproduce it rather than conflict with the previous
+          # attempt. Nothing hand-written belongs here.
+          #
+          # The push is made with GITHUB_TOKEN, so it fires no event -- that is
+          # why the check is dispatched below rather than waited for.
+          git push -q --force origin "$BRANCH"
+
+          {
+            echo "Declares version \`${NEW}\` in \`Cargo.toml\` (was \`${CURRENT}\`); \`Cargo.lock\` moves with it."
+            echo
+            echo "Prepared by \`.github/workflows/release.yml\`, dispatched by @${ACTOR}. No agent was involved."
+            echo
+            echo "Merging this **is** the release: \`deploy.on_merge\` runs \`release.sh tag\`, which derives \`v${NEW}\` from this declaration, and the tag's own deployment (prepare, the four platform builds, publish) ships it."
+            echo
+            echo "This workflow merges the pull request itself once the required check has run and passed, and waits for the release to be published."
+          } > /tmp/body.md
+
+          EXISTING=$(gh pr list --head "$BRANCH" --state open --json number -q '.[0].number // empty')
+          if [ -n "$EXISTING" ]; then
+            gh pr edit "$EXISTING" --body-file /tmp/body.md
+            echo "::notice::updated pull request #${EXISTING}"
+          else
+            gh pr create \
+              --title "release: declare ${NEW}" \
+              --body-file /tmp/body.md \
+              --head "$BRANCH"
+          fi
+
+          # Read back rather than parsed out of `gh pr create`: the URL is what it
+          # prints, and an edit prints nothing at all.
+          PR=$(gh pr list --head "$BRANCH" --state open --json number -q '.[0].number // empty')
+          if [ -z "$PR" ]; then
+            echo "::error::the release pull request for ${BRANCH} could not be found after it was created."
+            exit 1
+          fi
+          echo "pr=${PR}" >> "$GITHUB_OUTPUT"
+
+          # A pull request opened with GITHUB_TOKEN fires no event, so nothing
+          # starts the check the ruleset requires. Through the validator's bridge:
+          # `atomaton-validate-pr.yml` holds `checks: write` and writes the
+          # required `atomaton-check` run itself, the same script an agent's pull
+          # request is validated through. No `--ask`: the release body names no
+          # `/<agent>`, so validation dispatches nobody.
+          bun .github/atomaton-runtime/scripts/dispatch_pr_validation.ts \
+            --repo "$GITHUB_REPOSITORY" --number "$PR" --branch "$BRANCH" --asked-by-person true
+
+  merge-release:
+    name: Merge the release pull request, and wait for the release
+    needs: release
+    runs-on: ubuntu-latest
+    # The merge's own Deploy job, the four platform builds it starts (they queue
+    # and build for some minutes), and the publish they feed. A budget shorter
+    # than that path reports a timeout as a failed release.
+    timeout-minutes: 180
+    # The merge is made with the workflow's own token, so it fires no `push` --
+    # the deploy is dispatched through the bridge below, which is why
+    # `actions: write` is here too.
+    permissions:
+      contents: write
+      pull-requests: write
+      checks: read
+      actions: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Bun
+        with:
+          bun-version: 1.4.2
+        uses: oven-sh/setup-bun@v2
+
+      - name: Merge the release pull request, and wait for the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ needs.release.outputs.pr }}
+          CHANGED: ${{ needs.release.outputs.changed }}
+          TAG: ${{ needs.release.outputs.tag }}
+        run: |
+          set -euo pipefail
+
+          # Same version, no pull request. If the release is missing, the publish
+          # is what did not finish, and it is re-run rather than re-declared.
+          if [ "$CHANGED" != "true" ]; then
+            if gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
+              echo "$TAG is already published; nothing to merge."
+              exit 0
+            fi
+            echo "::error::Cargo.toml already declares $TAG but no release exists. Re-run the release steps: gh workflow run atomaton-deploy.yml --ref $TAG -f target=prepare, then the platform steps, then -f target=publish"
+            exit 1
+          fi
+
+          if [ -z "$PR" ]; then
+            echo "::error::Release reported a changed version but no pull request number."
+            exit 1
+          fi
+
+          # Wait for the REQUIRED check to EXIST, not for the visible checks to
+          # finish. It is written by the validator once CI has concluded, so on a
+          # pull request opened moments ago `atomaton-check` is not in the rollup
+          # yet, and every check that IS visible can be green while the deciding
+          # one does not exist. The measured failure was a merge the base branch
+          # policy refused in exactly that state.
+          SEEN=""
+          for _ in $(seq 1 90); do
+            SEEN=$(gh pr view "$PR" --repo "$REPO" --json statusCheckRollup --jq '[.statusCheckRollup[] | select(.name == "atomaton-check")] | length')
+            if [ "$SEEN" != "0" ] && [ -n "$SEEN" ]; then break; fi
+            sleep 10
+          done
+          if [ "$SEEN" = "0" ] || [ -z "$SEEN" ]; then
+            echo "::error::the required check never registered on #$PR in fifteen minutes. Read the check workflow's run; once it has run, merge by hand and re-run this job."
+            exit 1
+          fi
+
+          # Now that the deciding check exists, watch everything on the pull
+          # request. A red change is not merged: this fails and leaves the pull
+          # request open.
+          gh pr checks "$PR" --repo "$REPO" --watch --fail-fast --interval 10
+
+          # The merge is made with GITHUB_TOKEN, so it fires no `push`, and
+          # `deploy.on_merge` never runs on its own -- the dispatch below is the
+          # bridge for that, the same one the machinery's own merges go through.
+          gh pr merge "$PR" --repo "$REPO" --merge
+
+          # The merge commit is the fact the next stage needs; poll rather than
+          # assume the command's exit means the merge happened.
+          SHA=""
+          for _ in $(seq 1 60); do
+            SHA=$(gh pr view "$PR" --repo "$REPO" --json mergeCommit --jq '.mergeCommit.oid // empty')
+            if [ -n "$SHA" ]; then break; fi
+            sleep 10
+          done
+          if [ -z "$SHA" ]; then
+            echo "::error::#${PR} merged but GitHub reported no merge commit, so the Deploy run cannot be found."
+            exit 1
+          fi
+
+          # Through the bridge, with `trigger=merge` behind it: the deploy plans
+          # the `on_merge` entries, `release.sh tag` creates the tag from the
+          # declaration this pull request merged, and the deploy's own
+          # `dispatch-new-tags` job starts the tag's build and publish.
+          bun .github/atomaton-runtime/scripts/dispatch_cd.ts --repo "$REPO" --ref main
+
+          # The dispatched run is the one to watch. It may not exist for a few
+          # seconds, and the FIRST match is the right one: the tag's own run names
+          # the same commit and is also a dispatch, but it only exists after
+          # `release.sh tag` has run inside this one, minutes from now.
+          RUN=""
+          for _ in $(seq 1 60); do
+            RUN=$(gh run list --repo "$REPO" --workflow atomaton-deploy.yml --event workflow_dispatch --commit "$SHA" --limit 1 --json databaseId --jq '.[0].databaseId // empty' 2>/dev/null || true)
+            if [ -n "$RUN" ]; then break; fi
+            sleep 10
+          done
+          if [ -z "$RUN" ]; then
+            echo "::error::No Deploy run appeared for ${SHA}. See https://github.com/${REPO}/actions"
+            exit 1
+          fi
+
+          echo "Waiting for Deploy run ${RUN} for ${SHA}."
+          if ! gh run watch "$RUN" --repo "$REPO" --exit-status --interval 10; then
+            echo "::error::The Deploy run for ${SHA} failed: https://github.com/${REPO}/actions/runs/${RUN}"
+            exit 1
+          fi
+
+          # The deploy run dispatches the tag's build and publish and does not
+          # wait for them, so its success does NOT mean the release exists. This
+          # is the fact the run is for: four platform builds take real minutes,
+          # so the wait is half an hour, not ten. A release that is tagged but
+          # not published is exactly the state this workflow exists to keep out
+          # of the next step.
+          for _ in $(seq 1 90); do
+            if gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
+              echo "Published $TAG."
+              break
+            fi
+            sleep 20
+          done
+          if ! gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
+            echo "::error::$TAG was not published after the Deploy run succeeded. The tag's own run is still the place to look: https://github.com/${REPO}/actions"
+            exit 1
+          fi
