@@ -678,6 +678,7 @@ function tokensReported(repo) {
   }
   return out;
 }
+var SKILL_FILE = "SKILL.md";
 function skillsUnder(dir) {
   let entries;
   try {
@@ -685,7 +686,7 @@ function skillsUnder(dir) {
   } catch {
     return;
   }
-  const skills = entries.filter((entry) => entry.endsWith(".md")).map((entry) => entry.replaceAll("\\", "/").slice(0, -".md".length)).sort();
+  const skills = entries.map((entry) => entry.replaceAll("\\", "/")).filter((entry) => entry.endsWith(`/${SKILL_FILE}`)).map((entry) => entry.slice(0, -(SKILL_FILE.length + 1)).split("/").pop() ?? "").sort();
   return skills.length === 0 ? undefined : skills;
 }
 function declared() {
