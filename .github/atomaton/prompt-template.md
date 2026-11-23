@@ -203,8 +203,8 @@ load-bearing — and if it was, say that rather than working around it silently.
 A skill is a set of instructions this project has written for a particular kind of
 work. When the work in front of you is of a kind a skill below covers, load it
 with `load_skill` and follow it in place of your own approach: it
-is what this project has decided, not advice to weigh. A name with a `/` in it is
-always a skill — it is an argument to that call, never a tool name of its own, and
+is what this project has decided, not advice to weigh. Every name in the catalog
+below is a skill: it is an argument to that call, never a tool name of its own, and
 called as a tool it loads nothing. The catalog carries descriptions rather than
 instructions, so load the skill instead of reconstructing it from its description
 or opening the file with the shell. Loading one counts toward no operational limit.

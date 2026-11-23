@@ -1,5 +1,5 @@
 ---
-name: engineering/environment
+name: environment
 description: Load when something you need is not installed, an install fails, or the work tree is broken — where a missing dependency or tool belongs, and how to get it without spending the run.
 ---
 

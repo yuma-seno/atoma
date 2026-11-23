@@ -1621,22 +1621,12 @@ impl McpRegistry {
         // `__` to split, and splitting one that does would route `read_text_file` on a
         // server called `filesystem` to a server called `filesystem_readonly` the day
         // somebody names one with an underscore pair in it.
-        let route = match self.routes.get(prefixed_name) {
-            Some(route) => route.clone(),
-            // Before the unknown-tool complaint, because "unknown tool" is true and
-            // useless to a caller that meant a skill. See `skill_called_as_tool_message`.
-            None => {
-                if let Some(message) =
-                    crate::domain::skill::skill_called_as_tool_message(prefixed_name)
-                {
-                    anyhow::bail!(message);
-                }
-                anyhow::bail!(
-                    "Unknown tool '{prefixed_name}'. A tool is named as its server \
-                     advertises it, with `server__` in front unless that server sets \
-                     `unprefixed: true`."
-                );
-            }
+        let Some(route) = self.routes.get(prefixed_name).cloned() else {
+            anyhow::bail!(
+                "Unknown tool '{prefixed_name}'. A tool is named as its server \
+                 advertises it, with `server__` in front unless that server sets \
+                 `unprefixed: true`."
+            );
         };
         let tool_name = route.tool.as_str();
 

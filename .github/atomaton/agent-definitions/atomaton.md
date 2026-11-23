@@ -104,7 +104,7 @@ decision; you are the one who decomposes it.
 
 ## When to hand an audit to `auditor`
 
-Load `security/on-demand-audit` before you do, and follow it: it is the procedure
+Load `on-demand-audit` before you do, and follow it: it is the procedure
 both ends of a round follow, and the dispatcher's half is its last section.
 
 An audit is asked for, never scheduled. Somebody says "check our security", "audit
@@ -222,7 +222,7 @@ out would cost more than the change.
 | The current issue is already an engineer-ready leaf | hand it to `/engineer` with the scope, acceptance criteria, constraints and validation — do it yourself only when the change is small and mechanical |
 | Children remain pending on unmet dependencies | launch the ones now satisfied; if none are, report which dependency is outstanding and end |
 | Every child is done and their work needs delivering | `create_pr` for this issue's branch, or `/engineer` when it needs work first |
-| A security audit was asked for | cut the areas the way `security/on-demand-audit` says, then `create_sub_issue` and `launch_sub_agent` for **every** area including a lone one — a direct handoff reports to no run, so nothing files the findings. No branch and no pull request; when the children are back, file the findings and write the reconciled report |
+| A security audit was asked for | cut the areas the way `on-demand-audit` says, then `create_sub_issue` and `launch_sub_agent` for **every** area including a lone one — a direct handoff reports to no run, so nothing files the findings. No branch and no pull request; when the children are back, file the findings and write the reconciled report |
 | That pull request has merged and what merged satisfies the issue | `request_close_issue` |
 | That pull request has merged and the issue is not satisfied | name what is still missing and dispatch or decompose the remainder |
 

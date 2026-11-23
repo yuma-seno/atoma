@@ -3,7 +3,7 @@ use async_trait::async_trait;
 use serde_json::Value;
 
 use crate::domain::ports::{ToolCallResult, ToolPort};
-use crate::domain::skill::SkillCatalog;
+use crate::domain::skill::{skill_called_as_tool_message, SkillCatalog};
 
 pub use crate::domain::skill::{LOAD_SKILL_ARGUMENT, LOAD_SKILL_TOOL};
 const BUILTIN_PREFIX: &str = "atoma_builtin__";
@@ -17,7 +17,7 @@ const BUILTIN_PREFIX: &str = "atoma_builtin__";
 /// It opens by saying what a skill is and who wrote it, because the previous wording --
 /// "Load the full instructions for an available skill before applying it" -- said neither,
 /// and "instructions" without an author reads as reference material. Measured: a run that
-/// needed `research/web-search` found the file and read it with `sed -n '1,60p'` instead of
+/// needed `web-search` found the file and read it with `sed -n '1,60p'` instead of
 /// loading it, then spent 240 shell searches inside a repository that did not hold the
 /// answer. It treated the skill as a document to consult rather than a decision to adopt,
 /// which is what the description had described.
@@ -233,6 +233,19 @@ impl ToolPort for RuntimeTools {
             });
         }
 
+        // A name no server offers may still be one a model wrote meaning a skill. The
+        // catalog is the only thing that can tell, so it is asked here rather than by the
+        // shape of the string -- `environment` and a tool name look alike. A server that
+        // does offer the name wins: a real tool is what the caller asked for.
+        let a_server_offers_it = self
+            .external
+            .as_ref()
+            .and_then(|external| external.server_for(name))
+            .is_some();
+        if !a_server_offers_it && self.skills.get(name).is_some() {
+            anyhow::bail!("{}", skill_called_as_tool_message(name));
+        }
+
         self.external
             .as_mut()
             .context("Unknown tool and no external MCP servers are configured")?
@@ -248,9 +261,10 @@ mod tests {
 
     fn catalog() -> SkillCatalog {
         let dir = tempfile::tempdir().unwrap();
+        fs::create_dir(dir.path().join("tdd")).unwrap();
         fs::write(
-            dir.path().join("tdd.md"),
-            "---\nname: engineering/tdd\ndescription: Test first.\n---\n\nUse red-green-refactor.\n",
+            dir.path().join("tdd/SKILL.md"),
+            "---\nname: tdd\ndescription: Test first.\n---\n\nUse red-green-refactor.\n",
         )
         .unwrap();
         crate::infra::persistence::skill::load(dir.path()).unwrap()
@@ -263,18 +277,18 @@ mod tests {
         assert_eq!(tool_name(&definitions[0]), Some(LOAD_SKILL_TOOL));
         assert_eq!(
             definitions[0].pointer("/function/parameters/properties/skill_name/enum/0"),
-            Some(&Value::String("engineering/tdd".to_string()))
+            Some(&Value::String("tdd".to_string()))
         );
 
         let result = tools
             .call_tool(
                 "engineer",
                 LOAD_SKILL_TOOL,
-                &serde_json::json!({"skill_name": "engineering/tdd"}),
+                &serde_json::json!({"skill_name": "tdd"}),
             )
             .await
             .unwrap();
-        assert!(result.content.contains("# Skill: engineering/tdd"));
+        assert!(result.content.contains("# Skill: tdd"));
         assert!(result.content.contains("Use red-green-refactor."));
         assert!(!result.session_ends);
     }
@@ -293,7 +307,7 @@ mod tests {
             let mut arguments = serde_json::Map::new();
             arguments.insert(
                 key.to_string(),
-                serde_json::Value::String("engineering/tdd".to_string()),
+                serde_json::Value::String("tdd".to_string()),
             );
             let error = tools
                 .call_tool(
@@ -305,7 +319,7 @@ mod tests {
                 .expect_err(key);
             let message = error.to_string();
             assert!(
-                message.contains(r#"{"skill_name": "engineering/tdd"}"#),
+                message.contains(r#"{"skill_name": "tdd"}"#),
                 "{key}: {message}"
             );
         }
@@ -318,11 +332,11 @@ mod tests {
             .call_tool(
                 "engineer",
                 LOAD_SKILL_TOOL,
-                &serde_json::json!({"skill_name": "engineering/tdd"}),
+                &serde_json::json!({"skill_name": "tdd"}),
             )
             .await
             .unwrap();
-        assert!(result.content.contains("# Skill: engineering/tdd"));
+        assert!(result.content.contains("# Skill: tdd"));
     }
 
     #[tokio::test]
@@ -341,7 +355,37 @@ mod tests {
         // for word, which said nothing about why that wording had to be there.
         let message = error.to_string();
         assert!(message.contains("'missing'"), "{}", message);
-        assert!(message.contains("engineering/tdd"), "{}", message);
+        assert!(message.contains("tdd"), "{}", message);
+    }
+
+    /// A skill name written where a tool name goes is answered by the catalog, not by the
+    /// shape of the string.
+    ///
+    /// It used to be answered by the `a/b` shape of a skill name, which the folder layout
+    /// removed: a skill is now `environment`, and nothing in that name tells it apart from
+    /// a tool. So the decision moved to the one place that holds the names, and the
+    /// measured failure it prevents -- an agent telling a pull request it had run the
+    /// skill -- still gets the message that names the call which works.
+    #[tokio::test]
+    async fn a_skill_name_called_as_a_tool_is_told_which_tool_loads_it() {
+        let mut tools = RuntimeTools::new(catalog(), None).unwrap();
+        let error = tools
+            .call_tool("engineer", "tdd", &serde_json::json!({}))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("is a skill, not a tool"), "{error}");
+        assert!(error.contains("load_skill"), "{error}");
+        assert!(error.contains("\"skill_name\": \"tdd\""), "{error}");
+
+        // A name the catalog does not hold keeps the honest answer: the tool is unknown.
+        let mut tools = RuntimeTools::new(catalog(), None).unwrap();
+        let error = tools
+            .call_tool("engineer", "github__create_issue", &serde_json::json!({}))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(!error.contains("is a skill"), "{error}");
     }
 
     /// A call carrying several strings still names the call that works.
@@ -357,18 +401,14 @@ mod tests {
             .call_tool(
                 "engineer",
                 LOAD_SKILL_TOOL,
-                &serde_json::json!({"first": "engineering/tdd", "second": "engineering/tdd"}),
+                &serde_json::json!({"first": "tdd", "second": "tdd"}),
             )
             .await
             .unwrap_err();
         let message = error.to_string();
         assert!(message.contains("first"), "{}", message);
         // The corrected call, in full, so following it needs no interpretation.
-        assert!(
-            message.contains(r#"{"skill_name": "engineering/tdd"}"#),
-            "{}",
-            message
-        );
+        assert!(message.contains(r#"{"skill_name": "tdd"}"#), "{}", message);
     }
 
     /// With nothing to guess from, it says what the argument is and stops.

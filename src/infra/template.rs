@@ -422,11 +422,11 @@ mod tests {
     fn test_skill_catalog_exposes_metadata_without_instructions() {
         let agent = make_test_agent(None);
         let skills = vec![SkillMetadata {
-            name: "engineering/tdd".to_string(),
+            name: "tdd".to_string(),
             description: "Test first.".to_string(),
         }];
         let result = build_system_prompt(&agent, None, "/repo", &[], &skills);
-        assert!(result.contains("`engineering/tdd`: Test first."));
+        assert!(result.contains("`tdd`: Test first."));
         assert!(!result.contains("red-green-refactor"));
     }
 }

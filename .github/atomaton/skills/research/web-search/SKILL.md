@@ -1,5 +1,5 @@
 ---
-name: research/web-search
+name: web-search
 description: Load when the answer is not in this repository — fetching a page whose address you know, and running a general search when you do not, including what to do when the search engine refuses an automated client. Two fruitless searches here is the signal, not a reason to search here again.
 ---
 

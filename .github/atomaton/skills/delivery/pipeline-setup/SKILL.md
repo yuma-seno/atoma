@@ -1,5 +1,5 @@
 ---
-name: delivery/pipeline-setup
+name: pipeline-setup
 description: "Load when `checks` is empty in config.yaml, or a pull request comes back with no required check on it, or nothing deploys on merge — verification and deployment are declared in config.yaml, not written as workflow files."
 ---
 

@@ -272,11 +272,7 @@ async fn test_skill_load_is_persisted_as_tool_history() {
     use atoma::application::tools::LOAD_SKILL_TOOL;
     use common::mock_llm::make_tool_call;
 
-    let tool_call = make_tool_call(
-        "skill-1",
-        LOAD_SKILL_TOOL,
-        r#"{"skill_name":"engineering/tdd"}"#,
-    );
+    let tool_call = make_tool_call("skill-1", LOAD_SKILL_TOOL, r#"{"skill_name":"tdd"}"#);
     let llm = MockLlmClient::new()
         .enqueue_tool_calls(vec![tool_call])
         .enqueue_text("Applied the skill.");
@@ -293,10 +289,10 @@ async fn test_skill_load_is_persisted_as_tool_history() {
     let skills_dir = dir.path().join("skills");
     let out_session_path = dir.path().join("session.json");
     std::fs::write(&agent_path, "").unwrap();
-    std::fs::create_dir(&skills_dir).unwrap();
+    std::fs::create_dir_all(skills_dir.join("tdd")).unwrap();
     std::fs::write(
-        skills_dir.join("tdd.md"),
-        "---\nname: engineering/tdd\ndescription: Test first.\n---\n\nUse red-green-refactor.\n",
+        skills_dir.join("tdd/SKILL.md"),
+        "---\nname: tdd\ndescription: Test first.\n---\n\nUse red-green-refactor.\n",
     )
     .unwrap();
 
