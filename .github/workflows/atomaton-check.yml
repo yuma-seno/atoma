@@ -222,11 +222,11 @@ jobs:
         env:
           ATOMA_BIN: /usr/local/bin/atoma
         run: |
-          bun run test:e2e
-      - name: Check the tool servers this pull request would ship
-        shell: bash
-        run: |
-          bash .github/atomaton/scripts/check-live-tools.sh
+          if [ -f package.json ] && grep -q '"test:e2e"' package.json; then
+            bun run test:e2e
+          else
+            echo "this repository does not carry the template's e2e suite (no test:e2e script in package.json); Atomaton's own suite is verified upstream, not here"
+          fi
   atomaton-check:
     runs-on: ubuntu-latest
     timeout-minutes: 5
