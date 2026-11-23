@@ -10,10 +10,10 @@ A session appears in a dated window only if it recorded when its runs ended. Ses
 
 | window | runs | gave up | median seconds | longest | median round trips | median seconds each |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| Last 7 days | 6 | 16.7% | 288 | 665 | 21 | 6.0 |
-| Last 30 days | 6 | 16.7% | 288 | 665 | 21 | 6.0 |
-| Last year | 6 | 16.7% | 288 | 665 | 21 | 6.0 |
-| All time | 6 | 16.7% | 288 | 665 | 21 | 6.0 |
+| Last 7 days | 7 | 14.3% | 103 | 665 | 15 | 6.0 |
+| Last 30 days | 7 | 14.3% | 103 | 665 | 15 | 6.0 |
+| Last year | 7 | 14.3% | 103 | 665 | 15 | 6.0 |
+| All time | 7 | 14.3% | 103 | 665 | 15 | 6.0 |
 
 **Gave up** is every ending that is not `completed` — a ceiling reached, a person asking, a provider hanging up, a loop cut short. Each one is a mechanism deciding the run should not continue, which is worth watching whether or not it was right.
 
@@ -21,7 +21,7 @@ What is left over is not the same as work delivered. `completed` is the core say
 
 | ended because | runs |
 | --- | ---: |
-| `completed` | 5 |
+| `completed` | 6 |
 | `failed` | 1 |
 
 ## Last 7 days
@@ -37,7 +37,7 @@ What is left over is not the same as work delivered. `completed` is the core say
 | | p50 | p90 | p99 | max | total |
 | --- | ---: | ---: | ---: | ---: | ---: |
 | tokens per run | 1,009,482 | 1,009,482 | 1,009,482 | 1,009,482 | 1,199,905 |
-| messages per session | 154 | 216 | 216 | 216 | 488 |
+| messages per session | 154 | 240 | 240 | 240 | 512 |
 
 | agent | sessions | share |
 | --- | ---: | ---: |
@@ -49,18 +49,19 @@ What is left over is not the same as work delivered. `completed` is the core say
 
 | tool | calls | failed | refused | failure rate |
 | --- | ---: | ---: | ---: | ---: |
-| `bash` | 160 | 3 | 3 | 1.9% |
+| `bash` | 168 | 3 | 3 | 1.8% |
 | `read` | 50 | 0 | 0 | 0% |
 | `edit` | 16 | 0 | 0 | 0% |
 | `grep` | 10 | 0 | 0 | 0% |
+| `load_skill` | 4 | 0 | 0 | 0% |
 | `write` | 4 | 0 | 0 | 0% |
 | `get_pr` | 3 | 0 | 0 | 0% |
-| `load_skill` | 3 | 0 | 0 | 0% |
 | `commit_and_push` | 2 | 0 | 0 | 0% |
 | `create_pr` | 2 | 0 | 0 | 0% |
 | `fetch` | 2 | 0 | 0 | 0% |
 | `glob` | 2 | 0 | 0 | 0% |
 | `list` | 2 | 0 | 0 | 0% |
+| `request_close_issue` | 2 | 0 | 0 | 0% |
 | `check_merge_readiness` | 1 | 0 | 0 | 0% |
 | `create_root_issue` | 1 | 0 | 0 | 0% |
 | `delegate_readonly` | 1 | 0 | 0 | 0% |
@@ -72,23 +73,23 @@ What is left over is not the same as work delivered. `completed` is the core say
 | `list_issues` | 1 | 0 | 0 | 0% |
 | `list_pr_review_comments` | 1 | 0 | 0 | 0% |
 | `list_prs` | 1 | 0 | 0 | 0% |
-| `request_close_issue` | 1 | 0 | 0 | 0% |
 | `search_code` | 1 | 0 | 0 | 0% |
 
 What the agents do when they reach for a shell. `search` without a matching `open` is the shape that produced this project's most expensive runs; `edit` against `verify` is the shape that turned out not to occur at all.
 
 | act | calls | share |
 | --- | ---: | ---: |
-| `other` | 109 | 68.1% |
-| `search` | 29 | 18.1% |
-| `open` | 16 | 10% |
-| `edit` | 5 | 3.1% |
+| `other` | 117 | 69.6% |
+| `search` | 29 | 17.3% |
+| `open` | 16 | 9.5% |
+| `edit` | 5 | 3% |
 | `verify` | 1 | 0.6% |
 
 | skill | loads | share |
 | --- | ---: | ---: |
-| `writing/japanese` | 2 | 66.7% |
-| `delivery/pipeline-setup` | 1 | 33.3% |
+| `writing/japanese` | 2 | 50% |
+| `delivery/pipeline-setup` | 1 | 25% |
+| `japanese` | 1 | 25% |
 
 ## Last 30 days
 
@@ -103,7 +104,7 @@ What the agents do when they reach for a shell. `search` without a matching `ope
 | | p50 | p90 | p99 | max | total |
 | --- | ---: | ---: | ---: | ---: | ---: |
 | tokens per run | 1,009,482 | 1,009,482 | 1,009,482 | 1,009,482 | 1,199,905 |
-| messages per session | 154 | 216 | 216 | 216 | 488 |
+| messages per session | 154 | 240 | 240 | 240 | 512 |
 
 | agent | sessions | share |
 | --- | ---: | ---: |
@@ -115,18 +116,19 @@ What the agents do when they reach for a shell. `search` without a matching `ope
 
 | tool | calls | failed | refused | failure rate |
 | --- | ---: | ---: | ---: | ---: |
-| `bash` | 160 | 3 | 3 | 1.9% |
+| `bash` | 168 | 3 | 3 | 1.8% |
 | `read` | 50 | 0 | 0 | 0% |
 | `edit` | 16 | 0 | 0 | 0% |
 | `grep` | 10 | 0 | 0 | 0% |
+| `load_skill` | 4 | 0 | 0 | 0% |
 | `write` | 4 | 0 | 0 | 0% |
 | `get_pr` | 3 | 0 | 0 | 0% |
-| `load_skill` | 3 | 0 | 0 | 0% |
 | `commit_and_push` | 2 | 0 | 0 | 0% |
 | `create_pr` | 2 | 0 | 0 | 0% |
 | `fetch` | 2 | 0 | 0 | 0% |
 | `glob` | 2 | 0 | 0 | 0% |
 | `list` | 2 | 0 | 0 | 0% |
+| `request_close_issue` | 2 | 0 | 0 | 0% |
 | `check_merge_readiness` | 1 | 0 | 0 | 0% |
 | `create_root_issue` | 1 | 0 | 0 | 0% |
 | `delegate_readonly` | 1 | 0 | 0 | 0% |
@@ -138,23 +140,23 @@ What the agents do when they reach for a shell. `search` without a matching `ope
 | `list_issues` | 1 | 0 | 0 | 0% |
 | `list_pr_review_comments` | 1 | 0 | 0 | 0% |
 | `list_prs` | 1 | 0 | 0 | 0% |
-| `request_close_issue` | 1 | 0 | 0 | 0% |
 | `search_code` | 1 | 0 | 0 | 0% |
 
 What the agents do when they reach for a shell. `search` without a matching `open` is the shape that produced this project's most expensive runs; `edit` against `verify` is the shape that turned out not to occur at all.
 
 | act | calls | share |
 | --- | ---: | ---: |
-| `other` | 109 | 68.1% |
-| `search` | 29 | 18.1% |
-| `open` | 16 | 10% |
-| `edit` | 5 | 3.1% |
+| `other` | 117 | 69.6% |
+| `search` | 29 | 17.3% |
+| `open` | 16 | 9.5% |
+| `edit` | 5 | 3% |
 | `verify` | 1 | 0.6% |
 
 | skill | loads | share |
 | --- | ---: | ---: |
-| `writing/japanese` | 2 | 66.7% |
-| `delivery/pipeline-setup` | 1 | 33.3% |
+| `writing/japanese` | 2 | 50% |
+| `delivery/pipeline-setup` | 1 | 25% |
+| `japanese` | 1 | 25% |
 
 ## Last year
 
@@ -169,7 +171,7 @@ What the agents do when they reach for a shell. `search` without a matching `ope
 | | p50 | p90 | p99 | max | total |
 | --- | ---: | ---: | ---: | ---: | ---: |
 | tokens per run | 1,009,482 | 1,009,482 | 1,009,482 | 1,009,482 | 1,199,905 |
-| messages per session | 154 | 216 | 216 | 216 | 488 |
+| messages per session | 154 | 240 | 240 | 240 | 512 |
 
 | agent | sessions | share |
 | --- | ---: | ---: |
@@ -181,18 +183,19 @@ What the agents do when they reach for a shell. `search` without a matching `ope
 
 | tool | calls | failed | refused | failure rate |
 | --- | ---: | ---: | ---: | ---: |
-| `bash` | 160 | 3 | 3 | 1.9% |
+| `bash` | 168 | 3 | 3 | 1.8% |
 | `read` | 50 | 0 | 0 | 0% |
 | `edit` | 16 | 0 | 0 | 0% |
 | `grep` | 10 | 0 | 0 | 0% |
+| `load_skill` | 4 | 0 | 0 | 0% |
 | `write` | 4 | 0 | 0 | 0% |
 | `get_pr` | 3 | 0 | 0 | 0% |
-| `load_skill` | 3 | 0 | 0 | 0% |
 | `commit_and_push` | 2 | 0 | 0 | 0% |
 | `create_pr` | 2 | 0 | 0 | 0% |
 | `fetch` | 2 | 0 | 0 | 0% |
 | `glob` | 2 | 0 | 0 | 0% |
 | `list` | 2 | 0 | 0 | 0% |
+| `request_close_issue` | 2 | 0 | 0 | 0% |
 | `check_merge_readiness` | 1 | 0 | 0 | 0% |
 | `create_root_issue` | 1 | 0 | 0 | 0% |
 | `delegate_readonly` | 1 | 0 | 0 | 0% |
@@ -204,23 +207,23 @@ What the agents do when they reach for a shell. `search` without a matching `ope
 | `list_issues` | 1 | 0 | 0 | 0% |
 | `list_pr_review_comments` | 1 | 0 | 0 | 0% |
 | `list_prs` | 1 | 0 | 0 | 0% |
-| `request_close_issue` | 1 | 0 | 0 | 0% |
 | `search_code` | 1 | 0 | 0 | 0% |
 
 What the agents do when they reach for a shell. `search` without a matching `open` is the shape that produced this project's most expensive runs; `edit` against `verify` is the shape that turned out not to occur at all.
 
 | act | calls | share |
 | --- | ---: | ---: |
-| `other` | 109 | 68.1% |
-| `search` | 29 | 18.1% |
-| `open` | 16 | 10% |
-| `edit` | 5 | 3.1% |
+| `other` | 117 | 69.6% |
+| `search` | 29 | 17.3% |
+| `open` | 16 | 9.5% |
+| `edit` | 5 | 3% |
 | `verify` | 1 | 0.6% |
 
 | skill | loads | share |
 | --- | ---: | ---: |
-| `writing/japanese` | 2 | 66.7% |
-| `delivery/pipeline-setup` | 1 | 33.3% |
+| `writing/japanese` | 2 | 50% |
+| `delivery/pipeline-setup` | 1 | 25% |
+| `japanese` | 1 | 25% |
 
 ## All time
 
@@ -235,7 +238,7 @@ What the agents do when they reach for a shell. `search` without a matching `ope
 | | p50 | p90 | p99 | max | total |
 | --- | ---: | ---: | ---: | ---: | ---: |
 | tokens per run | 1,009,482 | 1,009,482 | 1,009,482 | 1,009,482 | 1,199,905 |
-| messages per session | 154 | 216 | 216 | 216 | 488 |
+| messages per session | 154 | 240 | 240 | 240 | 512 |
 
 | agent | sessions | share |
 | --- | ---: | ---: |
@@ -247,18 +250,19 @@ What the agents do when they reach for a shell. `search` without a matching `ope
 
 | tool | calls | failed | refused | failure rate |
 | --- | ---: | ---: | ---: | ---: |
-| `bash` | 160 | 3 | 3 | 1.9% |
+| `bash` | 168 | 3 | 3 | 1.8% |
 | `read` | 50 | 0 | 0 | 0% |
 | `edit` | 16 | 0 | 0 | 0% |
 | `grep` | 10 | 0 | 0 | 0% |
+| `load_skill` | 4 | 0 | 0 | 0% |
 | `write` | 4 | 0 | 0 | 0% |
 | `get_pr` | 3 | 0 | 0 | 0% |
-| `load_skill` | 3 | 0 | 0 | 0% |
 | `commit_and_push` | 2 | 0 | 0 | 0% |
 | `create_pr` | 2 | 0 | 0 | 0% |
 | `fetch` | 2 | 0 | 0 | 0% |
 | `glob` | 2 | 0 | 0 | 0% |
 | `list` | 2 | 0 | 0 | 0% |
+| `request_close_issue` | 2 | 0 | 0 | 0% |
 | `check_merge_readiness` | 1 | 0 | 0 | 0% |
 | `create_root_issue` | 1 | 0 | 0 | 0% |
 | `delegate_readonly` | 1 | 0 | 0 | 0% |
@@ -270,23 +274,23 @@ What the agents do when they reach for a shell. `search` without a matching `ope
 | `list_issues` | 1 | 0 | 0 | 0% |
 | `list_pr_review_comments` | 1 | 0 | 0 | 0% |
 | `list_prs` | 1 | 0 | 0 | 0% |
-| `request_close_issue` | 1 | 0 | 0 | 0% |
 | `search_code` | 1 | 0 | 0 | 0% |
 
 What the agents do when they reach for a shell. `search` without a matching `open` is the shape that produced this project's most expensive runs; `edit` against `verify` is the shape that turned out not to occur at all.
 
 | act | calls | share |
 | --- | ---: | ---: |
-| `other` | 109 | 68.1% |
-| `search` | 29 | 18.1% |
-| `open` | 16 | 10% |
-| `edit` | 5 | 3.1% |
+| `other` | 117 | 69.6% |
+| `search` | 29 | 17.3% |
+| `open` | 16 | 9.5% |
+| `edit` | 5 | 3% |
 | `verify` | 1 | 0.6% |
 
 | skill | loads | share |
 | --- | ---: | ---: |
-| `writing/japanese` | 2 | 66.7% |
-| `delivery/pipeline-setup` | 1 | 33.3% |
+| `writing/japanese` | 2 | 50% |
+| `delivery/pipeline-setup` | 1 | 25% |
+| `japanese` | 1 | 25% |
 
 ## Degraded answers
 
@@ -302,10 +306,12 @@ Every declared server has been called at least once.
 
 Skills never loaded:
 
-- `docs/customer-doc`
-- `engineering/environment`
-- `engineering/secrets-in-a-check`
-- `research/web-search`
-- `security/agent-prompt-surface`
-- `security/gh-actions-surface`
-- `security/on-demand-audit`
+- `delivery/pipeline-setup/SKILL`
+- `docs/customer-doc/SKILL`
+- `engineering/environment/SKILL`
+- `engineering/secrets-in-a-check/SKILL`
+- `research/web-search/SKILL`
+- `security/agent-prompt-surface/SKILL`
+- `security/gh-actions-surface/SKILL`
+- `security/on-demand-audit/SKILL`
+- `writing/japanese/SKILL`
