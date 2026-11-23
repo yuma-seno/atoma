@@ -1,5 +1,5 @@
 ---
-name: security/on-demand-audit
+name: on-demand-audit
 description: Load when asked to run a security audit of a repository, or when dispatching one — the whole procedure both the agent that requests it and the run that executes it follow. Scope, areas, lenses, scanner and advisory sources, the refutation pass, the findings format, the previous round's comparison, and what may be written on a public thread.
 ---
 
@@ -126,7 +126,7 @@ page (`https://osv.dev/vulnerability/<ID>`) or the advisory database it was
 published in. A summary is written to be read at a glance, not to be relied on, and
 a severity copied out of a search result is how a wrong finding is born.
 
-The `research/web-search` skill covers how to fetch and how to search when the
+The `web-search` skill covers how to fetch and how to search when the
 address is not known.
 
 ## 6. Refute every candidate before it is reported

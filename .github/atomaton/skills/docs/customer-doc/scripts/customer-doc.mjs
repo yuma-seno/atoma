@@ -11,7 +11,7 @@
  *
  * Two legs, and which one runs is decided by the template:
  *
- * - a `.fodt`/`.fodp`/`.fods` template (the shipped ones under `templates/`, or
+ * - a `.fodt`/`.fodp`/`.fods` template (the shipped ones under `assets/templates/`, or
  *   the agent's copy of one) is filled **as text** — placeholders substituted in
  *   the XML, then `--convert-to` the requested binary format. The filled flat
  *   file is kept next to the output as the diffable record of what was filled —
@@ -42,7 +42,7 @@ import { basename, dirname, join, resolve } from "node:path";
 import { CACHE_DIR, convert, deps, ensure, record } from "./deps.mjs";
 
 const HERE = dirname(new URL(import.meta.url).pathname);
-const TEMPLATES = join(HERE, "templates");
+const TEMPLATES = join(HERE, "..", "assets", "templates");
 
 /** The shipped default template per output format, as flat ODF text. */
 const DEFAULT_TEMPLATES = {

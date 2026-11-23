@@ -69,14 +69,14 @@ covers five areas shallowly is the thing this division of work exists to avoid.
 
 ## Before anything else
 
-Load `security/on-demand-audit`. It is the procedure — how to find the scope, how
+Load `on-demand-audit`. It is the procedure — how to find the scope, how
 the lenses are applied, what counts as evidence, what the report contains, and how a
 finding is checked against an advisory. Read it before the first file, because the
 shape of the report decides what you collect while reading, and a report assembled
 at the end from memory is one whose locations are wrong.
 
-Load `security/gh-actions-surface` when the area you were given includes workflow
-files, and `security/agent-prompt-surface` when it includes anything that feeds an
+Load `gh-actions-surface` when the area you were given includes workflow
+files, and `agent-prompt-surface` when it includes anything that feeds an
 agent's instructions or tool set. Both are deeper than the lenses in the core
 procedure, which is why they are separate.
 

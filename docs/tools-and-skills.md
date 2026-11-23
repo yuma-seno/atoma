@@ -338,18 +338,44 @@ of the result gives it away.
 
 ## Skill catalog format
 
-Skills are loaded recursively from `--skills-dir`.
+Skills are loaded recursively from `--skills-dir`, in the folder form
+[agentskills.io specifies](https://agentskills.io/specification).
 
-Each `.md` file must include:
+A skill is a directory holding a `SKILL.md`. The rest of the directory is the
+skill's own: `scripts/`, `references/` and `assets/` are where its instructions
+expect to find things, and the loader reads none of them. A directory above a
+skill is only grouping — it is searched for skills and is not one itself, so a
+`<category>` there is the project's arrangement and not part of the name.
 
-- YAML frontmatter with non-empty `name` and `description`
-- non-empty instruction body
+```
+skills/
+  engineering/
+    environment/
+      SKILL.md              # name: environment
+      scripts/probe.sh
+  docs/
+    customer-doc/
+      SKILL.md              # name: customer-doc
+      scripts/customer-doc.mjs
+      assets/templates/report.fodt
+```
+
+`SKILL.md` must carry YAML frontmatter and a non-empty instruction body. The
+frontmatter:
+
+| Field | Rule |
+| --- | --- |
+| `name` | 1–64 characters of lowercase letters, digits and single hyphens; no leading or trailing hyphen; exactly the name of the directory it sits in |
+| `description` | non-empty, at most 1024 characters |
+
+Fields the spec defines and Atoma does not use yet — `license`, `compatibility`,
+`metadata`, `allowed-tools` — are accepted and ignored. Nothing renders them.
 
 Example:
 
 ```markdown
 ---
-name: engineering/tdd
+name: tdd
 description: Test first.
 ---
 
@@ -360,7 +386,9 @@ Loader safety checks:
 
 - symbolic links are rejected
 - duplicate `name` values are rejected
-- malformed frontmatter or empty instructions fail startup
+- a file that is not a `SKILL.md` is ignored rather than parsed
+- malformed frontmatter, a rule above broken, or empty instructions fail startup
+  with an error naming the file and the rule
 
 ## Progressive disclosure of skills
 

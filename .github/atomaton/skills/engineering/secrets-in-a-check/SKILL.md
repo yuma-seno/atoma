@@ -1,5 +1,5 @@
 ---
-name: engineering/secrets-in-a-check
+name: secrets-in-a-check
 description: Load when a check you were asked for needs a real credential to mean anything — why that check does not belong in the pull request, what to do instead, and how to ask a person before a secret is spent.
 ---
 
@@ -18,7 +18,7 @@ Three walls, and the first two are what you will hit:
   credentials its own configuration declares; `github` and `atomaton` hold a token
   and `shell` does not. So `curl`, `gh` and `printenv` have nothing to send, and
   `curl` and `gh` are refused outright for the routing reason
-  (`engineering/environment` covers what to do about a refusal).
+  (`environment` covers what to do about a refusal).
 - **A pull request may not decide its own execution environment, and nothing that
   runs for one holds a secret.** That is not a rule you can work around: the step
   that runs a pull request's declared commands has *nowhere to write a credential*,

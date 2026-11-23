@@ -198,7 +198,7 @@ pub struct RunArgs {
     #[arg(long, value_name = "FILE")]
     pub tools_file: Option<PathBuf>,
 
-    /// Directory containing dynamically loadable skill Markdown files
+    /// Directory holding the skills, one `SKILL.md` per skill directory
     #[arg(long, value_name = "DIR")]
     pub skills_dir: Option<PathBuf>,
 

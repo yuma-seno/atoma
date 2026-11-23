@@ -1,5 +1,5 @@
 ---
-name: writing/japanese
+name: japanese
 description: Load before writing for a person in Japanese — the run's report, a question or consultation, a pull request body, a handoff, a sub-issue. Japanese sentence craft for reports — subject–predicate alignment, plain verbs over AI-flavoured metaphor, sentence endings, bullets and folds. Adapted from yomiyasu v2.5.0 (MIT).
 ---
 

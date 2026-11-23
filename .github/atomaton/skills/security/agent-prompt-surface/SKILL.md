@@ -1,5 +1,5 @@
 ---
-name: security/agent-prompt-surface
+name: agent-prompt-surface
 description: Load when a security audit covers an autonomous agent, its prompts, or its tool configuration — how text that an outside party controls reaches instructions something acts on, what each agent may reach, and how a sub-run can carry reach its caller does not have.
 ---
 

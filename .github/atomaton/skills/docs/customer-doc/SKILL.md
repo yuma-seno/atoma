@@ -1,5 +1,5 @@
 ---
-name: docs/customer-doc
+name: customer-doc
 description: Load when a run must deliver a document a customer will open — a docx report, a pptx deck or an xlsx estimate — by filling a template from a data file, rendering every page to an image and reading those images until the layout is right, then reporting what was produced and what a person still has to check.
 ---
 
@@ -11,7 +11,7 @@ that puts the run's data into a template, and a **visual loop** that renders the
 result and reads every page of it. A run that fills and does not look has not
 finished the job; it has produced a file and does not know what is in it.
 
-The scripts, both beside this file in the shipped tree:
+The scripts, both under `scripts/` beside this file in the shipped tree:
 
 | Script | What it is for |
 | --- | --- |
@@ -19,7 +19,7 @@ The scripts, both beside this file in the shipped tree:
 | `deps.mjs` | the LibreOffice, CJK-font and venv install both legs below use |
 
 Dependencies are installed on demand into the cache directory and never into
-`environment.setup_commands`. `bun "${ATOMATON_MACHINERY_ROOT:-.}/.github/atomaton/skills/docs/customer-doc.mjs" deps` installs and reports
+`environment.setup_commands`. `bun "${ATOMATON_MACHINERY_ROOT:-.}/.github/atomaton/skills/docs/customer-doc/scripts/customer-doc.mjs" deps` installs and reports
 everything the other subcommands use, so a first run on a machine pays once:
 measured 9–39 s for LibreOffice (a 213 MB tarball, 15 `.deb`s extracted, 584 MB
 unpacked, the difference being the download), 3.4 s for the CJK fonts, 2.4 s for the venv, and under a second each
@@ -34,9 +34,9 @@ under a second.
 | any other path — a customer's `.docx`, `.pptx`, `.xlsx` | **UNO** | a headless LibreOffice opens the template, replaces the placeholders in the document model, and stores it back |
 
 ```bash
-bun "${ATOMATON_MACHINERY_ROOT:-.}/.github/atomaton/skills/docs/customer-doc.mjs" fill --template docx --data data.json --out out/report.docx
-bun "${ATOMATON_MACHINERY_ROOT:-.}/.github/atomaton/skills/docs/customer-doc.mjs" fill --template /path/to/customer-form.docx --data data.json --out out/form.docx
-bun "${ATOMATON_MACHINERY_ROOT:-.}/.github/atomaton/skills/docs/customer-doc.mjs" render out/report.docx --outdir out/render --dpi 120
+bun "${ATOMATON_MACHINERY_ROOT:-.}/.github/atomaton/skills/docs/customer-doc/scripts/customer-doc.mjs" fill --template docx --data data.json --out out/report.docx
+bun "${ATOMATON_MACHINERY_ROOT:-.}/.github/atomaton/skills/docs/customer-doc/scripts/customer-doc.mjs" fill --template /path/to/customer-form.docx --data data.json --out out/form.docx
+bun "${ATOMATON_MACHINERY_ROOT:-.}/.github/atomaton/skills/docs/customer-doc/scripts/customer-doc.mjs" render out/report.docx --outdir out/render --dpi 120
 ```
 
 The full path matters: the scripts are not in a run's working directory, so every
@@ -50,7 +50,7 @@ is the only leg there is.
 
 ## 2. The templates and the placeholder contract
 
-Three defaults ship under `templates/`, each a flat ODF file with a comment header
+Three defaults ship under `assets/templates/`, each a flat ODF file with a comment header
 that states what was measured about it:
 
 | File | Format | Shape |
@@ -179,7 +179,7 @@ they apply whenever the data that flows through a template hits the trap.
 ## 4. The UNO leg, for a template someone handed over
 
 ```bash
-bun "${ATOMATON_MACHINERY_ROOT:-.}/.github/atomaton/skills/docs/customer-doc.mjs" fill --template customer-form.docx --data data.json --out out/form.docx
+bun "${ATOMATON_MACHINERY_ROOT:-.}/.github/atomaton/skills/docs/customer-doc/scripts/customer-doc.mjs" fill --template customer-form.docx --data data.json --out out/form.docx
 ```
 
 It starts a headless LibreOffice with a pinned profile, opens the template
@@ -199,14 +199,14 @@ through `uno.systemPathToFileUrl`; `uno.Enum` rather than `getConstantByName`; a
 killed office leaving `.~lock.<name>#` beside the file — which is why the fill
 copies the template into a temporary directory rather than opening the caller's.
 
-`bun "${ATOMATON_MACHINERY_ROOT:-.}/.github/atomaton/skills/docs/customer-doc.mjs" uno --script <file.py>` runs any UNO program against the
+`bun "${ATOMATON_MACHINERY_ROOT:-.}/.github/atomaton/skills/docs/customer-doc/scripts/customer-doc.mjs" uno --script <file.py>` runs any UNO program against the
 same listener, for the document a substitution cannot express.
 
 ## 5. The visual loop — render, read, fix, and say what you looked at
 
 ```bash
-bun "${ATOMATON_MACHINERY_ROOT:-.}/.github/atomaton/skills/docs/customer-doc.mjs" render out/report.docx --outdir out/render --dpi 120   # every page
-bun "${ATOMATON_MACHINERY_ROOT:-.}/.github/atomaton/skills/docs/customer-doc.mjs" render out/deck.pptx --outdir out/render --dpi 110 --pages 1-3
+bun "${ATOMATON_MACHINERY_ROOT:-.}/.github/atomaton/skills/docs/customer-doc/scripts/customer-doc.mjs" render out/report.docx --outdir out/render --dpi 120   # every page
+bun "${ATOMATON_MACHINERY_ROOT:-.}/.github/atomaton/skills/docs/customer-doc/scripts/customer-doc.mjs" render out/deck.pptx --outdir out/render --dpi 110 --pages 1-3
 ```
 
 The render goes file → PDF → one PNG per page, and its JSON line carries each
@@ -258,9 +258,9 @@ One table, in this order, then the open items:
 
 | Step | Command | Duration | Result |
 | --- | --- | --- | --- |
-| dependencies | `bun "${ATOMATON_MACHINERY_ROOT:-.}/.github/atomaton/skills/docs/customer-doc.mjs" deps` | 46 s first run, <1 s after | `installed` / `cached` per dependency |
-| fill | `bun "${ATOMATON_MACHINERY_ROOT:-.}/.github/atomaton/skills/docs/customer-doc.mjs" fill …` | about 0.3 s flat, 0.5–1.5 s UNO | `keysNotInTemplate` / `leftInTemplate` / `unfilled` |
-| render | `bun "${ATOMATON_MACHINERY_ROOT:-.}/.github/atomaton/skills/docs/customer-doc.mjs" render …` | 0.6–0.8 s for 3–4 pages | page count and pixel size per page |
+| dependencies | `bun "${ATOMATON_MACHINERY_ROOT:-.}/.github/atomaton/skills/docs/customer-doc/scripts/customer-doc.mjs" deps` | 46 s first run, <1 s after | `installed` / `cached` per dependency |
+| fill | `bun "${ATOMATON_MACHINERY_ROOT:-.}/.github/atomaton/skills/docs/customer-doc/scripts/customer-doc.mjs" fill …` | about 0.3 s flat, 0.5–1.5 s UNO | `keysNotInTemplate` / `leftInTemplate` / `unfilled` |
+| render | `bun "${ATOMATON_MACHINERY_ROOT:-.}/.github/atomaton/skills/docs/customer-doc/scripts/customer-doc.mjs" render …` | 0.6–0.8 s for 3–4 pages | page count and pixel size per page |
 | visual loop | (the agent reading the images) | | what was wrong, what was changed, what is still wrong |
 
 Then: the paths of the produced files, the page count, and a **"what still needs

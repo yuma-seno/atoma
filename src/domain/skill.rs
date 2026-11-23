@@ -33,30 +33,26 @@ pub const LOAD_SKILL_ARGUMENT: &str = "skill_name";
 
 /// What to say when a tool call names a skill instead of a tool.
 ///
-/// A reviewer called `engineering/environment` as a tool and was told only "Invalid tool
-/// name format (expected server__tool)". It did not call the loader afterwards -- it
-/// reported to the pull request that it HAD run the skill, which was read by a person.
+/// A reviewer called a skill as a tool and was told only "Invalid tool name format
+/// (expected server__tool)". It did not call the loader afterwards -- it reported to the
+/// pull request that it HAD run the skill, which was read by a person.
 ///
 /// It reached for that name because the prompt hands it one: skills are listed as
-/// ``- `engineering/environment`: ...`` and the prose says "Load `engineering/environment`",
-/// in the same backticked shape a tool name takes. Presenting them so they cannot be
-/// confused is the better fix and belongs in the prompt; this is the message for when
-/// the confusion happens anyway, and it names the call that works rather than the rule
-/// that was broken -- measured three times in this project as the difference between a
+/// ``- `environment`: ...`` backticked, in the same shape a tool name takes, and a model
+/// that had only the name could not tell the two apart. This is the message for when the
+/// confusion happens anyway, and it names the call that works rather than the rule that
+/// was broken -- measured three times in this project as the difference between a
 /// refusal that is followed and one that is not.
 ///
-/// Only for a name shaped like a skill path. Anything else keeps the format error,
-/// which is the honest answer for a tool name that is simply wrong.
-pub fn skill_called_as_tool_message(name: &str) -> Option<String> {
-    let (head, tail) = name.split_once('/')?;
-    if head.is_empty() || tail.is_empty() || tail.contains('/') {
-        return None;
-    }
-    Some(format!(
+/// The [`SkillCatalog`] holds the names, so the caller asks it first and only formats
+/// here: what a skill is called is a fact about the catalog, not about the shape of a
+/// string.
+pub fn skill_called_as_tool_message(name: &str) -> String {
+    format!(
         "'{name}' is a skill, not a tool. A skill is loaded, not called: use {LOAD_SKILL_TOOL} \
          with {{\"{LOAD_SKILL_ARGUMENT}\": \"{name}\"}}, then follow what it returns. \
          Nothing has run yet."
-    ))
+    )
 }
 
 /// Metadata exposed in the system prompt before a skill is loaded.
@@ -110,11 +106,10 @@ mod skill_called_as_tool_tests {
     /// The property is that the message names the call that works. A reviewer that saw
     /// only "expected server__tool" went on to tell a pull request it had run the skill.
     #[test]
-    fn a_skill_path_is_told_which_tool_loads_it() {
-        let message =
-            skill_called_as_tool_message("engineering/environment").expect("a skill path");
+    fn a_skill_name_is_told_which_tool_loads_it() {
+        let message = skill_called_as_tool_message("environment");
         assert!(message.contains(LOAD_SKILL_TOOL));
-        assert!(message.contains("engineering/environment"));
+        assert!(message.contains("environment"));
     }
 
     /// The corrected call is one a model copies verbatim, so the argument's name has to
@@ -127,11 +122,9 @@ mod skill_called_as_tool_tests {
     /// tool and the skill but never the key.
     #[test]
     fn the_corrected_call_names_the_argument_the_tool_takes() {
-        let message = skill_called_as_tool_message("engineering/tdd").expect("a skill path");
+        let message = skill_called_as_tool_message("tdd");
         assert!(
-            message.contains(&format!(
-                r#"{{"{LOAD_SKILL_ARGUMENT}": "engineering/tdd"}}"#
-            )),
+            message.contains(&format!(r#"{{"{LOAD_SKILL_ARGUMENT}": "tdd"}}"#)),
             "{message}"
         );
     }
@@ -140,21 +133,7 @@ mod skill_called_as_tool_tests {
     /// agent reporting the skill as having run.
     #[test]
     fn the_message_says_nothing_has_run() {
-        let message =
-            skill_called_as_tool_message("review/quick-quality-gate").expect("a skill path");
+        let message = skill_called_as_tool_message("on-demand-audit");
         assert!(message.to_lowercase().contains("nothing has run"));
-    }
-
-    /// A tool name that is simply wrong keeps the format error. Widening this to every
-    /// unrecognised name would answer "did you mean a skill?" to a hallucinated tool,
-    /// which reads as confirmation that the skill exists.
-    #[test]
-    fn a_name_that_is_not_a_skill_path_is_left_alone() {
-        for name in ["github", "create_pr", "a/b/c", "/leading", "trailing/"] {
-            assert!(
-                skill_called_as_tool_message(name).is_none(),
-                "{name} should keep the format error"
-            );
-        }
     }
 }

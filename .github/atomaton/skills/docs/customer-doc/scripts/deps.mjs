@@ -1,8 +1,8 @@
 #!/usr/bin/env bun
 /**
- * deps.mjs — the on-demand install that `docs/customer-doc` runs.
+ * deps.mjs — the on-demand install that `customer-doc` runs.
  *
- * `docs/customer-doc` writes all three Office formats, drives LibreOffice over
+ * `customer-doc` writes all three Office formats, drives LibreOffice over
  * UNO and renders pages as images. Every leg of it needs the same LibreOffice
  * unpacked under a cache directory with `dpkg-deb -x` — no root, and nothing
  * added to `environment.setup_commands` — and the release tarball is a 213MB

@@ -1,5 +1,5 @@
 ---
-name: security/gh-actions-surface
+name: gh-actions-surface
 description: Load when a security audit covers CI and workflow files — how a GitHub Actions workflow is reached from outside, which values it trusts, what a token in it may do, and what evidence each of those answers with.
 ---
 

@@ -25,7 +25,7 @@ Then the paths, because the path of each thing here is how you know what it is.
 | `config.yaml` | Every setting this project declares. |
 | `agent-definitions/<name>.md` | One agent: which model, which tools, and the role prompt. `<name>` is what `/<name>` dispatches. |
 | `prompt-template.md` | The system prompt each role prompt is placed into. |
-| `skills/<category>/<name>.md` | Instructions loaded on demand. `<category>/<name>` is the name an agent asks for. |
+| `skills/<category>/<skill-name>/SKILL.md` | One skill: instructions loaded on demand, beside the `scripts/` and `assets/` they reach for. `<skill-name>` is the name an agent asks for, and the directory is named after it. |
 | `rulesets/main.json` | Branch protection, in GitHub's import format rather than ours. |
 | `delegates/delegates.yaml` | Which server offers which delegate folders. Edit it to add one, or to change what they are called. |
 | `delegates/<name>/agent.md` | One delegate: the provider, the model, and the role prompt its sub-run is started with. **The model is the field you are most likely to want.** |
@@ -40,8 +40,9 @@ the file that names it.
 ## The agents and skills that ship
 
 **Both are a template, not a fixed set.** An agent exists exactly when a
-definition for it does, and a skill exists exactly when a file for it does.
-Nothing counts them, and nothing names them outside the files themselves.
+definition for it does, and a skill exists exactly when a directory holding a
+`SKILL.md` does. Nothing counts them, and nothing names them outside the files
+themselves.
 
 | Agent | What it is for |
 | --- | --- |
@@ -51,22 +52,23 @@ Nothing counts them, and nothing names them outside the files themselves.
 | `architect` | Decides how to build something when it cannot be worked out from where the question was asked, and writes the decision down. Builds nothing. |
 | `auditor` | Audits one area of the repository for security weaknesses when asked, and reports evidence-backed findings. Changes nothing. |
 
-| Skill | When an agent loads it |
-| --- | --- |
-| `delivery/pipeline-setup` | `checks` is empty, a pull request comes back with no required check, or nothing deploys on merge. |
-| `docs/customer-doc` | A run must deliver a document a customer will open — a docx report, a pptx deck or an xlsx estimate. |
-| `engineering/environment` | Something needed is not installed, an install fails, or the work tree is broken. |
-| `engineering/secrets-in-a-check` | A check you were asked for needs a real credential to mean anything. |
-| `research/web-search` | The answer is not in this repository. |
-| `security/on-demand-audit` | Asked to run a security audit, or dispatching one — the procedure both ends follow. |
-| `security/gh-actions-surface` | An audit covers CI and workflow files. |
-| `security/agent-prompt-surface` | An audit covers an agent, its prompts, or its tool configuration. |
-| `writing/japanese` | Writing for a person in Japanese — the report, a question, a pull request body. |
+| Skill | Where it lives | When an agent loads it |
+| --- | --- | --- |
+| `agent-prompt-surface` | `security/` | An audit covers an agent, its prompts, or its tool configuration. |
+| `customer-doc` | `docs/` | A run must deliver a document a customer will open — a docx report, a pptx deck or an xlsx estimate. |
+| `environment` | `engineering/` | Something needed is not installed, an install fails, or the work tree is broken. |
+| `gh-actions-surface` | `security/` | An audit covers CI and workflow files. |
+| `japanese` | `writing/` | Writing for a person in Japanese — the report, a question, a pull request body. |
+| `on-demand-audit` | `security/` | Asked to run a security audit, or dispatching one — the procedure both ends follow. |
+| `pipeline-setup` | `delivery/` | `checks` is empty, a pull request comes back with no required check, or nothing deploys on merge. |
+| `secrets-in-a-check` | `engineering/` | A check you were asked for needs a real credential to mean anything. |
+| `web-search` | `research/` | The answer is not in this repository. |
 
 `skills/project/` is yours outright — the template ships nothing there and an
 upgrade will not fight you for it. The ones above are defaults the template also
-expects you to tune. Adding an agent or a skill is a new file; the paths and the
-frontmatter are in
+expects you to tune. Adding an agent or a skill is one new definition — a `.md`
+file for an agent, a directory holding a `SKILL.md` for a skill — and the paths and
+the frontmatter are in
 [the documentation](https://github.com/yuma-seno/atomaton/blob/main/docs/agents/overview.md).
 
 ## What is not here
