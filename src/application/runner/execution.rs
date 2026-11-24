@@ -11,7 +11,7 @@ use crate::domain::context_budget;
 use crate::domain::ports::{FinishReason, LlmPort, ToolCallResult, ToolPort};
 use crate::domain::repetition::{Repetition, RepetitionDetector};
 use crate::domain::session::{Message, Session, ToolCall};
-use crate::domain::tool_loop::{CallOutcome, LoopTracker};
+use crate::domain::tool_loop::{CallOutcome, LoopTracker, LoopVerdict};
 use crate::infra::llm::shared::{StreamInterrupted, MAX_STREAM_RETRIES};
 
 use super::RunFacts;
@@ -269,7 +269,7 @@ async fn execute_tool_calls(
     // The remaining calls are NOT executed. Once the run is over, taking further
     // actions is doing work that has already been decided against; they are answered
     // instead, which keeps the conversation whole without committing anything.
-    let mut abort: Option<String> = None;
+    let mut abort: Option<LoopVerdict> = None;
 
     for tool_call in tool_calls {
         if abort.is_some() {
@@ -314,8 +314,7 @@ async fn execute_tool_calls(
                 // answer changed -- see `domain::tool_loop`. A call carrying only
                 // images or metadata answered with something, just not with words.
                 abort = if result.content.is_empty() && !result.images.is_empty() {
-                    loop_tracker.record_informative();
-                    None
+                    loop_tracker.record(&signature, CallOutcome::Informative)
                 } else {
                     loop_tracker.record(&signature, CallOutcome::Answered(&result.content))
                 };
@@ -346,7 +345,7 @@ async fn execute_tool_calls(
                 session.messages.push(Message::tool(&tool_call.id, &msg));
                 abort = loop_tracker
                     .record(&signature, CallOutcome::Failed)
-                    .map(|reason| format!("{reason} Last error: {e}"));
+                    .map(|verdict| verdict.with_last_error(e.to_string()));
             }
         }
     }
@@ -357,8 +356,13 @@ async fn execute_tool_calls(
         return Ok(true);
     }
 
-    if let Some(reason) = abort {
-        bail!(reason);
+    if let Some(verdict) = abort {
+        // In `facts` as well as in the error. The `--output json` envelope and the
+        // session's run history are both built from the facts, and whoever offers this
+        // stopped run a second turn needs the rule, the repeated call and where the run
+        // was -- not a sentence to parse (#35).
+        facts.loop_abort = Some(verdict.clone());
+        return Err(verdict.into());
     }
 
     Ok(session_ends)
@@ -750,6 +754,9 @@ pub async fn inference_loop(
             {
                 Ok(()) => {
                     facts.compactions += 1;
+                    // The session no longer holds what the model had read, so reading
+                    // the same file again is recovery rather than a loop.
+                    loop_tracker.reset_after_compaction();
                     // The count rides the run's record and the envelope; this log
                     // line is the person-facing note that the session changed
                     // shape underneath the work (the per-compaction detail is in

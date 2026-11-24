@@ -20,6 +20,7 @@ use crate::domain::session::{
 };
 use crate::domain::skill::SkillCatalog;
 use crate::domain::tool::unknown_server_message;
+use crate::domain::tool_loop::LoopVerdict;
 
 // The sentinel types stay unexported on purpose. `is_soft_stop` is the whole
 // question anyone outside asks about them, and exporting the types invites each
@@ -177,6 +178,13 @@ pub struct RunRecord {
     /// than claiming no server was called.
     #[serde(default)]
     pub server_calls: BTreeMap<String, BTreeMap<String, usize>>,
+    /// The loop guard's verdict, when this run was stopped by it (#35).
+    ///
+    /// `ended_because` says the run stopped; this says what it was repeating and where
+    /// in the run it was. `#[serde(default)]` for the sessions written before it
+    /// existed, where `None` is the honest answer: nothing was recorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub loop_abort: Option<LoopVerdict>,
 }
 
 /// Append this run to the session's own record of its runs.
@@ -208,6 +216,7 @@ fn record_run(session: &mut Session, facts: &RunFacts) {
         compactions: facts.compactions,
         iterations: facts.iterations,
         server_calls: facts.server_calls.clone(),
+        loop_abort: facts.loop_abort.clone(),
     };
     match serde_json::to_value(&record) {
         Ok(value) => runs.push(value),

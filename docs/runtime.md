@@ -157,6 +157,7 @@ read an answer.
 | `usage.written_prompt_tokens` | number \| null | How much of the prompt the provider wrote into its cache. `null` on the same terms. |
 | `session_path` | string \| null | Where the session was written, when `--in-session` or `--out-session` asked for one. |
 | `ended_because` | string | Why the run ended: one of the five words below. |
+| `loop_abort` | object \| null | The loop guard's verdict, `null` when the guard did not stop this run. `rule` is `identical_failures`, `identical_answers`, `cycle` or `empty_results`; `tool` and `arguments` name the call that repeated (`arguments` shortened, with the real size when it was cut); `count` is how many calls the rule counted; `call` is which tool call of the run the verdict was reached on, counting from 1; `capped` says the repeated answer was itself truncated by the output cap, so the same call cannot return what was cut; `last_error` carries the error text for `identical_failures`. |
 | `seconds` | number | Wall clock for the whole run, including parsing the agent definition and starting every tool server. |
 | `iterations` | number | Round trips the inference loop made. Counted as each response arrives, so a contentless completion that was re-requested counts — it was waited on and it was billed. A compaction's summarizing inference is a round trip in `usage` but not in this count: it is not a turn of the conversation. |
 
@@ -177,7 +178,8 @@ ceiling was hit, while the word says it exactly.
 
 The same five words, with `seconds` and `iterations`, are also appended to the session
 file as `atoma_runs` — one record per run, so a resumed session carries the history of
-every run that touched it. Both are built from the same measurements. The difference is
+every run that touched it. A run the loop guard stopped carries the same `loop_abort`
+object there, so the file says what the run was repeating and not only that it stopped. Both are built from the same measurements. The difference is
 that the envelope describes one run and is always printed, while `atoma_runs` is the
 history and exists only when `--in-session` or `--out-session` asked for a file.
 

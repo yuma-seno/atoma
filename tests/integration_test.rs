@@ -810,6 +810,104 @@ async fn test_identical_failed_tool_calls_abort() {
     assert!(!message.contains("maximum iterations"), "{message}");
 }
 
+/// Four identical reads abort, and the abort says which file was being read and where
+/// in the run it happened -- without it, resuming the run meant digging through the log
+/// first (#35).
+#[tokio::test]
+async fn test_repeated_identical_reads_abort_naming_the_file() {
+    use common::mock_llm::make_tool_call;
+
+    let call = |id: &str| make_tool_call(id, "read", r#"{"path":"src/x.ts"}"#);
+    let llm = MockLlmClient::new()
+        .enqueue_tool_calls(vec![call("c1")])
+        .enqueue_tool_calls(vec![call("c2")])
+        .enqueue_tool_calls(vec![call("c3")])
+        .enqueue_tool_calls(vec![call("c4")]);
+
+    let registry = MockMcpRegistry::new()
+        .with_tool("read", "Read a file")
+        .with_response("read", "contents of x");
+    let agent_port = StubAgentDefPort {
+        agent_def: AgentDef {
+            mcp_servers: vec!["srv".to_string()],
+            ..minimal_agent("LoopAgent")
+        },
+    };
+    let session_port = RecordingSessionPort::default();
+    let saved = session_port.saved.clone();
+    let tool_def_port = SingleEntryToolDefPort::new("srv");
+    let mcp_factory = StubMcpFactory::new(registry);
+
+    let dir = tempdir().unwrap();
+    let agent_path = dir.path().join("agent.md");
+    std::fs::write(&agent_path, "").unwrap();
+    let tools_path = dir.path().join("tools.yaml");
+    std::fs::write(&tools_path, "").unwrap();
+
+    let mut facts = atoma::application::runner::RunFacts::default();
+    let error = run(
+        RunSettings {
+            agent_def_path: agent_path,
+            in_session: None,
+            prompt_file: None,
+            out_session: Some(dir.path().join("session.json")),
+            template_path: None,
+            tools_file: Some(tools_path),
+            skills_dir: None,
+            max_iterations: Some(10),
+            max_runtime: None,
+            stop_file: None,
+            loop_retries: false,
+        },
+        RunDeps {
+            llm: &llm,
+            agent_def: &agent_port,
+            session: &session_port,
+            tool_def: &tool_def_port,
+            skill: &atoma::infra::persistence::skill::FileSkillAdapter,
+            template: &atoma::infra::template::FileTemplateAdapter,
+            mcp_factory: &mcp_factory,
+        },
+        &mut facts,
+    )
+    .await
+    .unwrap_err();
+
+    let message = error.to_string();
+    assert!(message.contains("same answer"), "{message}");
+    assert!(message.contains("src/x.ts"), "{message}");
+    assert!(message.contains("tool calls 1-4 of this run"), "{message}");
+
+    // The same facts travel in the session's record and the JSON envelope, so a caller
+    // deciding what the stopped run does next does not have to parse the sentence.
+    let verdict = facts
+        .loop_abort
+        .as_ref()
+        .expect("a loop abort is a fact this run reports");
+    assert_eq!(
+        verdict.rule,
+        atoma::domain::tool_loop::LoopRule::IdenticalAnswers
+    );
+    assert_eq!(verdict.tool, "read");
+    assert!(verdict.arguments.contains("src/x.ts"), "{verdict:?}");
+    assert_eq!(verdict.count, 4);
+
+    let session = saved
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("a stopped run still saves what it reached");
+    let recorded = session
+        .extra
+        .get("atoma_runs")
+        .and_then(|v| v.as_array())
+        .and_then(|runs| runs.first())
+        .and_then(|run| run.get("loop_abort"))
+        .cloned()
+        .expect("the session records why the guard stopped the run");
+    assert_eq!(recorded["rule"], "identical_answers");
+}
+
 /// A contentless completion is re-requested rather than failing the run.
 #[tokio::test]
 async fn test_empty_completion_is_retried_then_succeeds() {

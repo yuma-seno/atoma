@@ -20,6 +20,7 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use crate::domain::ports::LlmUsage;
+use crate::domain::tool_loop::LoopVerdict;
 
 use super::CompletionReason;
 
@@ -103,6 +104,13 @@ pub struct RunFacts {
     /// record it the same way: a count, not a flag, so a session holding two
     /// compactions reads as two rather than as "some".
     pub compactions: usize,
+    /// The loop guard's verdict, when this run was stopped by it (#35).
+    ///
+    /// Here rather than only in the error because the envelope and the session's run
+    /// history are both built from these facts: whoever offers the stopped run a second
+    /// turn needs the rule, the call that repeated and where the run was, and reading
+    /// those out of a sentence is parsing prose.
+    pub loop_abort: Option<LoopVerdict>,
     /// Where the session was written, if the caller asked for it to be.
     pub session_path: Option<PathBuf>,
 }
@@ -141,6 +149,7 @@ impl Default for RunFacts {
             usage: LlmUsage::default(),
             last_prompt_tokens: None,
             compactions: 0,
+            loop_abort: None,
             session_path: None,
         }
     }
@@ -212,6 +221,10 @@ pub fn envelope(facts: &RunFacts, outcome: Option<&RunOutcome>) -> Value {
         "finish_reason": finish_reason,
         "session_path": session_path,
         "ended_because": facts.ended_because,
+        // `null` for every ending that was not the loop guard, the same way
+        // `response` is null for the endings with no response: a stable key set is
+        // what makes the envelope machine-readable.
+        "loop_abort": facts.loop_abort,
         "seconds": facts.seconds,
         "iterations": facts.iterations,
         // #12. A count, not a flag, for the same reason `iterations` is: a session
@@ -319,6 +332,7 @@ mod tests {
             },
             last_prompt_tokens: Some(100),
             compactions: 0,
+            loop_abort: None,
             session_path: Some(PathBuf::from("/tmp/session.json")),
         }
     }
@@ -397,6 +411,38 @@ mod tests {
         assert_eq!(value["usage"]["total_tokens"], 120);
         assert_eq!(value["iterations"], 4);
         assert_eq!(value["seconds"], 9);
+    }
+
+    /// The loop guard's verdict belongs in the envelope as fields, not only in the
+    /// sentence the log line carries: whoever offers a stopped run its second turn needs
+    /// the rule, the call and where the run was without parsing prose (#35).
+    #[test]
+    fn the_loop_verdict_is_in_the_envelope() {
+        use crate::domain::tool_loop::LoopRule;
+
+        let mut facts = sample_facts();
+        assert_eq!(
+            envelope(&facts, None)["loop_abort"],
+            Value::Null,
+            "a run the guard did not stop reports no verdict, not an empty one"
+        );
+
+        facts.loop_abort = Some(LoopVerdict {
+            rule: LoopRule::IdenticalAnswers,
+            tool: "read".to_string(),
+            arguments: "{\"path\":\"src/x.ts\"}".to_string(),
+            count: 4,
+            call: 47,
+            capped: false,
+            last_error: None,
+        });
+
+        let value = envelope(&facts, None);
+        assert_eq!(value["loop_abort"]["rule"], "identical_answers");
+        assert_eq!(value["loop_abort"]["tool"], "read");
+        assert_eq!(value["loop_abort"]["arguments"], "{\"path\":\"src/x.ts\"}");
+        assert_eq!(value["loop_abort"]["count"], 4);
+        assert_eq!(value["loop_abort"]["call"], 47);
     }
 
     /// The three deliberate stops all exit `2`, and so does clap's own parse error, so

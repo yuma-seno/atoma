@@ -98,11 +98,23 @@ pub fn cap(text: &str, limit: usize) -> Capped {
     let tail: String = text.chars().skip(total - tail_len).collect();
 
     Capped {
-        text: format!(
-            "{head}\n\n[atoma: {dropped} characters dropped from the middle; {limit} shown]\n\n{tail}"
-        ),
+        text: format!("{head}\n\n[atoma: {dropped} {CAP_MARKER} {limit} shown]\n\n{tail}"),
         dropped,
     }
+}
+
+/// The words the cap marker is built from.
+///
+/// Shared with [`is_capped`] rather than written out twice: a reader looking for a
+/// marker the writer spells differently finds nothing, and reports nothing.
+const CAP_MARKER: &str = "characters dropped from the middle;";
+
+/// Whether a result was cut by [`cap`].
+///
+/// The loop guard asks, so an abort can say why repeating the call cannot help: the
+/// same arguments come back with the same truncation (#35).
+pub fn is_capped(text: &str) -> bool {
+    text.contains(CAP_MARKER)
 }
 
 /// The limit for a server, from its configuration or the default.
