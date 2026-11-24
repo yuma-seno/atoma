@@ -314,8 +314,7 @@ async fn execute_tool_calls(
                 // answer changed -- see `domain::tool_loop`. A call carrying only
                 // images or metadata answered with something, just not with words.
                 abort = if result.content.is_empty() && !result.images.is_empty() {
-                    loop_tracker.record_informative();
-                    None
+                    loop_tracker.record(&signature, CallOutcome::Informative)
                 } else {
                     loop_tracker.record(&signature, CallOutcome::Answered(&result.content))
                 };

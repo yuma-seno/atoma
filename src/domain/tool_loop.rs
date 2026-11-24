@@ -271,6 +271,10 @@ impl std::error::Error for LoopVerdict {}
 pub enum CallOutcome<'a> {
     /// The tool answered. The text is what it answered with.
     Answered(&'a str),
+    /// The tool answered with something that is not text: an image, a payload whose
+    /// whole content is its `_meta`. Productive -- something came back that was not
+    /// there before -- with no bytes to compare, so nothing may climb through it.
+    Informative,
     /// The tool failed, or its arguments could not be parsed.
     Failed,
 }
@@ -347,6 +351,7 @@ impl LoopTracker {
                 self.answer_capped = false;
                 self.consecutive_empty_results = 0;
             }
+            CallOutcome::Informative => self.clear_counters(),
             CallOutcome::Answered(text) => {
                 self.failing_signature = None;
                 self.consecutive_failures = 0;
@@ -377,10 +382,10 @@ impl LoopTracker {
 
     /// Clear everything a successful, informative call would clear.
     ///
-    /// For the caller that knows a call succeeded but has no text to offer -- an image,
-    /// a tool whose whole answer is its `_meta`. Treated as productive, because it is:
-    /// something came back that was not there before.
-    pub fn record_informative(&mut self) {
+    /// A call that answered with no text is still a call, which is why it goes through
+    /// `record` and not a separate path: the position a verdict names is counted there,
+    /// and a second way in forgot to count, so an abort named the wrong tool calls.
+    fn clear_counters(&mut self) {
         self.failing_signature = None;
         self.consecutive_failures = 0;
         self.answered_signature = None;
@@ -399,15 +404,9 @@ impl LoopTracker {
     ///
     /// The call position survives: it says where the run is, not what it has read.
     pub fn reset_after_compaction(&mut self) {
-        self.failing_signature = None;
-        self.consecutive_failures = 0;
-        self.answered_signature = None;
-        self.answered_hash = None;
-        self.consecutive_identical_answers = 0;
-        self.answer_capped = false;
+        self.clear_counters();
         self.recent.clear();
         self.consecutive_cycle_steps = 0;
-        self.consecutive_empty_results = 0;
     }
 
     fn verdict(&self, signature: &str) -> Option<LoopVerdict> {
@@ -647,6 +646,30 @@ mod tests {
         assert!(message.contains("src/x.ts"), "{message}");
         assert!(message.contains("tool calls 1-4 of this run"), "{message}");
         assert!(message.contains("same answer"), "{message}");
+    }
+
+    /// An answer with no text is still a call. It used to reach the tracker by a path
+    /// that did not count it, so a verdict after one named the wrong position (#35).
+    #[test]
+    fn an_image_only_answer_counts_as_a_call() {
+        let mut t = LoopTracker::default();
+        assert!(t
+            .record("read:{\"path\":\"a.png\"}", CallOutcome::Informative)
+            .is_none());
+
+        for _ in 0..MAX_IDENTICAL_ANSWERS - 1 {
+            assert!(t
+                .record("read:{\"path\":\"a.ts\"}", ok("contents of a"))
+                .is_none());
+        }
+        let verdict = t
+            .record("read:{\"path\":\"a.ts\"}", ok("contents of a"))
+            .expect("four identical reads is going round");
+
+        assert_eq!(verdict.call, u64::from(MAX_IDENTICAL_ANSWERS) + 1);
+        assert_eq!(verdict.first_call(), 2);
+        let message = verdict.to_string();
+        assert!(message.contains("tool calls 2-5 of this run"), "{message}");
     }
 
     /// A write's arguments are a whole file. What identifies the call is its path, and
