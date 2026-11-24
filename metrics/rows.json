@@ -274,5 +274,41 @@
         "started": "2026-11-23T01:07:32Z"
       }
     ]
+  },
+  {
+    "path": "sessions/issue-35/engineer.json",
+    "agent": "engineer",
+    "messages": 15,
+    "calls": 6,
+    "failed": 0,
+    "refused": 0,
+    "skills": [],
+    "reported": false,
+    "tools": {
+      "read": 5,
+      "bash": 1
+    },
+    "acts": {
+      "other": 1
+    },
+    "runs": [
+      {
+        "compactions": 0,
+        "ended": "2026-11-24T00:13:03Z",
+        "ended_because": "failed",
+        "iterations": 5,
+        "messages": 15,
+        "seconds": 6,
+        "server_calls": {
+          "files": {
+            "read": 5
+          },
+          "shell": {
+            "bash": 1
+          }
+        },
+        "started": "2026-11-24T00:12:57Z"
+      }
+    ]
   }
 ]
