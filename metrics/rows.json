@@ -343,5 +343,43 @@
         "started": "2026-11-24T00:14:21Z"
       }
     ]
+  },
+  {
+    "path": "sessions/issue-35/reviewer.json",
+    "agent": "reviewer",
+    "messages": 20,
+    "calls": 7,
+    "failed": 0,
+    "refused": 0,
+    "skills": [],
+    "reported": false,
+    "tools": {
+      "get_pr": 1,
+      "get_pr_diff": 1,
+      "list": 1,
+      "read": 4
+    },
+    "acts": {},
+    "runs": [
+      {
+        "compactions": 0,
+        "ended": "2026-11-24T00:24:09Z",
+        "ended_because": "failed",
+        "iterations": 5,
+        "messages": 20,
+        "seconds": 13,
+        "server_calls": {
+          "files_readonly": {
+            "list": 1,
+            "read": 4
+          },
+          "github": {
+            "get_pr": 1,
+            "get_pr_diff": 1
+          }
+        },
+        "started": "2026-11-24T00:23:56Z"
+      }
+    ]
   }
 ]
