@@ -60,14 +60,10 @@ function positiveInt(raw, fallback) {
   const value = Number((raw ?? "").trim());
   return Number.isInteger(value) && value > 0 ? value : fallback;
 }
-function nonNegativeInt(raw, fallback) {
-  const value = Number((raw ?? "").trim());
-  return Number.isInteger(value) && value >= 0 ? value : fallback;
-}
 function runWaitOptions(env = process.env) {
   return {
     attempts: positiveInt(env[RUN_WAIT_ATTEMPTS_VAR], DEFAULT_ATTEMPTS),
-    intervalMs: nonNegativeInt(env[RUN_WAIT_INTERVAL_MS_VAR], DEFAULT_INTERVAL_MS)
+    intervalMs: positiveInt(env[RUN_WAIT_INTERVAL_MS_VAR], DEFAULT_INTERVAL_MS)
   };
 }
 function parseRun(raw) {
@@ -106,19 +102,25 @@ function waitForDispatchRun(repo, workflow, ref, options = runWaitOptions()) {
   return null;
 }
 function waitForRunCompletion(repo, runId, options = runWaitOptions()) {
+  let last = null;
+  let polls = 0;
   for (let attempt = 0;attempt < options.attempts; attempt += 1) {
+    polls += 1;
     const { code, stdout } = ghRead("run", "view", String(runId), "--repo", repo, "--json", "databaseId,status,conclusion");
     if (code === 0) {
       try {
         const run = parseRun(JSON.parse(stdout || "{}"));
-        if (run && run.status === "completed")
-          return run;
+        if (run) {
+          last = run;
+          if (run.status === "completed")
+            return { finished: run, polls, last };
+        }
       } catch {}
     }
     if (attempt + 1 < options.attempts)
       Bun.sleepSync(options.intervalMs);
   }
-  return null;
+  return { finished: null, polls, last };
 }
 
 // src/domain/work/agent-name.ts
@@ -660,6 +662,10 @@ function parseBefore(raw) {
     return null;
   }
 }
+function unreadable(repo, tag, runId, outcome) {
+  const seen = outcome.last === null ? `none of ${outcome.polls} polls could read it` : `the last of ${outcome.polls} polls read status '${outcome.last.status}', conclusion '${outcome.last.conclusion ?? "none"}'`;
+  return `The deployment for ${tag} (run ${runId}) could not be read to a conclusion: ${seen}. https://github.com/${repo}/actions/runs/${runId}`;
+}
 function main() {
   const { values } = parseArgs({
     args: Bun.argv.slice(2),
@@ -695,12 +701,13 @@ function main() {
       continue;
     }
     console.error(`Started a deployment for the new tag ${tag} (run ${run.id}).`);
-    const finished = waitForRunCompletion(repo, run.id, wait);
-    if (!finished) {
+    const outcome = waitForRunCompletion(repo, run.id, wait);
+    if (!outcome.finished) {
       failed += 1;
-      console.error(`::error::The deployment for ${tag} (run ${run.id}) could not be read to a conclusion.`);
+      console.error(`::error::${unreadable(repo, tag, run.id, outcome)}`);
       continue;
     }
+    const finished = outcome.finished;
     if (finished.conclusion !== "success") {
       failed += 1;
       console.error(`::error::The deployment for ${tag} (run ${run.id}) ended '${finished.conclusion ?? "unknown"}', so it was not published.`);

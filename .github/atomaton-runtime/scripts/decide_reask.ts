@@ -30,6 +30,30 @@ function machineryRoot() {
   return process.env[MACHINERY_ROOT_VAR]?.trim() || undefined;
 }
 
+// src/domain/work/loop-continuation.ts
+function loopAbortFromSession(session) {
+  const runs = session?.atoma_runs;
+  if (!Array.isArray(runs) || runs.length === 0)
+    return;
+  const last = runs[runs.length - 1];
+  if (last?.ended_because !== "loop")
+    return;
+  const recorded = last.loop_abort;
+  if (typeof recorded !== "object" || recorded === null)
+    return;
+  const verdict = recorded;
+  if (typeof verdict.rule !== "string" || verdict.rule === "")
+    return;
+  return {
+    rule: verdict.rule,
+    tool: typeof verdict.tool === "string" ? verdict.tool : "",
+    arguments: typeof verdict.arguments === "string" ? verdict.arguments : "",
+    count: typeof verdict.count === "number" ? verdict.count : 0,
+    capped: verdict.capped === true,
+    lastError: typeof verdict.last_error === "string" && verdict.last_error !== "" ? verdict.last_error : undefined
+  };
+}
+
 // src/entrypoints/machinery/lib/agent-env.ts
 import { readFileSync } from "fs";
 function buildAgentEnv(source, paths) {
@@ -151,8 +175,22 @@ function defineScript(importMetaUrl) {
   return { runtimePath: `${SCRIPTS_DIR}/${basename(fileURLToPath(importMetaUrl))}` };
 }
 
-// src/entrypoints/machinery/decide_reask.ts
+// src/entrypoints/machinery/read_run_ending.ts
 var ref = defineScript(import.meta.url);
+function parseSession(raw) {
+  if (raw === undefined)
+    return;
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return;
+  }
+}
+if (false)
+  ;
+
+// src/entrypoints/machinery/decide_reask.ts
+var ref2 = defineScript(import.meta.url);
 function sibling(script, args) {
   const run = spawnSync2("bun", ["run", join2(import.meta.dir, script), ...args], { stdio: "inherit" });
   if (run.status !== 0) {
@@ -208,14 +246,18 @@ function main() {
   let exitCode = values["exit-code"];
   let endingInvalid = false;
   let reask = "";
-  if (exitCode === "0" && !existsSync(stopFile)) {
-    sibling("check_ending.ts", checkArgs);
-    if (readFileSync2(problemFile, "utf8").length > 0) {
-      reask = "ending";
-    } else {
-      const stalled = spawnSync2("bun", ["run", join2(import.meta.dir, "should_continue_stalled.ts"), "--session", session, "--output-file", output, "--def-dir", join2(root, AGENT_DEFINITIONS_DIR), "--people-file", peopleFile, "--changed", String(changedSoFar(join2(runDir, "atomaton_ops.log")))], { encoding: "utf8" });
-      if (stalled.status === 0 && stalled.stdout.trim() === "true")
-        reask = "stalled";
+  if (!existsSync(stopFile)) {
+    if (exitCode === "0") {
+      sibling("check_ending.ts", checkArgs);
+      if (readFileSync2(problemFile, "utf8").length > 0) {
+        reask = "ending";
+      } else {
+        const stalled = spawnSync2("bun", ["run", join2(import.meta.dir, "should_continue_stalled.ts"), "--session", session, "--output-file", output, "--def-dir", join2(root, AGENT_DEFINITIONS_DIR), "--people-file", peopleFile, "--changed", String(changedSoFar(join2(runDir, "atomaton_ops.log")))], { encoding: "utf8" });
+        if (stalled.status === 0 && stalled.stdout.trim() === "true")
+          reask = "stalled";
+      }
+    } else if (loopAbortFromSession(parseSession(existsSync(session) ? readFileSync2(session, "utf8") : undefined)) !== undefined) {
+      reask = "loop";
     }
   }
   if (reask !== "") {
@@ -224,6 +266,8 @@ function main() {
       if (reask === "ending") {
         console.error("::warning::the closing message calls more than one thing and there is no time left to ask again; nothing it calls will be started");
         endingInvalid = true;
+      } else if (reask === "loop") {
+        console.error("::warning::the loop guard stopped this run and there is no time left to ask again");
       } else {
         console.error("::warning::the run stopped on a sentence having changed nothing, and there is no time left to ask again");
       }
@@ -232,6 +276,9 @@ function main() {
       if (reask === "ending") {
         console.error("::warning::the closing message calls more than one thing; asking for it again");
         sibling("inject_ending_rejection.ts", ["--session", session, "--problem-file", problemFile]);
+      } else if (reask === "loop") {
+        console.error("::warning::the loop guard stopped this run; asking for one more turn");
+        sibling("inject_loop_continuation.ts", ["--session", session]);
       } else {
         console.error("::warning::the run stopped on a sentence having changed nothing; asking for it again");
         sibling("inject_stalled_continuation.ts", ["--session", session]);
@@ -245,6 +292,7 @@ function main() {
         rmSync(output, { force: true });
         copyFileSync(outputAgain, output);
         rmSync(outputAgain, { force: true });
+        exitCode = "0";
         sibling("check_ending.ts", checkArgs);
         if (readFileSync2(problemFile, "utf8").length > 0) {
           console.error("::warning::the closing message still calls more than one thing; nothing it calls will be started");
@@ -275,5 +323,5 @@ ending_invalid=${endingInvalid}
 if (import.meta.main)
   main();
 export {
-  ref
+  ref2 as ref
 };

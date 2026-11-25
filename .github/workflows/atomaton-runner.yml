@@ -41,7 +41,7 @@ run-name: '${{ inputs.agent }} on #${{ inputs.number }}'
         description: Atoma CLI version tag to install (e.g. v0.4.5). Use `source` to build from a checkout of yuma-seno/atoma@main.
         required: false
         type: string
-        default: v0.4.8
+        default: v0.6.0
       reload_count:
         description: How many times this work has already rebuilt its environment (set by reload_environment; leave at 0)
         required: false
@@ -91,7 +91,7 @@ run-name: '${{ inputs.agent }} on #${{ inputs.number }}'
         description: Atoma CLI version tag to install (e.g. v0.4.5). Use `source` to build from a checkout of yuma-seno/atoma@main.
         required: false
         type: string
-        default: v0.4.8
+        default: v0.6.0
       reload_count:
         description: How many times this work has already rebuilt its environment (set by reload_environment; leave at 0)
         required: false
@@ -893,7 +893,8 @@ jobs:
           cat "${RUNNER_TEMP}/atomaton-run/atomaton_logs.txt" >&2
 
           # The one second turn this run is allowed: a closing message that broke the
-          # one-call rule, or a run that stopped on a sentence having changed nothing.
+          # one-call rule, a run that stopped on a sentence having changed nothing, or a run
+          # the loop guard stopped.
           # The whole decision -- the ending checks after each turn, the injections, the
           # bounded second invocation, and what a person's stop during it means -- is
           # `decide_reask.ts` now, and it answers with the exit code the ending
