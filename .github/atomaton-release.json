@@ -1,5 +1,5 @@
 {
-  "version": "v0.25.0",
+  "version": "v0.25.1",
   "files": [
     ".github/atomaton-release.json",
     ".github/atomaton-runtime/scripts/aggregate_sub_issues.ts",
@@ -25,6 +25,7 @@
     ".github/atomaton-runtime/scripts/inject_callees_notice.ts",
     ".github/atomaton-runtime/scripts/inject_dispatcher_notice.ts",
     ".github/atomaton-runtime/scripts/inject_ending_rejection.ts",
+    ".github/atomaton-runtime/scripts/inject_loop_continuation.ts",
     ".github/atomaton-runtime/scripts/inject_stalled_continuation.ts",
     ".github/atomaton-runtime/scripts/inject_uncommitted_notice.ts",
     ".github/atomaton-runtime/scripts/launch_atoma.ts",

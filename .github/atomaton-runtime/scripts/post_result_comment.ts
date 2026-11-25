@@ -451,6 +451,66 @@ function shouldMentionOnCompletion(signals) {
   return true;
 }
 
+// src/domain/work/loop-continuation.ts
+function loopAbortFromSession(session) {
+  const runs = session?.atoma_runs;
+  if (!Array.isArray(runs) || runs.length === 0)
+    return;
+  const last = runs[runs.length - 1];
+  if (last?.ended_because !== "loop")
+    return;
+  const recorded = last.loop_abort;
+  if (typeof recorded !== "object" || recorded === null)
+    return;
+  const verdict = recorded;
+  if (typeof verdict.rule !== "string" || verdict.rule === "")
+    return;
+  return {
+    rule: verdict.rule,
+    tool: typeof verdict.tool === "string" ? verdict.tool : "",
+    arguments: typeof verdict.arguments === "string" ? verdict.arguments : "",
+    count: typeof verdict.count === "number" ? verdict.count : 0,
+    capped: verdict.capped === true,
+    lastError: typeof verdict.last_error === "string" && verdict.last_error !== "" ? verdict.last_error : undefined
+  };
+}
+function times(count) {
+  return count > 1 ? `${count} times in a row` : "over and over";
+}
+function repeatedCallSentence(abort) {
+  const call = abort.tool === "" ? "a tool" : `\`${abort.tool}\``;
+  const count = times(abort.count);
+  switch (abort.rule) {
+    case "identical_answers":
+      return `it called ${call} ${count} and got the same answer back every time`;
+    case "empty_results":
+      return `it called ${call} ${count} and every call returned nothing`;
+    case "identical_failures":
+      return `it called ${call} ${count} and every call failed the same way`;
+    case "cycle":
+      return `the same calls, starting with ${call}, came round in a circle ${count}`;
+    default:
+      return `it called ${call} ${count} and repeating it got no further (\`${abort.rule}\`)`;
+  }
+}
+function repeatedArguments(abort) {
+  return abort.arguments === "" ? undefined : abort.arguments;
+}
+function loopAbortLines(abort) {
+  const lines = ["> [!WARNING]", `> The loop guard stopped this run: ${repeatedCallSentence(abort)}.`];
+  const argumentsItRepeated = repeatedArguments(abort);
+  if (argumentsItRepeated !== undefined)
+    lines.push(`> The arguments it repeated were \`${argumentsItRepeated}\`.`);
+  if (abort.capped) {
+    lines.push("> The answer was cut off by the output cap, so repeating the call cannot reach what was cut.");
+  }
+  if (abort.lastError !== undefined) {
+    lines.push("> It said:", ...abort.lastError.split(`
+`).map((line) => `> ${line}`));
+  }
+  return lines;
+}
+
 // src/domain/work/turn.ts
 function endingOf(signals) {
   const named = signals.directive.trim();
@@ -880,6 +940,9 @@ function buildCommentBody(args) {
   if (failed) {
     lines.push(...failureLines({ agent: args.agent, excerpt: args.excerpt ?? "" }), "");
   }
+  if (args.loopAbort !== undefined) {
+    lines.push(...loopAbortLines(args.loopAbort).map((line) => redact(line)), "");
+  }
   if (args.endingInvalid === true) {
     lines.push("> [!WARNING]", "> This run's closing message called more than one thing, so none of its calls", "> was made: nothing it named is started or notified. It was asked to write the", "> message again. Below is what it wrote.", "");
   } else if (args.salvaged === true) {
@@ -1081,7 +1144,8 @@ function main() {
     toolTrouble: toolTroubleLine(readSession(values.session), Number(values["messages-before"])),
     tokenLine: tokenUsageLine(values["logs-file"] ?? ""),
     spentOn: reachedLimit(endedBecause) ? toolCallTally(readSession(values.session)) : undefined,
-    excerpt: failed ? logExcerptFrom(values["logs-file"]) : undefined
+    excerpt: failed ? logExcerptFrom(values["logs-file"]) : undefined,
+    loopAbort: endedBecause === "loop" ? loopAbortFromSession(readSession(values.session)) : undefined
   });
   const { code, stdout, stderr } = gh("api", `repos/${process.env.GITHUB_REPOSITORY}/issues/${values.number}/comments`, "--method", "POST", "-f", `body=${body}`, "--jq", ".id");
   if (code !== 0) {
