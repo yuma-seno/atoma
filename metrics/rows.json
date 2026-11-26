@@ -471,19 +471,24 @@
   {
     "path": "sessions/issue-45/engineer.json",
     "agent": "engineer",
-    "messages": 17,
-    "calls": 7,
-    "failed": 0,
+    "messages": 198,
+    "calls": 107,
+    "failed": 2,
     "refused": 0,
     "skills": [],
     "reported": false,
     "tools": {
-      "bash": 3,
-      "read": 4
+      "bash": 69,
+      "read": 11,
+      "edit": 25,
+      "commit_and_push": 1,
+      "create_pr": 1
     },
     "acts": {
-      "other": 2,
-      "search": 1
+      "other": 24,
+      "search": 10,
+      "open": 34,
+      "edit": 1
     },
     "runs": [
       {
@@ -511,6 +516,28 @@
           }
         },
         "started": "2026-11-26T15:15:03Z"
+      },
+      {
+        "compactions": 0,
+        "ended": "2026-11-26T15:25:35Z",
+        "ended_because": "completed",
+        "iterations": 79,
+        "messages": 198,
+        "seconds": 279,
+        "server_calls": {
+          "files": {
+            "edit": 25,
+            "read": 7
+          },
+          "github": {
+            "commit_and_push": 1,
+            "create_pr": 1
+          },
+          "shell": {
+            "bash": 66
+          }
+        },
+        "started": "2026-11-26T15:20:56Z"
       }
     ]
   }
