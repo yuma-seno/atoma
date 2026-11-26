@@ -8,7 +8,9 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 use tempfile::tempdir;
 
-use atoma::application::runner::{run, CompletionReason, RunDeps, RunOutcome, RunSettings};
+use atoma::application::runner::{
+    run, CompletionReason, RunDeps, RunFacts, RunOutcome, RunSettings,
+};
 use atoma::domain::agent::{AgentDef, ParsedAgentDef};
 use atoma::domain::ports::{
     AgentDefPort, FinishReason, LlmChoice, LlmResponse, McpFactory, SessionPort, ToolDefPort,
@@ -152,6 +154,75 @@ fn minimal_agent(name: &str) -> AgentDef {
         extra_body: HashMap::new(),
         extra_headers: HashMap::new(),
     }
+}
+
+/// The loop-guard recovery notes a saved session carries, in the order it was told
+/// (#45). A recovered run is told once, and this is the only text in the session the
+/// guard itself wrote.
+fn recovery_notes(session: &Session) -> Vec<String> {
+    session
+        .messages
+        .iter()
+        .filter(|message| message.role == "user")
+        .filter_map(|message| message.content.as_ref().and_then(|c| c.as_str()))
+        .filter(|text| text.contains("The loop guard has caught this run"))
+        .map(str::to_string)
+        .collect()
+}
+
+/// The end-to-end shape the loop-guard tests share: one looping tool, a recording
+/// session port, and a run whose `--loop-retries` switch the test decides.
+async fn run_loop_guard(
+    llm: &MockLlmClient,
+    registry: MockMcpRegistry,
+    dir: &Path,
+    loop_retries: bool,
+    facts: &mut RunFacts,
+) -> (Result<RunOutcome>, Arc<Mutex<Option<Session>>>) {
+    let agent_port = StubAgentDefPort {
+        agent_def: AgentDef {
+            mcp_servers: vec!["srv".to_string()],
+            ..minimal_agent("LoopAgent")
+        },
+    };
+    let session_port = RecordingSessionPort::default();
+    let saved = session_port.saved.clone();
+    let tool_def_port = SingleEntryToolDefPort::new("srv");
+    let mcp_factory = StubMcpFactory::new(registry);
+
+    let agent_path = dir.join("agent.md");
+    std::fs::write(&agent_path, "").unwrap();
+    let tools_path = dir.join("tools.yaml");
+    std::fs::write(&tools_path, "").unwrap();
+
+    let outcome = run(
+        RunSettings {
+            agent_def_path: agent_path,
+            in_session: None,
+            prompt_file: None,
+            out_session: Some(dir.join("session.json")),
+            template_path: None,
+            tools_file: Some(tools_path),
+            skills_dir: None,
+            max_iterations: Some(10),
+            max_runtime: None,
+            stop_file: None,
+            loop_retries,
+        },
+        RunDeps {
+            llm,
+            agent_def: &agent_port,
+            session: &session_port,
+            tool_def: &tool_def_port,
+            skill: &atoma::infra::persistence::skill::FileSkillAdapter,
+            template: &atoma::infra::template::FileTemplateAdapter,
+            mcp_factory: &mcp_factory,
+        },
+        facts,
+    )
+    .await;
+
+    (outcome, saved)
 }
 
 // ── Integration tests ─────────────────────────────────────────────────────────
@@ -906,6 +977,242 @@ async fn test_repeated_identical_reads_abort_naming_the_file() {
         .cloned()
         .expect("the session records why the guard stopped the run");
     assert_eq!(recorded["rule"], "identical_answers");
+
+    // Nothing was offered before it: recovery is behind `--loop-retries`, and this run
+    // did not ask for it.
+    assert_eq!(facts.loop_recoveries, 0);
+    assert!(
+        recovery_notes(&session).is_empty(),
+        "a run that did not ask for retries is stopped exactly as before"
+    );
+}
+
+/// One recovery note, then the old behaviour: a run that was told what it is repeating,
+/// and repeats it, reaches the next threshold and is stopped there -- naming the new
+/// count (#45).
+#[tokio::test]
+async fn test_a_loop_verdict_offers_one_recovery_note_then_aborts() {
+    use common::mock_llm::make_tool_call;
+
+    let call = |id: &str| make_tool_call(id, "read", r#"{"path":"src/x.ts"}"#);
+    let llm = MockLlmClient::new()
+        .enqueue_tool_calls(vec![call("c1")])
+        .enqueue_tool_calls(vec![call("c2")])
+        .enqueue_tool_calls(vec![call("c3")])
+        .enqueue_tool_calls(vec![call("c4")])
+        .enqueue_tool_calls(vec![call("c5")]);
+    let registry = MockMcpRegistry::new()
+        .with_tool("read", "Read a file")
+        .with_response("read", "contents of x");
+    let dir = tempdir().unwrap();
+    let mut facts = RunFacts::default();
+
+    let (result, saved) = run_loop_guard(&llm, registry, dir.path(), true, &mut facts).await;
+    let error = result.unwrap_err();
+
+    // The recovery was one told attempt, not a licence to loop: the same call once more
+    // reaches 5 and the guard stops the run for real.
+    let message = error.to_string();
+    assert!(message.contains("5 times in a row"), "{message}");
+    assert_eq!(facts.loop_recoveries, 1);
+    let verdict = facts
+        .loop_abort
+        .as_ref()
+        .expect("the second verdict is an abort");
+    assert_eq!(
+        verdict.rule,
+        atoma::domain::tool_loop::LoopRule::IdenticalAnswers
+    );
+    assert_eq!(verdict.count, 5);
+
+    let session = saved
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("a stopped run still saves what it reached");
+    let notes = recovery_notes(&session);
+    assert_eq!(notes.len(), 1, "one note, not one per call: {notes:?}");
+    assert!(notes[0].contains("`read`"), "{}", notes[0]);
+    assert!(notes[0].contains("src/x.ts"), "{}", notes[0]);
+    assert!(
+        !notes[0].contains("Aborting"),
+        "the run had not been stopped yet: {}",
+        notes[0]
+    );
+
+    let recorded = session
+        .extra
+        .get("atoma_runs")
+        .and_then(|v| v.as_array())
+        .and_then(|runs| runs.first())
+        .cloned()
+        .expect("a stopped run is recorded");
+    assert_eq!(recorded["loop_recoveries"], 1);
+    assert_eq!(recorded["loop_abort"]["count"], 5);
+}
+
+/// The recovery is what the change is for: a run that takes the note's direction
+/// finishes, and records one recovery and no abort -- the pair that will say whether
+/// the note reduces aborts (#45).
+#[tokio::test]
+async fn test_a_recovered_run_completes_and_records_the_recovery() {
+    use common::mock_llm::make_tool_call;
+
+    let same = |id: &str| make_tool_call(id, "read", r#"{"path":"src/x.ts"}"#);
+    let llm = MockLlmClient::new()
+        .enqueue_tool_calls(vec![same("c1")])
+        .enqueue_tool_calls(vec![same("c2")])
+        .enqueue_tool_calls(vec![same("c3")])
+        .enqueue_tool_calls(vec![same("c4")])
+        // The step the reading was for, instead of the same read again.
+        .enqueue_tool_calls(vec![make_tool_call("c5", "read", r#"{"path":"src/y.ts"}"#)])
+        .enqueue_text("Recovered and wrote the report.");
+    let registry = MockMcpRegistry::new()
+        .with_tool("read", "Read a file")
+        .with_response("read", "contents of x");
+    let dir = tempdir().unwrap();
+    let mut facts = RunFacts::default();
+
+    let (result, saved) = run_loop_guard(&llm, registry, dir.path(), true, &mut facts).await;
+    let outcome = result.expect("the recovery let the run finish");
+    assert!(
+        matches!(outcome, RunOutcome::Completed { .. }),
+        "{outcome:?}"
+    );
+    assert_eq!(facts.loop_recoveries, 1);
+    assert!(facts.loop_abort.is_none(), "a recovered run did not stop");
+
+    let reported = atoma::application::runner::envelope(&facts, Some(&outcome));
+    assert_eq!(reported["loop_recoveries"], 1);
+    assert_eq!(reported["loop_abort"], serde_json::Value::Null);
+
+    let session = saved
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("a finished run still saves what it reached");
+    assert_eq!(recovery_notes(&session).len(), 1);
+    let recorded = session
+        .extra
+        .get("atoma_runs")
+        .and_then(|v| v.as_array())
+        .and_then(|runs| runs.first())
+        .cloned()
+        .expect("a finished run is recorded");
+    assert_eq!(recorded["loop_recoveries"], 1);
+    assert!(
+        recorded.get("loop_abort").is_none(),
+        "no verdict on a run that did not stop: {recorded}"
+    );
+}
+
+/// The verdict can fire before the last call of a turn's batch, and on the recovery path
+/// the run then continues. The placeholder left for the calls the guard did not reach
+/// must therefore say the batch was stopped, not that the run was aborted -- a run that
+/// reads both would be told it is over and told it is not (#45).
+#[tokio::test]
+async fn test_a_batch_stopped_by_the_guard_is_not_reported_as_an_abort() {
+    use common::mock_llm::make_tool_call;
+
+    let same = |id: &str| make_tool_call(id, "read", r#"{"path":"src/x.ts"}"#);
+    let llm = MockLlmClient::new()
+        .enqueue_tool_calls(vec![same("c1")])
+        .enqueue_tool_calls(vec![same("c2")])
+        .enqueue_tool_calls(vec![same("c3")])
+        // The fourth identical read trips the guard mid-batch: `c5` is asked for in the
+        // same turn and is never reached.
+        .enqueue_tool_calls(vec![
+            same("c4"),
+            make_tool_call("c5", "read", r#"{"path":"src/y.ts"}"#),
+        ])
+        // After the note, a different call and then the report.
+        .enqueue_tool_calls(vec![make_tool_call("c6", "read", r#"{"path":"src/y.ts"}"#)])
+        .enqueue_text("Recovered and wrote the report.");
+    let registry = MockMcpRegistry::new()
+        .with_tool("read", "Read a file")
+        .with_response("read", "contents of x");
+    let dir = tempdir().unwrap();
+    let mut facts = RunFacts::default();
+
+    let (result, saved) = run_loop_guard(&llm, registry, dir.path(), true, &mut facts).await;
+    let outcome = result.expect("the recovery let the run finish");
+    assert!(
+        matches!(outcome, RunOutcome::Completed { .. }),
+        "{outcome:?}"
+    );
+    assert_eq!(facts.loop_recoveries, 1);
+    assert!(facts.loop_abort.is_none(), "a recovered run did not stop");
+
+    let session = saved
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("a finished run still saves what it reached");
+    let not_executed = session
+        .messages
+        .iter()
+        .filter(|message| message.role == "tool")
+        .filter_map(|message| message.content.as_ref().and_then(|c| c.as_str()))
+        .find(|text| text.starts_with("Error: not executed."))
+        .expect("the call the guard did not reach is still answered");
+    assert!(
+        not_executed.contains("loop guard stopped this batch"),
+        "{not_executed}"
+    );
+    assert!(
+        session.messages.iter().all(|message| {
+            !message
+                .content
+                .as_ref()
+                .and_then(|c| c.as_str())
+                .is_some_and(|text| text.contains("was aborted before this call"))
+        }),
+        "a run that continues must not be told it was aborted"
+    );
+}
+
+/// The hard stop the recovery must never soften: a hook refusal is a failure that
+/// cannot change, so identical failures abort at 3 with recovery enabled and without a
+/// note (#45).
+#[tokio::test]
+async fn test_identical_failures_abort_at_three_even_with_recovery() {
+    use common::mock_llm::make_tool_call;
+
+    let call = |id: &str| make_tool_call(id, "test_tool", r#"{"input":"same"}"#);
+    let llm = MockLlmClient::new()
+        .enqueue_tool_calls(vec![call("c1")])
+        .enqueue_tool_calls(vec![call("c2")])
+        .enqueue_tool_calls(vec![call("c3")]);
+    // No response registered for `test_tool`, so every call fails the same way.
+    let registry = MockMcpRegistry::new().with_tool("test_tool", "failing tool");
+    let dir = tempdir().unwrap();
+    let mut facts = RunFacts::default();
+
+    let (result, saved) = run_loop_guard(&llm, registry, dir.path(), true, &mut facts).await;
+    let error = result.unwrap_err();
+
+    let message = error.to_string();
+    assert!(message.contains("3 identical failed calls"), "{message}");
+    assert_eq!(facts.loop_recoveries, 0);
+    let verdict = facts
+        .loop_abort
+        .as_ref()
+        .expect("identical failures are a hard stop, not a recovery");
+    assert_eq!(
+        verdict.rule,
+        atoma::domain::tool_loop::LoopRule::IdenticalFailures
+    );
+    assert_eq!(verdict.count, 3);
+
+    let session = saved
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("a stopped run still saves what it reached");
+    assert!(
+        recovery_notes(&session).is_empty(),
+        "a failure that cannot change is never told to try again"
+    );
 }
 
 /// A contentless completion is re-requested rather than failing the run.

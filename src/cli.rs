@@ -244,6 +244,11 @@ pub struct RunArgs {
     /// A count would be a second ceiling guessing at the same thing, and the wrong
     /// guess either way: too low gives up on a run that would have recovered, too
     /// high is the unbounded case with extra steps.
+    ///
+    /// It also arms one recovery note for the tool-loop guard: a run that is repeating
+    /// the same tool call is told what it is repeating and what to do instead, and
+    /// continues. That note is given once per run; a run that repeats anyway is stopped
+    /// by the guard as it would have been without this.
     #[arg(long)]
     pub loop_retries: bool,
 

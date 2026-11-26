@@ -158,6 +158,7 @@ read an answer.
 | `session_path` | string \| null | Where the session was written, when `--in-session` or `--out-session` asked for one. |
 | `ended_because` | string | Why the run ended: one of the five words below. |
 | `loop_abort` | object \| null | The loop guard's verdict, `null` when the guard did not stop this run. `rule` is `identical_failures`, `identical_answers`, `cycle` or `empty_results`; `tool` and `arguments` name the call that repeated (`arguments` shortened, with the real size when it was cut); `count` is how many calls the rule counted; `call` is which tool call of the run the verdict was reached on, counting from 1; `capped` says the repeated answer was itself truncated by the output cap, so the same call cannot return what was cut; `last_error` carries the error text for `identical_failures`. |
+| `loop_recoveries` | number | How many loop-guard recovery notes this run was handed. At most one per run, and only under `--loop-retries`: the run is told what it is repeating and what to do instead, and continues. Zero on a run the guard did not catch and on one it stopped without offering a note; a run that was caught, told, and went on reports `1` here and `null` in `loop_abort`. |
 | `seconds` | number | Wall clock for the whole run, including parsing the agent definition and starting every tool server. |
 | `iterations` | number | Round trips the inference loop made. Counted as each response arrives, so a contentless completion that was re-requested counts — it was waited on and it was billed. A compaction's summarizing inference is a round trip in `usage` but not in this count: it is not a turn of the conversation. |
 
@@ -179,7 +180,9 @@ ceiling was hit, while the word says it exactly.
 The same five words, with `seconds` and `iterations`, are also appended to the session
 file as `atoma_runs` — one record per run, so a resumed session carries the history of
 every run that touched it. A run the loop guard stopped carries the same `loop_abort`
-object there, so the file says what the run was repeating and not only that it stopped. Both are built from the same measurements. The difference is
+object there, so the file says what the run was repeating and not only that it stopped;
+a run it caught and recovered carries `loop_recoveries: 1` instead, which is the pair a
+reader counts to see whether the note avoided an abort or merely preceded one. Both are built from the same measurements. The difference is
 that the envelope describes one run and is always printed, while `atoma_runs` is the
 history and exists only when `--in-session` or `--out-session` asked for a file.
 

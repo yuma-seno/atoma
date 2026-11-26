@@ -193,6 +193,81 @@ impl LoopVerdict {
         self
     }
 
+    /// The one note a run is given when the loop guard catches it going round.
+    ///
+    /// Built from this verdict's own fields and worded inside this rule's own facts, so
+    /// an `empty_results` note never claims an answer came back and a `cycle` note never
+    /// claims the calls were identical. It says the run *will* be stopped rather than
+    /// that it has been: stopping it is exactly what the note defers.
+    ///
+    /// `None` for [`LoopRule::IdenticalFailures`], which is never offered a recovery. A
+    /// `before_tool` hook's refusal is a failure that cannot change, so a note telling
+    /// the run to continue is a note telling it to ignore the refusal -- which is the one
+    /// thing [`MAX_IDENTICAL_TOOL_FAILURES`] exists to stop.
+    pub fn recovery_note(&self) -> Option<String> {
+        let (repeated, next_step) = match self.rule {
+            LoopRule::IdenticalFailures => return None,
+            LoopRule::IdenticalAnswers => (
+                format!(
+                    "`{}` was called {} times in a row with the same arguments {} ({}) and \
+                     returned the same answer every time. That answer is already in this \
+                     conversation, so calling it again returns the same text.",
+                    self.tool,
+                    self.count,
+                    self.arguments,
+                    self.position(),
+                ),
+                "Read a narrower range instead — the truncation marker names the offset to \
+                 continue from — take the step that reading was for, or write the closing \
+                 report from what you already have. Do not call it again with these arguments.",
+            ),
+            LoopRule::Cycle => (
+                format!(
+                    "The last {} calls repeat a cycle of earlier ones, ending at `{}` with \
+                     arguments {} ({}). Each call differs from the one before it, so repeating \
+                     the calls cannot get past it.",
+                    self.count,
+                    self.tool,
+                    self.arguments,
+                    self.position(),
+                ),
+                "Take the step the cycle was circling: write the closing report or the verdict \
+                 from what is already in hand. Do not repeat these calls.",
+            ),
+            LoopRule::EmptyResults => (
+                format!(
+                    "The last {} calls returned nothing at all, most recently `{}` with \
+                     arguments {} ({}). Whatever you are looking for is not where you are \
+                     looking for it.",
+                    self.count,
+                    self.tool,
+                    self.arguments,
+                    self.position(),
+                ),
+                "Stop repeating it: either it is the wrong tool for what you are after, or what \
+                 you are after is not there. Answer from what the other calls already gave you, \
+                 and write the closing report.",
+            ),
+        };
+
+        let mut note = format!(
+            "The loop guard has caught this run going round and will stop it if the next call \
+             repeats. {repeated}"
+        );
+        if self.capped {
+            note.push_str(
+                " The answer was also cut off by the output cap, and the same call cannot \
+                 return what was cut.",
+            );
+        }
+        if let Some(error) = &self.last_error {
+            note.push_str(&format!(" The failure it reported was: {error}"));
+        }
+        note.push(' ');
+        note.push_str(next_step);
+        Some(note)
+    }
+
     fn position(&self) -> String {
         let first = self.first_call();
         if first == self.call {
@@ -748,5 +823,93 @@ mod tests {
             );
         }
         assert_eq!(t.calls, 4, "the run is still where it was");
+    }
+
+    fn verdict_of(rule: LoopRule, count: u8, capped: bool) -> LoopVerdict {
+        LoopVerdict {
+            rule,
+            tool: "read".to_string(),
+            arguments: "{\"path\":\"src/x.ts\"}".to_string(),
+            count,
+            call: 7,
+            capped,
+            last_error: None,
+        }
+    }
+
+    /// What the recovered run is told, and what it must not be told. The note is read as
+    /// an instruction, so every fact in it has to come from this verdict.
+    #[test]
+    fn an_identical_answers_note_names_the_call_the_count_and_the_way_out() {
+        let note = verdict_of(LoopRule::IdenticalAnswers, MAX_IDENTICAL_ANSWERS, false)
+            .recovery_note()
+            .expect("identical answers is recoverable");
+
+        assert!(note.contains("`read`"), "{note}");
+        assert!(note.contains("src/x.ts"), "{note}");
+        assert!(note.contains("4 times in a row"), "{note}");
+        assert!(note.contains("already in this conversation"), "{note}");
+        assert!(note.contains("narrower range"), "{note}");
+        assert!(note.contains("closing report"), "{note}");
+        assert!(
+            !note.contains("Aborting"),
+            "the run has not been stopped yet: {note}"
+        );
+        assert!(
+            !note.contains("cut off by the output cap"),
+            "nothing was capped here: {note}"
+        );
+    }
+
+    /// A capped answer is the shape this recovery exists for: the model kept coming back
+    /// for bytes the same call cannot return, and the note has to say so.
+    #[test]
+    fn a_capped_identical_answers_note_says_repeating_cannot_reach_the_cut() {
+        let note = verdict_of(LoopRule::IdenticalAnswers, MAX_IDENTICAL_ANSWERS, true)
+            .recovery_note()
+            .expect("identical answers is recoverable");
+
+        assert!(note.contains("cannot return what was cut"), "{note}");
+    }
+
+    /// A cycle's calls each differ from the one before it, so a note that claims the same
+    /// answer came back is a note describing a different rule.
+    #[test]
+    fn a_cycle_note_stays_inside_the_cycles_own_facts() {
+        let note = verdict_of(LoopRule::Cycle, 5, false)
+            .recovery_note()
+            .expect("a cycle is recoverable");
+
+        assert!(note.contains("cycle"), "{note}");
+        assert!(note.contains("5 calls"), "{note}");
+        assert!(!note.contains("same answer"), "{note}");
+        assert!(!note.contains("returned nothing"), "{note}");
+    }
+
+    /// The one output this must never produce: the identical-answer wording on a rule
+    /// whose calls answered with nothing.
+    #[test]
+    fn an_empty_results_note_never_claims_an_answer_came_back() {
+        let note = verdict_of(LoopRule::EmptyResults, MAX_EMPTY_RESULTS, false)
+            .recovery_note()
+            .expect("empty results is recoverable");
+
+        assert!(note.contains("returned nothing"), "{note}");
+        assert!(!note.contains("same answer"), "{note}");
+        assert!(note.contains("closing report"), "{note}");
+    }
+
+    /// The hard stop the recovery must not soften: a hook refusal cannot change, so there
+    /// is no note to give.
+    #[test]
+    fn identical_failures_is_never_offered_a_recovery() {
+        let verdict = verdict_of(
+            LoopRule::IdenticalFailures,
+            MAX_IDENTICAL_TOOL_FAILURES,
+            false,
+        )
+        .with_last_error("a before_tool hook refused this call".to_string());
+
+        assert_eq!(verdict.recovery_note(), None);
     }
 }
