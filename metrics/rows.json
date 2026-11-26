@@ -469,6 +469,57 @@
     ]
   },
   {
+    "path": "sessions/issue-40/engineer.json",
+    "agent": "engineer",
+    "messages": 72,
+    "calls": 43,
+    "failed": 2,
+    "refused": 0,
+    "skills": [
+      "environment"
+    ],
+    "reported": false,
+    "tools": {
+      "bash": 34,
+      "grep": 1,
+      "read": 3,
+      "load_skill": 1,
+      "edit": 1,
+      "commit_and_push": 1,
+      "create_pr": 2
+    },
+    "acts": {
+      "other": 24,
+      "open": 2,
+      "edit": 8
+    },
+    "runs": [
+      {
+        "compactions": 0,
+        "ended": "2026-11-26T16:59:29Z",
+        "ended_because": "completed",
+        "iterations": 25,
+        "messages": 72,
+        "seconds": 243,
+        "server_calls": {
+          "files": {
+            "edit": 1,
+            "grep": 1,
+            "read": 3
+          },
+          "github": {
+            "commit_and_push": 1,
+            "create_pr": 2
+          },
+          "shell": {
+            "bash": 34
+          }
+        },
+        "started": "2026-11-26T16:55:26Z"
+      }
+    ]
+  },
+  {
     "path": "sessions/issue-45/engineer.json",
     "agent": "engineer",
     "messages": 247,
