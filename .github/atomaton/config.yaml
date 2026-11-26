@@ -17,7 +17,12 @@ base_branch: ""
 
 # Run before checks, before deployments, and before an agent starts.
 environment:
-  setup_commands: []
+  setup_commands:
+    # `rust-toolchain.toml` pins 1.95.0 and the image ships only stable, so a
+    # run's first `cargo` would have rustup fetch the pin itself, into a rustup
+    # home the agent's user cannot write. The components are named because this
+    # image sets rustup's `profile = "minimal"`, which leaves them out.
+    - rustup toolchain install 1.95.0 --profile minimal --component rustfmt --component clippy
   # Rebuilds of the environment one piece of work may ask for. The refusal goes
   # to the agent, which carries on -- unlike the counters under `chain`.
   max_reloads: 3
