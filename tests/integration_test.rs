@@ -1106,6 +1106,71 @@ async fn test_a_recovered_run_completes_and_records_the_recovery() {
     );
 }
 
+/// The verdict can fire before the last call of a turn's batch, and on the recovery path
+/// the run then continues. The placeholder left for the calls the guard did not reach
+/// must therefore say the batch was stopped, not that the run was aborted -- a run that
+/// reads both would be told it is over and told it is not (#45).
+#[tokio::test]
+async fn test_a_batch_stopped_by_the_guard_is_not_reported_as_an_abort() {
+    use common::mock_llm::make_tool_call;
+
+    let same = |id: &str| make_tool_call(id, "read", r#"{"path":"src/x.ts"}"#);
+    let llm = MockLlmClient::new()
+        .enqueue_tool_calls(vec![same("c1")])
+        .enqueue_tool_calls(vec![same("c2")])
+        .enqueue_tool_calls(vec![same("c3")])
+        // The fourth identical read trips the guard mid-batch: `c5` is asked for in the
+        // same turn and is never reached.
+        .enqueue_tool_calls(vec![
+            same("c4"),
+            make_tool_call("c5", "read", r#"{"path":"src/y.ts"}"#),
+        ])
+        // After the note, a different call and then the report.
+        .enqueue_tool_calls(vec![make_tool_call("c6", "read", r#"{"path":"src/y.ts"}"#)])
+        .enqueue_text("Recovered and wrote the report.");
+    let registry = MockMcpRegistry::new()
+        .with_tool("read", "Read a file")
+        .with_response("read", "contents of x");
+    let dir = tempdir().unwrap();
+    let mut facts = RunFacts::default();
+
+    let (result, saved) = run_loop_guard(&llm, registry, dir.path(), true, &mut facts).await;
+    let outcome = result.expect("the recovery let the run finish");
+    assert!(
+        matches!(outcome, RunOutcome::Completed { .. }),
+        "{outcome:?}"
+    );
+    assert_eq!(facts.loop_recoveries, 1);
+    assert!(facts.loop_abort.is_none(), "a recovered run did not stop");
+
+    let session = saved
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("a finished run still saves what it reached");
+    let not_executed = session
+        .messages
+        .iter()
+        .filter(|message| message.role == "tool")
+        .filter_map(|message| message.content.as_ref().and_then(|c| c.as_str()))
+        .find(|text| text.starts_with("Error: not executed."))
+        .expect("the call the guard did not reach is still answered");
+    assert!(
+        not_executed.contains("loop guard stopped this batch"),
+        "{not_executed}"
+    );
+    assert!(
+        session.messages.iter().all(|message| {
+            !message
+                .content
+                .as_ref()
+                .and_then(|c| c.as_str())
+                .is_some_and(|text| text.contains("was aborted before this call"))
+        }),
+        "a run that continues must not be told it was aborted"
+    );
+}
+
 /// The hard stop the recovery must never soften: a hook refusal is a failure that
 /// cannot change, so identical failures abort at 3 with recovery enabled and without a
 /// note (#45).

@@ -276,16 +276,18 @@ async fn execute_tool_calls(
     // some of its results missing, which no provider will accept -- so the session that
     // recorded the most work was the one session that could not be resumed.
     //
-    // The remaining calls are NOT executed. Once the run is over, taking further
-    // actions is doing work that has already been decided against; they are answered
-    // instead, which keeps the conversation whole without committing anything.
+    // The remaining calls are NOT executed. Once the guard has stopped this batch,
+    // taking further actions is doing work that has already been decided against; they
+    // are answered instead, which keeps the conversation whole without committing
+    // anything. The wording holds on both paths a verdict leaves by: the run may end
+    // here, or a `--loop-retries` run may be given its one recovery note and continue.
     let mut abort: Option<LoopVerdict> = None;
 
     for tool_call in tool_calls {
         if abort.is_some() {
             session.messages.push(Message::tool(
                 &tool_call.id,
-                "Error: not executed. The run was aborted before this call was reached.",
+                "Error: not executed. The loop guard stopped this batch before this call was reached.",
             ));
             continue;
         }
