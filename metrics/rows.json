@@ -544,19 +544,25 @@
   {
     "path": "sessions/issue-45/reviewer.json",
     "agent": "reviewer",
-    "messages": 24,
-    "calls": 10,
+    "messages": 82,
+    "calls": 48,
     "failed": 0,
     "refused": 0,
     "skills": [],
-    "reported": false,
+    "reported": true,
     "tools": {
       "get_pr": 1,
       "get_pr_diff": 1,
       "get_issue_comments": 1,
       "get_pr_reviews": 1,
-      "grep": 2,
-      "read": 4
+      "grep": 21,
+      "read": 9,
+      "delegate_readonly": 4,
+      "delegate_readonly_large": 2,
+      "create_root_issue": 1,
+      "get_branch": 1,
+      "fetch": 1,
+      "search_code": 5
     },
     "acts": {},
     "runs": [
@@ -589,6 +595,35 @@
           }
         },
         "started": "2026-11-26T15:28:09Z"
+      },
+      {
+        "compactions": 0,
+        "ended": "2026-11-26T15:46:33Z",
+        "ended_because": "completed",
+        "iterations": 18,
+        "messages": 82,
+        "seconds": 161,
+        "server_calls": {
+          "delegate_readonly": {
+            "delegate_readonly": 4,
+            "delegate_readonly_large": 2
+          },
+          "files_readonly": {
+            "grep": 19,
+            "read": 5
+          },
+          "github": {
+            "create_root_issue": 1,
+            "get_branch": 1
+          },
+          "search": {
+            "search_code": 5
+          },
+          "web": {
+            "fetch": 1
+          }
+        },
+        "started": "2026-11-26T15:43:52Z"
       }
     ]
   }
