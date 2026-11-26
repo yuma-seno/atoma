@@ -111,6 +111,13 @@ pub struct RunFacts {
     /// turn needs the rule, the call that repeated and where the run was, and reading
     /// those out of a sentence is parsing prose.
     pub loop_abort: Option<LoopVerdict>,
+    /// How many times this run was handed a loop-guard recovery note (#45).
+    ///
+    /// Zero is the ordinary run. A count rather than a flag, and beside `loop_abort`,
+    /// because the two together are what says whether recovery reduces aborts: a run
+    /// that was caught, told, and went on is one this number counts and `loop_abort`
+    /// does not.
+    pub loop_recoveries: u8,
     /// Where the session was written, if the caller asked for it to be.
     pub session_path: Option<PathBuf>,
 }
@@ -150,6 +157,7 @@ impl Default for RunFacts {
             last_prompt_tokens: None,
             compactions: 0,
             loop_abort: None,
+            loop_recoveries: 0,
             session_path: None,
         }
     }
@@ -225,6 +233,9 @@ pub fn envelope(facts: &RunFacts, outcome: Option<&RunOutcome>) -> Value {
         // `response` is null for the endings with no response: a stable key set is
         // what makes the envelope machine-readable.
         "loop_abort": facts.loop_abort,
+        // Next to the verdict and zero on an ordinary run: the pair is what says
+        // whether recovery avoided an abort or merely preceded one.
+        "loop_recoveries": facts.loop_recoveries,
         "seconds": facts.seconds,
         "iterations": facts.iterations,
         // #12. A count, not a flag, for the same reason `iterations` is: a session
@@ -333,6 +344,7 @@ mod tests {
             last_prompt_tokens: Some(100),
             compactions: 0,
             loop_abort: None,
+            loop_recoveries: 0,
             session_path: Some(PathBuf::from("/tmp/session.json")),
         }
     }
@@ -443,6 +455,21 @@ mod tests {
         assert_eq!(value["loop_abort"]["arguments"], "{\"path\":\"src/x.ts\"}");
         assert_eq!(value["loop_abort"]["count"], 4);
         assert_eq!(value["loop_abort"]["call"], 47);
+    }
+
+    /// A recovered run did not stop, so it reports a recovery and no verdict. Both keys
+    /// are present either way: the pair is what a caller counts to see whether the note
+    /// avoided an abort or merely preceded one.
+    #[test]
+    fn a_recovery_is_reported_in_the_envelope_beside_no_verdict() {
+        let mut facts = sample_facts();
+        assert_eq!(envelope(&facts, None)["loop_recoveries"], 0);
+
+        facts.loop_recoveries = 1;
+
+        let value = envelope(&facts, None);
+        assert_eq!(value["loop_recoveries"], 1);
+        assert_eq!(value["loop_abort"], Value::Null);
     }
 
     /// The three deliberate stops all exit `2`, and so does clap's own parse error, so

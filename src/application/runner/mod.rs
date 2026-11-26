@@ -70,6 +70,10 @@ pub struct RunSettings {
     /// `max_runtime` and `stop_file` -- and the retry loop re-checks both before each
     /// re-ask, so a model that loops on every attempt is stopped by the clock or by a
     /// person. A count here would be a third ceiling guessing at the same thing.
+    ///
+    /// It also gates the tool-loop guard's one recovery note: with it, a run the guard
+    /// catches going round is told what it is repeating and continues once. See
+    /// `MAX_LOOP_RECOVERIES`.
     pub loop_retries: bool,
 }
 
@@ -185,6 +189,14 @@ pub struct RunRecord {
     /// existed, where `None` is the honest answer: nothing was recorded.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub loop_abort: Option<LoopVerdict>,
+    /// How many loop-guard recovery notes this run was handed (#45).
+    ///
+    /// Zero on an ordinary run and on a run the guard stopped without offering one. A
+    /// run that was caught, told, and went on is one this number counts and `loop_abort`
+    /// does not; `#[serde(default)]` for the sessions written before it existed, where
+    /// zero is the honest answer.
+    #[serde(default)]
+    pub loop_recoveries: u8,
 }
 
 /// Append this run to the session's own record of its runs.
@@ -217,6 +229,7 @@ fn record_run(session: &mut Session, facts: &RunFacts) {
         iterations: facts.iterations,
         server_calls: facts.server_calls.clone(),
         loop_abort: facts.loop_abort.clone(),
+        loop_recoveries: facts.loop_recoveries,
     };
     match serde_json::to_value(&record) {
         Ok(value) => runs.push(value),
@@ -689,6 +702,24 @@ mod tests {
             run_field(&session, 0, "server_calls"),
             Some(serde_json::json!({}))
         );
+    }
+
+    /// A run that was caught by the guard, told what it was repeating, and went on is a
+    /// run that did not stop: it records the recovery and no verdict. The pair is what
+    /// says afterwards whether the note avoided an abort or merely preceded one (#45).
+    #[test]
+    fn a_recovered_run_records_the_recovery_and_no_verdict() {
+        let mut session = Session::default();
+        let mut facts = facts_for("completed", 6);
+        facts.loop_recoveries = 1;
+
+        record_run(&mut session, &facts);
+
+        assert_eq!(
+            run_field(&session, 0, "loop_recoveries"),
+            Some(serde_json::json!(1))
+        );
+        assert_eq!(run_field(&session, 0, "loop_abort"), None);
     }
 
     /// The session and the envelope have to say the same thing about the same run. They

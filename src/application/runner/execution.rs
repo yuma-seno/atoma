@@ -38,6 +38,16 @@ const MAX_EMPTY_COMPLETION_RETRIES: u8 = 2;
 /// before this existed and the prompt-side half of the fix carries the weight.
 const MAX_INTRODUCTION_NUDGES: u8 = 2;
 
+/// How many loop-guard recoveries one run may be given before the guard's next verdict
+/// stops it, across every recoverable rule.
+///
+/// One. A run that is told what it is repeating and what to do instead, and repeats it
+/// anyway, has already been given the answer; a second note would teach it only that a
+/// note can be ignored. Nothing resets this counter -- unlike the tracker's own counts,
+/// which keep climbing through the recovery, so the same call again reaches the next
+/// threshold and the run stops there.
+const MAX_LOOP_RECOVERIES: u8 = 1;
+
 /// Count a contentless completion and either ask the turn again or give up.
 ///
 /// The three shapes a contentless completion arrives in — no text under `stop`, no
@@ -357,11 +367,10 @@ async fn execute_tool_calls(
     }
 
     if let Some(verdict) = abort {
-        // In `facts` as well as in the error. The `--output json` envelope and the
-        // session's run history are both built from the facts, and whoever offers this
-        // stopped run a second turn needs the rule, the repeated call and where the run
-        // was -- not a sentence to parse (#35).
-        facts.loop_abort = Some(verdict.clone());
+        // Handed to the caller as the error's own value, because whether this is the
+        // abort or the one recovery a `--loop-retries` run may be given is decided
+        // there (#45). The caller records the verdict on the abort path only: a
+        // recovered run did not stop, so it has no abort to report.
         return Err(verdict.into());
     }
 
@@ -1031,9 +1040,48 @@ pub async fn inference_loop(
             session
                 .messages
                 .push(message.with_finish_reason(finish_reason));
-            let session_ends =
+            let executed =
                 execute_tool_calls(agent_name, &calls, session, tools, &mut loop_tracker, facts)
-                    .await?;
+                    .await;
+            let session_ends = match executed {
+                Ok(ends) => ends,
+                Err(e) => {
+                    // The loop guard's verdict (#35), caught here rather than propagated
+                    // (#45). A `--loop-retries` run is handed one note saying what it is
+                    // repeating and what to do instead, and continues; anything else --
+                    // no retries asked for, the one recovery already spent, or a rule that
+                    // is never recovered -- stops the run exactly as it did before.
+                    //
+                    // The batch this turn asked for was already answered by
+                    // `execute_tool_calls`, so the conversation is whole on both paths.
+                    let verdict = match e.downcast::<LoopVerdict>() {
+                        Ok(verdict) => verdict,
+                        Err(e) => return Err(e),
+                    };
+                    if loop_retries && facts.loop_recoveries < MAX_LOOP_RECOVERIES {
+                        if let Some(note) = verdict.recovery_note() {
+                            // No counter reset: the tracker keeps climbing, so the same
+                            // call again reaches the next threshold and this time the run
+                            // stops. That is the one told attempt.
+                            facts.loop_recoveries += 1;
+                            tracing::warn!(
+                                "Loop guard verdict ({:?}); handing this run one recovery note",
+                                verdict.rule
+                            );
+                            session.messages.push(Message::user(&note));
+                            continue;
+                        }
+                    }
+                    // In `facts` as well as in the error. The `--output json` envelope
+                    // and the session's run history are both built from the facts, and
+                    // whoever offers this stopped run a second turn needs the rule, the
+                    // repeated call and where the run was -- not a sentence to parse.
+                    // Deliberately only here: a recovered run did not stop, so it records
+                    // no verdict.
+                    facts.loop_abort = Some(verdict.clone());
+                    return Err(verdict.into());
+                }
+            };
 
             if session_ends {
                 tracing::info!("Tool requested session suspension; ending inference loop");
