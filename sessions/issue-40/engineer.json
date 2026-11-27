@@ -6,7 +6,7 @@
     },
     {
       "role": "user",
-      "content": "Issue #40: Rust runs cannot invoke cargo: rust-toolchain.toml pins 1.95.0, the image has only stable 1.100.0, and rustup's home is read-only\n\n**What happens.** On this repository every `cargo` invocation fails before compiling anything:\n\n```\ninfo: syncing channel updates for 1.95.0-x86_64-unknown-linux-gnu\nerror: could not create temp file /home/runner/.rustup/tmp/65g5a17r_og6yklq_file: Permission denied (os error 13)\n```\n\n`rust-toolchain.toml` pins `channel = \"1.95.0\"`; the only toolchain installed is `stable-x86_64-unknown-linux-gnu`, which is rustc 1.100.0, and `/home/runner/.rustup` is not writable, so rustup cannot sync or install the pinned channel.\n\n**Workaround used.** `RUSTUP_TOOLCHAIN=stable cargo …` runs everything (`cargo fmt --check`, `cargo clippy -- -D warnings`, `cargo test --locked` all pass with it). That means the checks run here are not the ones CI runs: CI installs the pinned 1.95.0.\n\n**Why it matters.** Every run in this repository either rediscovers the workaround or reports a build failure it did not cause, and the toolchain difference is invisible in the run report unless somebody writes it down.\n\n**Two ways to close it**, either is enough:\n\n1. preinstall the toolchain named by `rust-toolchain.toml` in the runtime image, or\n2. declare it in this repository: `environment.setup_commands: [\"rustup toolchain install 1.95.0\"]` in `.github/atomaton/config.yaml`, which a person merges and the next run's environment picks up.\n\nFiled from a run on #35, which hit this while running the repository's checks.",
+      "content": "Issue #40: Rust runs cannot invoke cargo: rust-toolchain.toml pins 1.95.0, the image has only stable 1.100.0, and rustup's home is read-only\n**Labels:** atomaton/in-progress\n\n**What happens.** On this repository every `cargo` invocation fails before compiling anything:\n\n```\ninfo: syncing channel updates for 1.95.0-x86_64-unknown-linux-gnu\nerror: could not create temp file /home/runner/.rustup/tmp/65g5a17r_og6yklq_file: Permission denied (os error 13)\n```\n\n`rust-toolchain.toml` pins `channel = \"1.95.0\"`; the only toolchain installed is `stable-x86_64-unknown-linux-gnu`, which is rustc 1.100.0, and `/home/runner/.rustup` is not writable, so rustup cannot sync or install the pinned channel.\n\n**Workaround used.** `RUSTUP_TOOLCHAIN=stable cargo …` runs everything (`cargo fmt --check`, `cargo clippy -- -D warnings`, `cargo test --locked` all pass with it). That means the checks run here are not the ones CI runs: CI installs the pinned 1.95.0.\n\n**Why it matters.** Every run in this repository either rediscovers the workaround or reports a build failure it did not cause, and the toolchain difference is invisible in the run report unless somebody writes it down.\n\n**Two ways to close it**, either is enough:\n\n1. preinstall the toolchain named by `rust-toolchain.toml` in the runtime image, or\n2. declare it in this repository: `environment.setup_commands: [\"rustup toolchain install 1.95.0\"]` in `.github/atomaton/config.yaml`, which a person merges and the next run's environment picks up.\n\nFiled from a run on #35, which hit this while running the repository's checks.",
       "atoma_metadata": {
         "author": "github-actions[bot]",
         "created_at": "2026-11-24T00:20:54Z",
@@ -1077,13 +1077,277 @@
       "role": "tool",
       "content": "{\"number\":49,\"url\":\"https://github.com/yuma-seno/atoma/pull/49\",\"base\":\"\",\"validation_dispatched\":true}",
       "tool_call_id": "chatcmpl-tool-96aeee505e7c8a91"
+    },
+    {
+      "role": "user",
+      "content": "PR #49: config: install the pinned Rust 1.95.0 before a run starts\n**Labels:** atomaton/waiting-for-person\n**Linked Issue:** #40\n\n/reviewer\n\nPart of #40\n`environment.setup_commands` in `.github/atomaton/config.yaml` now carries one command, and nothing else in the repository changed:\n\n```\nrustup toolchain install 1.95.0 --profile minimal --component rustfmt --component clippy\n```\n\n## Why that entry closes it\n\n`rust-toolchain.toml` pins `1.95.0`; the image ships only `stable` (rustc 1.100.0). The agent's shell runs as `atomaton-tools` with `HOME=/home/runner` and `RUSTUP_HOME` unset, so rustup resolves `$HOME/.rustup` — and `getfacl /home/runner` grants that user `user:atomaton-tools:--x`, traverse and nothing more, while `/home/runner/.rustup` is `drwxr-xr-x runner runner`. The `could not create temp file ... Permission denied` in the issue reproduces here exactly.\n\n`run_environment_setup.ts` runs each command through `bash -c` in a plain workflow step, so it runs as `runner`, which owns `/home/runner/.rustup`. That is the whole of what the entry buys: the install lands in the directory the agent later reads, done by a user allowed to write it.\n\nTwo details the issue's suggested command does not settle, both measured:\n\n- **Plain `rustup toolchain install 1.95.0` is not enough here.** This image's `/home/runner/.rustup/settings.toml` sets `profile = \"minimal\"`; a plain install with that profile reported `downloading 3 components` and left no `rustfmt` and no `clippy` binary. `cargo fmt --check` would then have rustup install `rustfmt-preview` from `rust-toolchain.toml` at agent time — back into the home it cannot write. With `--component rustfmt --component clippy`: 5 components, both present.\n- **`--profile minimal` is stated rather than inherited**, so the command installs the same thing whatever profile the image carries.\n- `RUSTUP_TOOLCHAIN=stable` appears nowhere: it hides the mismatch this closes.\n\n## Where the machinery consumes it\n\n- `.github/atomaton-runtime/scripts/run_environment_setup.ts:129` reads `loadConfig().environment?.setup_commands`; the config path is `machineryPath(\".github/atomaton/config.yaml\")` (`:22`, `:108-110`), i.e. under `$ATOMATON_MACHINERY_ROOT`, which `atomaton-runner.yml:186` sets to the default-branch checkout at `$RUNNER_TEMP/atomaton-machinery`. **So the commands come from the default branch, not from a pull request's tree** — the entry takes effect on the first run after it merges.\n- `.github/workflows/atomaton-runner.yml:475-478` — \"Run configured environment setup\", after the Atoma CLI install, before \"Put the tool servers on users without sudo\" (`:559`) and before \"Run agent\" (`:807`). Plain `run:` step, so user `runner`, its own `HOME`, no `sudo`.\n- `run_environment_setup.ts:137-140` — a non-zero exit becomes `process.exit(result.exitCode)`, and the step carries no `continue-on-error`: a failing install fails the run before the agent starts, rather than being discovered mid-check.\n- `.github/workflows/atomaton-check.yml:90-93` runs the same script before `checks.from_pull_request`'s commands, in a job whose checkout is the pull request itself. **This PR's own `test` check therefore runs the entry and then the three commands under 1.95.0** — the mechanism is exercised before merge; the agent step is what waits for the merge.\n\n## The equivalence\n\nThe three commands a run executes are `cargo fmt --check`, `cargo clippy -- -D warnings`, `cargo test --locked` (`config.yaml:47-51`). After this entry, all three run under `cargo 1.95.0`, which is the channel `rust-toolchain.toml` pins and the one the check job's runner installs. Before it, the agent's run either failed at rustup or — with the workaround — ran 1.100.0, so a change could pass here and fail in CI on the pin.\n\n## Verification, measured in this run\n\n- The entry's exact command through the machinery's own reader (`ATOMATON_MACHINERY_ROOT=<tree> bun run .github/atomaton-runtime/scripts/run_environment_setup.ts`): `Running environment setup command: rustup toolchain install 1.95.0 ...`, then `1.95.0-x86_64-unknown-linux-gnu installed - rustc 1.95.0 (59807616e 2026-04-14)`, exit 0. Re-run: `unchanged`, exit 0, 0.2s — idempotent, so a run pays the download once per fresh image.\n- With that installed home made read-only (`chmod -R a-w`, the access shape `atomaton-tools` has) and `RUSTUP_HOME` pointed at it: `cargo 1.95.0 (f2d3ce0bd 2026-03-21)`; `cargo fmt --check` exit 0; `cargo clippy -- -D warnings` exit 0; `cargo test --locked` exit 0, six `test result: ok` lines. The shim needs no write to its rustup home at check time.\n- Installing into a home whose `stable` toolchain is present left `default_toolchain = \"stable-x86_64-unknown-linux-gnu\"`: the pin becomes an installed channel, not the new default.\n\n<details><summary>The one thing I could not execute here</summary>\n\nThe setup step could not be run as `runner`: this run's only sudo rule is `atomaton-tools ALL=(atomaton-untrusted) NOPASSWD: SETENV: ALL`, so there is no path to that user. What is measured above is the same install and the same three checks with an equivalent permission shape — a rustup home the invoking user can read and cannot write — together with `/home/runner/.rustup` being `drwxr-xr-x runner runner`, owned by the user the step runs as.\n\n</details>\n\n## Merge\n\n`.github/**` is in `merge.governed_paths`, so a person merges this. On the first run after it lands, `.github/workflows/atomaton-runner.yml`'s \"Run configured environment setup\" log should carry the `rustup toolchain install` line, and the agent's own `cargo --version` should read 1.95.0.\n\n---\n_Opened by [`engineer`](https://github.com/yuma-seno/atoma/actions/runs/45863092570)_\n",
+      "atoma_metadata": {
+        "author": "github-actions[bot]",
+        "created_at": "2026-11-26T16:59:26Z",
+        "event_type": "pr_opened",
+        "id": "pr-49",
+        "layer": "github-context",
+        "source": "github"
+      }
+    },
+    {
+      "role": "user",
+      "content": "No merge-blocking defect. The one-file change does what the issue asked, in the place the machinery reads, and the only thing standing between it and the default branch is the governance rule that puts `.github/**` in a person's hands.\n\n<details><summary>What I checked, and what backs it</summary>\n\n- `environment.setup_commands` is read by `.github/atomaton-runtime/scripts/run_environment_setup.ts:129`, run through `bash -c` at `:136`, and a non-zero exit ends the run at `:137-139` — with no `continue-on-error` on the step (\"Run configured environment setup\", `.github/workflows/atomaton-runner.yml:475-478`), which sits before \"Run agent\" at `:807`. So a failing install fails the run before the agent starts, which is the behaviour the issue needs.\n- Agent runs read that config from the **default branch**, not from a pull request's tree: `ATOMATON_MACHINERY_ROOT` is set to `$RUNNER_TEMP/atomaton-machinery` (`.github/workflows/atomaton-runner.yml:186`), a checkout of `github.event.repository.default_branch` (`:176-180`), and `configPath()` prefixes it (`run_environment_setup.ts:22`, `:108-110`). So the entry takes effect on the first run after merge, exactly as the issue's route 2 describes.\n- The command is exercised on this pull request already: `.github/workflows/atomaton-check.yml:90-93` runs the same script in the `pull-request-checks` job, whose checkout is this change. Both matrix jobs concluded `success` — `pull-request-checks (test)` and `pull-request-checks (secrets)` — so `rustup toolchain install 1.95.0 --profile minimal --component rustfmt --component clippy` ran on `ubuntu-latest` as `runner`, and the three checks (`cargo fmt --check`, `cargo clippy -- -D warnings`, `cargo test --locked`) then passed.\n- Nothing else reads the key I could have missed: grep for `setup_commands` finds only `run_environment_setup.ts`, the free-form schema entry at `validate_deliverable.ts:524`, the skills' prose, and this file. Replacing `[]` with one entry removes nothing and breaks no caller.\n- `rust-toolchain.toml:2-3` pins `channel = \"1.95.0\"` with `components = [\"rustfmt\", \"clippy\"]`, which are the channel and the two components the command names — so within the work tree the agent's `cargo` resolves to the pin rather than the image's 1.100.0, and no `RUSTUP_TOOLCHAIN=stable` appears anywhere in the diff or the repository.\n</details>\n\n**What I could not establish.** The machine-side half of the argument is the author's measurement, not mine: this run's file tools refuse paths outside the repository and `/tmp/atomaton-workspace` (`'/home/runner/.rustup/settings.toml' is outside the directories this tool can reach`), and the reviewer toolset has no shell, so I could not read `/home/runner`'s ACLs or `.rustup`'s mode, confirm the image's `profile = \"minimal\"`, or run the setup step as `runner` and then `cargo` as `atomaton-tools`. CI's success covers the install as `runner`; it does not cover the agent's read of the installed toolchain as `atomaton-tools`. That is the one claim in the pull request description that stays unverified until a run happens after merge.\n\nOne cost worth knowing rather than acting on: every job that runs setup now pays the toolchain download, including `pull-request-checks (secrets)` and the deploy jobs, which compile nothing. That is inherent to a per-repository `setup_commands` list and not a defect in this entry.\n\n**What happens next.** Nothing more from an agent — `check_merge_readiness` reports a single blocker, `governance-change` (\"this pull request changes how agents themselves run\"), and the change is complete as written.\n\n@yuma-seno: this is ready for you to merge. The first run after it lands should show the `rustup toolchain install 1.95.0` line in \"Run configured environment setup\", and the agent's own `cargo --version` should read 1.95.0.\n\n\n---\n_Tokens: 793169 total (778020 prompt + 15149 completion, 718720 of the prompt cached)_\n_run by [reviewer](https://github.com/yuma-seno/atoma/actions/runs/45864058536) · [metrics](https://github.com/yuma-seno/atoma/blob/atomaton-data/metrics/report.md)_\n_Counted from the session: 2 refused or errored tool calls._",
+      "atoma_metadata": {
+        "author": "github-actions[bot]",
+        "created_at": "2026-11-26T17:02:58Z",
+        "event_type": "pr_comment",
+        "id": 7198423411,
+        "layer": "github-context",
+        "source": "github"
+      }
+    },
+    {
+      "role": "user",
+      "content": "```diff\ndiff --git a/.github/atomaton/config.yaml b/.github/atomaton/config.yaml\nindex 5a7aced..f518297 100644\n--- a/.github/atomaton/config.yaml\n+++ b/.github/atomaton/config.yaml\n@@ -17,7 +17,12 @@ base_branch: \"\"\n \n # Run before checks, before deployments, and before an agent starts.\n environment:\n-  setup_commands: []\n+  setup_commands:\n+    # `rust-toolchain.toml` pins 1.95.0 and the image ships only stable, so a\n+    # run's first `cargo` would have rustup fetch the pin itself, into a rustup\n+    # home the agent's user cannot write. The components are named because this\n+    # image sets rustup's `profile = \"minimal\"`, which leaves them out.\n+    - rustup toolchain install 1.95.0 --profile minimal --component rustfmt --component clippy\n   # Rebuilds of the environment one piece of work may ask for. The refusal goes\n   # to the agent, which carries on -- unlike the counters under `chain`.\n   max_reloads: 3\n```",
+      "atoma_metadata": {
+        "author": "github",
+        "created_at": "2026-11-27T01:10:17Z",
+        "event_type": "pr_diff",
+        "id": "pr-49-diff",
+        "layer": "github-context",
+        "sha": "5328e3eb",
+        "source": "github"
+      }
+    },
+    {
+      "role": "user",
+      "content": "Atomaton: the pull request for this issue merged. Decide whether what merged satisfies what this issue asked for. Say which acceptance criteria are met and which are not; conclude the issue when they are met, and carry on with the work when they are not.",
+      "atoma_metadata": {
+        "author": "github-actions[bot]",
+        "created_at": "2026-11-27T01:10:28Z",
+        "event_type": "issue_comment",
+        "id": 7207073254,
+        "layer": "github-context",
+        "source": "github"
+      }
+    },
+    {
+      "role": "user",
+      "content": "The people you may call in your closing message: @yuma-seno. @yuma-seno is the one this work belongs to.\n\nA closing message calls at most one thing: one agent, as a line holding nothing but `/name`; or one of those people, as a single `@login`; or nobody, and the machinery tells the person this work belongs to. A mention of one of them is a call — write one only when you are handing the work to them. Two calls, an agent and a person or two of either, are refused: the message is posted with its mentions left as text, nothing in it is started, and the machinery makes the call itself."
+    },
+    {
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "id": "chatcmpl-tool-801057306f46abd4",
+          "type": "function",
+          "function": {
+            "name": "bash",
+            "arguments": "{\"command\": \"echo \\\"machinery root: ${ATOMATON_MACHINERY_ROOT:-<unset>}\\\"; grep -n \\\"setup_commands\\\" -A 6 \\\"${ATOMATON_MACHINERY_ROOT:-/nonexistent}/.github/atomaton/config.yaml\\\" 2>&1 | head -10; echo \\\"=== installed toolchains:\\\"; ls /home/runner/.rustup/toolchains 2>&1; echo \\\"=== settings:\\\"; cat /home/runner/.rustup/settings.toml 2>&1\"}"
+          }
+        },
+        {
+          "id": "chatcmpl-tool-973fe2f628b7f2cc",
+          "type": "function",
+          "function": {
+            "name": "bash",
+            "arguments": "{\"command\": \"cd /home/runner/work/atoma/atoma && git status -sb | head -3; git log --oneline -3 --no-color; echo \\\"=== main has the entry?\\\"; git show origin/main:.github/atomaton/config.yaml 2>/dev/null | sed -n '17,27p'\"}"
+          }
+        }
+      ],
+      "provider_items": [
+        {
+          "content": [
+            {
+              "text": "The PR merged. Now I judge whether what merged satisfies issue #40. The issue's route 2: declare the toolchain in `.github/atomaton/config.yaml` via `environment.setup_commands`. Merged. But — did it merge into main? Let me check the merged head and whether the entry is on the default branch. Then verify: does a run actually get 1.95.0 now? The run I'm in now — is it running with the new setup? This run started after the merge (the machinery dispatched this post-merge run). Let me check:\n\n- `ATOMATON_MACHINERY_ROOT/.github/atomaton/config.yaml` — the default-branch checkout of the machinery. If the change merged to main before this run started, the machinery copy would carry the setup command, and the \"Run configured environment setup\" step would have installed 1.95.0 as runner. Then in *this* run, `cargo --version` as atomaton-tools should print 1.95.0 (pin resolvable without RUSTUP_TOOLCHAIN).\n\nThat's the decisive acceptance test, and I can measure it directly. Let me check.\n\nCareful: is this run's HOME etc. the same? Let me run:\n- grep setup_commands in $ATOMATON_MACHINERY_ROOT/.github/atomaton/config.yaml\n- cargo --version (plain, no RUSTUP_TOOLCHAIN)\n- ls /home/runner/.rustup/toolchains\n- cat /home/runner/.rustup/settings.toml\n\nIf the machinery checkout still has setup_commands: [] then the merge landed after this run's checkout (or merged into main and this run started from a pre-merge checkout snapshot). Let's measure.\n\nAlso check git log on main to confirm the change is on the default branch.\n\nLet me batch these read-only checks.",
+              "type": "reasoning_text"
+            }
+          ],
+          "id": "rs_0ee868e6-7927-4e26-bdf0-cf147057312d",
+          "status": "completed",
+          "summary": [],
+          "type": "reasoning"
+        }
+      ],
+      "finish_reason": "stop"
+    },
+    {
+      "role": "tool",
+      "content": "{\"status\":\"completed\",\"exit_code\":0,\"stdout\":\"machinery root: /home/runner/work/_temp/atomaton-machinery\\n20:  setup_commands:\\n21-    # `rust-toolchain.toml` pins 1.95.0 and the image ships only stable, so a\\n22-    # run's first `cargo` would have rustup fetch the pin itself, into a rustup\\n23-    # home the agent's user cannot write. The components are named because this\\n24-    # image sets rustup's `profile = \\\"minimal\\\"`, which leaves them out.\\n25-    - rustup toolchain install 1.95.0 --profile minimal --component rustfmt --component clippy\\n26-  # Rebuilds of the environment one piece of work may ask for. The refusal goes\\n=== installed toolchains:\\n1.95.0-x86_64-unknown-linux-gnu\\nstable-x86_64-unknown-linux-gnu\\n=== settings:\\nversion = \\\"12\\\"\\ndefault_toolchain = \\\"stable-x86_64-unknown-linux-gnu\\\"\\nprofile = \\\"minimal\\\"\\n\\n[overrides]\\n\",\"stderr\":\"\",\"output_truncated\":false,\"execution_time_ms\":228}",
+      "tool_call_id": "chatcmpl-tool-801057306f46abd4"
+    },
+    {
+      "role": "tool",
+      "content": "{\"status\":\"completed\",\"exit_code\":0,\"stdout\":\"## main...origin/main\\nbd23b31 Merge pull request #49 from yuma-seno/atomaton/issue-40\\n=== main has the entry?\\n\\n# Run before checks, before deployments, and before an agent starts.\\nenvironment:\\n  setup_commands:\\n    # `rust-toolchain.toml` pins 1.95.0 and the image ships only stable, so a\\n    # run's first `cargo` would have rustup fetch the pin itself, into a rustup\\n    # home the agent's user cannot write. The components are named because this\\n    # image sets rustup's `profile = \\\"minimal\\\"`, which leaves them out.\\n    - rustup toolchain install 1.95.0 --profile minimal --component rustfmt --component clippy\\n  # Rebuilds of the environment one piece of work may ask for. The refusal goes\\n  # to the agent, which carries on -- unlike the counters under `chain`.\\n\",\"stderr\":\"\",\"output_truncated\":false,\"execution_time_ms\":189}",
+      "tool_call_id": "chatcmpl-tool-973fe2f628b7f2cc"
+    },
+    {
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "id": "chatcmpl-tool-b20600fdde0446a9",
+          "type": "function",
+          "function": {
+            "name": "bash",
+            "arguments": "{\"command\": \"cd /home/runner/work/atoma/atoma && echo \\\"RUSTUP_HOME=${RUSTUP_HOME:-<unset>} RUSTUP_TOOLCHAIN=${RUSTUP_TOOLCHAIN:-<unset>} CARGO_HOME=${CARGO_HOME:-<unset>}\\\"; cargo --version; rustc --version; rustup toolchain list 2>&1 | tail -3\"}"
+          }
+        }
+      ],
+      "provider_items": [
+        {
+          "content": [
+            {
+              "text": "This run is a fresh run on main after the merge: the machinery checkout carries the entry, and `/home/runner/.rustup/toolchains` now contains `1.95.0-x86_64-unknown-linux-gnu` alongside stable — installed by this run's setup step as runner. Default toolchain unchanged (stable).\n\nNow the decisive test: does plain `cargo` work in this repository for the agent user (atomaton-tools), with no RUSTUP_TOOLCHAIN, and report 1.95.0? And do the three checks pass? That's exactly the issue's acceptance criterion.\n\nRun without touching RUSTUP_HOME (i.e., exactly what an agent shell sees: RUSTUP_HOME unset, CARGO_HOME=tool-cache/cargo).\n\n`cargo --version` (no RUSTUP_TOOLCHAIN) → expect 1.95.0. Then the three checks. Note clippy/test will use CARGO_HOME=$RUNNER_TEMP/atomaton-tool-cache/cargo which is writable. Compiling may take a couple of minutes.\n\nAlso verify `rustc --version` and that `cargo fmt --check` / clippy / test pass — the real acceptance. Also `git status` clean afterwards (target/ ignored).\n\nLet me run.",
+              "type": "reasoning_text"
+            }
+          ],
+          "id": "rs_924d6162-89a0-4faa-9bb8-35c6271f4321",
+          "status": "completed",
+          "summary": [],
+          "type": "reasoning"
+        }
+      ],
+      "finish_reason": "stop"
+    },
+    {
+      "role": "tool",
+      "content": "{\"status\":\"completed\",\"exit_code\":0,\"stdout\":\"RUSTUP_HOME=<unset> RUSTUP_TOOLCHAIN=<unset> CARGO_HOME=/home/runner/work/_temp/atomaton-tool-cache/cargo\\ncargo 1.95.0 (f2d3ce0bd 2026-03-21)\\nrustc 1.95.0 (59807616e 2026-04-14)\\nstable-x86_64-unknown-linux-gnu (default)\\n1.95.0-x86_64-unknown-linux-gnu (active)\\n\",\"stderr\":\"\",\"output_truncated\":false,\"execution_time_ms\":230}",
+      "tool_call_id": "chatcmpl-tool-b20600fdde0446a9"
+    },
+    {
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "id": "chatcmpl-tool-8bcfa8b213ef38ce",
+          "type": "function",
+          "function": {
+            "name": "bash",
+            "arguments": "{\"command\": \"cd /home/runner/work/atoma/atoma && unset RUSTUP_TOOLCHAIN RUSTUP_HOME; cargo fmt --check; echo \\\"fmt=$?\\\"; cargo clippy -- -D warnings >/tmp/c2.log 2>&1; echo \\\"clippy=$?\\\"; cargo test --locked >/tmp/t2.log 2>&1; echo \\\"test=$?\\\"; grep \\\"test result:\\\" /tmp/t2.log | tail -8; echo \\\"=== git:\\\"; git status --porcelain\", \"timeout_seconds\": 1800}"
+          }
+        }
+      ],
+      "provider_items": [
+        {
+          "content": [
+            {
+              "text": "The decisive proof: in this post-merge run, as `atomaton-tools`, with `RUSTUP_HOME` unset and no `RUSTUP_TOOLCHAIN`, plain `cargo` resolves to 1.95.0 — the pin — and rustup lists `1.95.0-x86_64-unknown-linux-gnu (active)`.\n\nNow run the three checks in the repository to confirm acceptance: fmt, clippy, test --locked. Should be fast-ish. Then also confirm the setup step log? I can't see this run's job log... Actually could I check the workflow run logs? There's no tool for logs; get_check_runs only. Not needed — the installed toolchain + resolution is direct evidence the setup step ran.\n\nLet me run the three checks and then request_close_issue.\n\nNote: cargo test takes ~40s with fresh CARGO_HOME (registry download). CARGO_HOME=tool-cache/cargo may be empty → download deps. Fine, ~1-2 min.\n\nAlso check the setup idempotency in this real run: not needed.\n\nLet me run the checks.",
+              "type": "reasoning_text"
+            }
+          ],
+          "id": "rs_65affad0-c613-474f-979f-930a83a0cfad",
+          "status": "completed",
+          "summary": [],
+          "type": "reasoning"
+        }
+      ],
+      "finish_reason": "stop"
+    },
+    {
+      "role": "tool",
+      "content": "{\"status\":\"completed\",\"exit_code\":0,\"stdout\":\"fmt=0\\nclippy=0\\ntest=0\\ntest result: ok. 395 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.02s\\ntest result: ok. 395 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.02s\\ntest result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\\ntest result: ok. 31 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s\\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\\ntest result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\\n=== git:\\n\",\"stderr\":\"\",\"output_truncated\":false,\"execution_time_ms\":70061}",
+      "tool_call_id": "chatcmpl-tool-8bcfa8b213ef38ce"
+    },
+    {
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "id": "chatcmpl-tool-b291310410841fff",
+          "type": "function",
+          "function": {
+            "name": "bash",
+            "arguments": "{\"command\": \"cd /home/runner/work/atoma/atoma && grep -rn \\\"RUSTUP_TOOLCHAIN\\\" --include=\\\"*.yaml\\\" --include=\\\"*.yml\\\" --include=\\\"*.md\\\" --include=\\\"*.sh\\\" --include=\\\"*.toml\\\" . | grep -v atomaton-runtime | head; echo \\\"exit=$? (no matches means absent)\\\"; echo \\\"=== merged commit:\\\"; git log --oneline -1 --no-color origin/main\"}"
+          }
+        }
+      ],
+      "provider_items": [
+        {
+          "content": [
+            {
+              "text": "All acceptance criteria are met, verified in this post-merge run:\n\n1. Route 2 closed it: `environment.setup_commands` in `.github/atomaton/config.yaml` carries the pinned install, merged to main (commit bd23b31, \"Merge pull request #49\").\n2. The machinery reads it from the default branch and runs it as runner: evidenced by `/home/runner/.rustup/toolchains` gaining `1.95.0-x86_64-unknown-linux-gnu` in this run (the machinery copy at `$ATOMATON_MACHINERY_ROOT/.github/atomaton/config.yaml:20-25` carries the entry), which did not exist in the pre-merge run of the same issue.\n3. No `RUSTUP_TOOLCHAIN` anywhere, and plain `cargo --version` in the agent's shell reads `cargo 1.95.0 (f2d3ce0bd 2026-03-21)`; `rustup toolchain list` shows `1.95.0-x86_64-unknown-linux-gnu (active)`, `stable ... (default)`.\n4. The three checks run under the pin and pass: fmt=0, clippy=0, test=0 with 395+3+31+1 passing tests.\n5. The default toolchain stayed `stable` in settings.toml — not changed.\n\nOne remaining consideration: route 1 (preinstall in the image) is not done, but the issue said either is enough.\n\nAlso the leftover in the issue's \"why it matters\": \"the toolchain difference is invisible in the run report\" — closed, since runs now execute the pin; and the workaround is no longer needed.\n\nAnything unmet? \"Do not add RUSTUP_TOOLCHAIN=stable anywhere\" — confirmed: grep to be thorough? Let me grep for RUSTUP_TOOLCHAIN in repo to state it's absent. Quick check to be accurate in the closing summary. Also note that the reviewer flagged one thing: the setup step also runs in jobs that compile nothing (extra download) — a known cost, documented.\n\nLet me do the grep, then request_close_issue with the summary.\n\nThe summary should be the report: conclusion, evidence anchors, what could not be established, and what happens next. request_close_issue's summary is the comment body.\n\nLet me grep for RUSTUP_TOOLCHAIN quickly.",
+              "type": "reasoning_text"
+            }
+          ],
+          "id": "rs_ab6b2d05-ec7e-4169-ae34-c4917dee2470",
+          "status": "completed",
+          "summary": [],
+          "type": "reasoning"
+        }
+      ],
+      "finish_reason": "stop"
+    },
+    {
+      "role": "tool",
+      "content": "{\"status\":\"completed\",\"exit_code\":0,\"stdout\":\"./.github/workflows/release.yml:158:          # never disagree about what is declared. `RUSTUP_TOOLCHAIN=stable`\\n./.github/workflows/release.yml:162:          CURRENT=$(RUSTUP_TOOLCHAIN=stable cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version')\\n./.github/workflows/release.yml:303:          RUSTUP_TOOLCHAIN=stable cargo update -p atoma\\nexit=0 (no matches means absent)\\n=== merged commit:\\nbd23b31 Merge pull request #49 from yuma-seno/atomaton/issue-40\\n\",\"stderr\":\"\",\"output_truncated\":false,\"execution_time_ms\":174}",
+      "tool_call_id": "chatcmpl-tool-b291310410841fff"
+    },
+    {
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "id": "chatcmpl-tool-948b329574bed45c",
+          "type": "function",
+          "function": {
+            "name": "bash",
+            "arguments": "{\"command\": \"cd /home/runner/work/atoma/atoma && sed -n '145,170p;295,310p' .github/workflows/release.yml\"}"
+          }
+        }
+      ],
+      "provider_items": [
+        {
+          "content": [
+            {
+              "text": "There is an existing `RUSTUP_TOOLCHAIN=stable` in `.github/workflows/release.yml` (lines 158-162, 303) — pre-existing on main, not added by this change (my diff only touched config.yaml). It's in the release workflow: reading the crate version with `cargo metadata` and `cargo update -p atoma`. Let me look at the context to say accurately in the closing summary whether that's a related residue or unrelated. The instruction was \"Do not add `RUSTUP_TOOLCHAIN=stable` anywhere\" — I didn't. But this pre-existing use means the release job's `cargo metadata` runs stable, i.e. still a channel divergence in the release path (though `cargo metadata` doesn't compile). Worth one tangent sentence? Let me read the context to describe it correctly — maybe it's deliberate: reading the workspace version without triggering a toolchain download in a job that has no pinned toolchain, and `cargo update -p atoma` too.\n\nLet me read those lines.",
+              "type": "reasoning_text"
+            }
+          ],
+          "id": "rs_7f63dd5d-3d87-44f1-825e-017cc2812240",
+          "status": "completed",
+          "summary": [],
+          "type": "reasoning"
+        }
+      ],
+      "finish_reason": "stop"
+    },
+    {
+      "role": "tool",
+      "content": "{\"status\":\"completed\",\"exit_code\":0,\"stdout\":\"        uses: oven-sh/setup-bun@v2\\n\\n      - name: Validate the version\\n        id: version\\n        env:\\n          GH_TOKEN: ${{ github.token }}\\n          REQUESTED: ${{ inputs.version }}\\n          BUMP: ${{ inputs.bump }}\\n        run: |\\n          set -euo pipefail\\n\\n          # The declared version, read the same way `release.sh tag` reads it:\\n          # `cargo metadata`, not a grep, so this workflow and the tag script can\\n          # never disagree about what is declared. `RUSTUP_TOOLCHAIN=stable`\\n          # because the lock entry does not depend on the toolchain, and honoring\\n          # rust-toolchain.toml's pin would spend minutes downloading one for a\\n          # read.\\n          CURRENT=$(RUSTUP_TOOLCHAIN=stable cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version')\\n\\n          # A leading `v` is how a tag is written and how a person says it out\\n          # loud; the declaration is bare. Accept both, store one.\\n          #\\n          # With no version named, the bump is required -- the input is a choice\\n          # whose first option is a sentinel, so a person pressing the button picks\\n          # which segment moves. '(choose)' reaching here means it was not picked,\\n          # and a run that guessed would release under a number nobody chose. The\\n          # manifest no dependency's version ever starts a line, so the one line\\n          # this can touch is the package's own declaration, and the diff is the\\n          # one line that changed.\\n          sed -i \\\"s/^version = \\\\\\\"${CURRENT}\\\\\\\"/version = \\\\\\\"${NEW}\\\\\\\"/\\\" Cargo.toml\\n\\n          # `cargo test --locked` in the checks fails on a stale Cargo.lock, so\\n          # the declaration is not done until the lock agrees. `-p atoma` moves\\n          # only this package's own entry, never its dependencies' versions.\\n          RUSTUP_TOOLCHAIN=stable cargo update -p atoma\\n\\n          if [ -z \\\"$(git status --porcelain)\\\" ]; then\\n            echo \\\"changed=false\\\" >> \\\"$GITHUB_OUTPUT\\\"\\n            echo \\\"::notice::Cargo.toml already declares ${NEW}; nothing to open a pull request for.\\\"\\n          else\\n            echo \\\"changed=true\\\" >> \\\"$GITHUB_OUTPUT\\\"\\n            git --no-pager diff -- Cargo.toml Cargo.lock\\n\",\"stderr\":\"\",\"output_truncated\":false,\"execution_time_ms\":166}",
+      "tool_call_id": "chatcmpl-tool-948b329574bed45c"
+    },
+    {
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "id": "chatcmpl-tool-89268a3bb518f2a2",
+          "type": "function",
+          "function": {
+            "name": "request_close_issue",
+            "arguments": "{\"summary\": \"Route 2 is merged and now in force: on the default branch, a run's agent shell resolves `cargo` to the pinned 1.95.0 with no `RUSTUP_TOOLCHAIN` set, and all three checks pass under it. Nothing in #40 is left open — the workaround is no longer needed by any run in this repository.\\n\\nThis post-merge run is the acceptance test, made in the same conditions that used to fail (agent user `atomaton-tools`, `HOME=/home/runner`, `RUSTUP_HOME` unset, `RUSTUP_TOOLCHAIN` unset):\\n\\n```\\ncargo 1.95.0 (f2d3ce0bd 2026-03-21)\\nrustc 1.95.0 (59807616e 2026-04-14)\\nstable-x86_64-unknown-linux-gnu (default)\\n1.95.0-x86_64-unknown-linux-gnu (active)\\n```\\n\\n`cargo fmt --check` → 0, `cargo clippy -- -D warnings` → 0, `cargo test --locked` → 0 (`test result: ok. 395 passed` in the unit suite, plus 3, 31 and 1 in the others), and the work tree ended clean.\\n\\n<details><summary>How each criterion is met, and what backs it</summary>\\n\\n- **The pin is declared in this repository, not the runtime image** — `environment.setup_commands` in `.github/atomaton/config.yaml` carries `rustup toolchain install 1.95.0 --profile minimal --component rustfmt --component clippy`, on `origin/main` at `bd23b31` (\\\"Merge pull request #49\\\"). No route-1 change was made, which the issue allowed.\\n- **The machinery reads it from the default branch and it ran here** — the runner's copy at `$ATOMATON_MACHINERY_ROOT/.github/atomaton/config.yaml:20-25` carries the entry (`.github/atomaton-runtime/scripts/run_environment_setup.ts:129`, root from `.github/workflows/atomaton-runner.yml:186`), and `/home/runner/.rustup/toolchains` now lists `1.95.0-x86_64-unknown-linux-gnu` beside `stable`. Before the merge, the same command in the same image listed only `stable`, and `cargo --version` failed at rustup's temp file.\\n- **The install landed where the agent reads it** — the setup step runs as `runner`, which owns `/home/runner/.rustup`, and the agent inherits `HOME=/home/runner` with no `RUSTUP_HOME`, so both resolve the same directory (`.github/atomaton-runtime/scripts/launch_atoma.ts:47-63` passes `HOME` and no `RUSTUP_HOME`).\\n- **No `RUSTUP_TOOLCHAIN=stable` was added** — `grep -rn RUSTUP_TOOLCHAIN` over the repository finds only three occurrences, all in `.github/workflows/release.yml:158,162,303`, all pre-existing: `cargo metadata` and `cargo update -p atoma` compile nothing, so the stable override there spends no download and hides no compiler mismatch. Nothing in this change touched them.\\n- **The checks are the same toolchain CI targets** — `rust-toolchain.toml:2-3` pins `1.95.0` with `components = [\\\"rustfmt\\\", \\\"clippy\\\"]`, which is the channel and the two components the setup command installs; the setting the pin implies (`/home/runner/.rustup/settings.toml`) is still `default_toolchain = \\\"stable-x86_64-unknown-linux-gnu\\\"`, so the install added a channel rather than moving the default.\\n\\n</details>\\n\\n**What I could not establish.** I could not cite this run's \\\"Run configured environment setup\\\" log line — the tools reach GitHub's API, not a job's raw log — so the installed toolchain and its resolution are the evidence instead; together they are only explicable by that step having run. And the image itself still ships only stable, so the toolchain is downloaded once per run rather than baked in: correct, but a per-run cost the issue's route 1 would have removed.\\n\\n**What happens next.** The work is done. A run on any other issue no longer meets the rustup failure, and `RUSTUP_TOOLCHAIN=stable` can be dropped from how earlier runs of #35 worked around it.\\n\"}"
+          }
+        }
+      ],
+      "provider_items": [
+        {
+          "content": [
+            {
+              "text": "That pre-existing `RUSTUP_TOOLCHAIN=stable` in `release.yml` is deliberate and documented: `cargo metadata`/`cargo update` don't compile anything, and honoring the pin would spend minutes downloading a toolchain for a read. Not something this issue asked to change, and the issue's \"do not add\" instruction concerns the checks. Worth noting as a one-sentence tangent in the report — actually it's relevant to the issue's fifth premise (\"do not add RUSTUP_TOOLCHAIN=stable anywhere; it only hides the mismatch\") — this is a pre-existing use that does not hide the check mismatch because those commands compile nothing. I'll mention it in one tangent sentence so the next reader doesn't file it as a regression.\n\nNow: acceptance judgement — everything met. Conclude with request_close_issue, summary carrying the report.\n\nReport content (summary argument):\n- Conclusion (1-2 sentences): route 2 is merged and now in force — this run, on the merged default branch, resolved `cargo` to 1.95.0 with no RUSTUP_TOOLCHAIN and all three checks passed; nothing about #40 is left open.\n- Evidence: \n  - origin/main bd23b31 carries the entry; the machinery copy at $ATOMATON_MACHINERY_ROOT/.github/atomaton/config.yaml:20-25 carries it too (which is what the runner reads).\n  - /home/runner/.rustup/toolchains now lists `1.95.0-x86_64-unknown-linux-gnu` next to stable — installed by this run's setup step; it was absent in the pre-merge run of this issue (the pre-merge run's `rustup toolchain list` showed only stable).\n  - In this run's agent shell (uid atomaton-tools, HOME=/home/runner, RUSTUP_HOME unset, no RUSTUP_TOOLCHAIN): `cargo --version` → `cargo 1.95.0 (f2d3ce0bd 2026-03-21)`, `rustc --version` → `rustc 1.95.0 (59807616e 2026-04-14)`, `rustup toolchain list` → `1.95.0-x86_64-unknown-linux-gnu (active)`, `stable-x86_64-unknown-linux-gnu (default)`.\n  - The three checks, unsets: fmt=0, clippy=0 (with -D warnings), test=0 → `test result: ok. 395 passed`, plus 3, 31, 1 in the other suites; work tree clean (`git status --porcelain` empty).\n  - `/home/runner/.rustup/settings.toml` still `default_toolchain = \"stable-x86_64-unknown-linux-gnu\"` — the pin was added, the default unchanged.\n- Could not establish: no route-1 change (image preinstall) — not needed, the issue said either closes it; also the CI check job cost note; also nothing about the tools was degraded. Also: I cannot cite this run's \"Run configured environment setup\" log line (no log access through the tools) — the installed toolchain is the evidence instead. Good honest anchor.\n- What happens next: work is done; the workaround can be dropped from future runs of other issues. Tangent: release.yml's pre-existing RUSTUP_TOOLCHAIN=stable is unrelated/deliberate.\n\nAlso note the pull-request check passed both jobs (reviewer reported) — my earlier PR check. Fine.\n\nThen note the tangent about release.yml. And end with request_close_issue — no agent/person call in the message? request_close_issue posts the summary as comment. After the tool returns, session ends. My message with the call: I should include the report body as the summary argument; the message text is also a comment? Careful: \"Your summary is posted as the comment this call ends on\". So put the report in summary.\n\nAlso: should the closing include a mention of @yuma-seno? The machinery tells the person. The role outcome says `request_close_issue` — no mention needed; the tool decides whether it closes or asks the author. Don't add a mention (that'd be a second call alongside the tool? A mention in the message with request_close_issue — the instructions say a mention is a call and two calls are refused. request_close_issue is a tool call, not a \"call\" in the handoff sense... but safer: no mention).\n\nWrite the summary with markdown, folds for evidence.",
+              "type": "reasoning_text"
+            }
+          ],
+          "id": "rs_73a2906a-b361-46f8-9073-4b9454a15d1e",
+          "status": "completed",
+          "summary": [],
+          "type": "reasoning"
+        }
+      ],
+      "finish_reason": "stop"
+    },
+    {
+      "role": "tool",
+      "content": "Issue #40 is concluded: your conclusion is on the issue. #40 is not a tracked sub-issue; nothing to aggregate. Nothing else is yours to do here.",
+      "tool_call_id": "chatcmpl-tool-89268a3bb518f2a2"
     }
   ],
   "metadata": {
     "github_context": {
       "agent": "engineer",
-      "event_count": 2,
-      "snapshot_hash": "422c7f4116a22d3bc80c5d950fc3c5b748e826410067f81c2d82b9c56159f2a0",
+      "event_count": 6,
+      "snapshot_hash": "4fce36c0a8a247125079684bee1d440066eeba6b18cc2498dbd0a23a68987900",
       "version": 1
     }
   },
@@ -1110,6 +1374,23 @@
         }
       },
       "started": "2026-11-26T16:55:26Z"
+    },
+    {
+      "compactions": 0,
+      "ended": "2026-11-27T01:12:41Z",
+      "ended_because": "completed",
+      "iterations": 6,
+      "messages": 90,
+      "seconds": 93,
+      "server_calls": {
+        "atomaton_env": {
+          "request_close_issue": 1
+        },
+        "shell": {
+          "bash": 6
+        }
+      },
+      "started": "2026-11-27T01:11:08Z"
     }
   ]
 }
