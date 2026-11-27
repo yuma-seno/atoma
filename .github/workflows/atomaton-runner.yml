@@ -41,7 +41,7 @@ run-name: '${{ inputs.agent }} on #${{ inputs.number }}'
         description: Atoma CLI version tag to install (e.g. v0.4.5). Use `source` to build from a checkout of yuma-seno/atoma@main.
         required: false
         type: string
-        default: v0.6.0
+        default: v0.7.0
       reload_count:
         description: How many times this work has already rebuilt its environment (set by reload_environment; leave at 0)
         required: false
@@ -91,7 +91,7 @@ run-name: '${{ inputs.agent }} on #${{ inputs.number }}'
         description: Atoma CLI version tag to install (e.g. v0.4.5). Use `source` to build from a checkout of yuma-seno/atoma@main.
         required: false
         type: string
-        default: v0.6.0
+        default: v0.7.0
       reload_count:
         description: How many times this work has already rebuilt its environment (set by reload_environment; leave at 0)
         required: false
@@ -892,22 +892,109 @@ jobs:
           echo "=== Atoma Logs ===" >&2
           cat "${RUNNER_TEMP}/atomaton-run/atomaton_logs.txt" >&2
 
-          # The one second turn this run is allowed: a closing message that broke the
-          # one-call rule, a run that stopped on a sentence having changed nothing, or a run
-          # the loop guard stopped.
-          # The whole decision -- the ending checks after each turn, the injections, the
-          # bounded second invocation, and what a person's stop during it means -- is
-          # `decide_reask.ts` now, and it answers with the exit code the ending
-          # classification below consumes (a stop during the second turn makes the run a
-          # soft stop) and whether the closing message's calls were refused.
-          ENDING_INVALID=false
-          REASK_RESULT=$(bun run "${ATOMATON_MACHINERY_ROOT:-.}/.github/atomaton-runtime/scripts/decide_reask.ts" --run-dir "${RUNNER_TEMP}/atomaton-run" --tool-cache "${RUNNER_TEMP}/atomaton-tool-cache" --tools-file "${RUNNER_TEMP}/atomaton-run/tools.yaml" --credentials-file "$RUNNER_TEMP/atomaton-credentials/credentials.json" --stop-file "${RUNNER_TEMP}/atomaton-run/stop-requested" --deadline-at "${{ steps.deadline.outputs.at }}" --min-budget-secs "300" --exit-code "${EXIT_CODE}") || { echo "::error::the second-turn decision failed; the run's ending is unknown"; exit 1; }
+          # The one second turn this run is allowed is DECIDED here and RUN by the next
+          # step: a closing message that broke the one-call rule, a run that stopped on a
+          # sentence having changed nothing, or a run the loop guard stopped.
+          #
+          # The split is the credentials file's. atoma reads that file and deletes it before
+          # starting any tool server -- tested, and what keeps the file and the servers from
+          # ever coexisting -- so the file this run wrote is gone by the time this turn is
+          # over. Only a step holding the values can write another, and holding them here
+          # would put them in the step whose bash lived for the whole of that turn. So this
+          # step decides, backs the session up and puts the note in; the step below launches
+          # on a credentials file of its own. The bound is `decide_reask.ts`'s, and the
+          # reason it prints is what crosses.
+          #
+          # Nothing here exits on atoma's failure: the exit code the run ends on is the one
+          # the second turn leaves, and a first-turn failure that a second turn repairs must
+          # not colour this step.
+          REASK_RESULT=$(bun run "${ATOMATON_MACHINERY_ROOT:-.}/.github/atomaton-runtime/scripts/decide_reask.ts" --run-dir "${RUNNER_TEMP}/atomaton-run" --stop-file "${RUNNER_TEMP}/atomaton-run/stop-requested" --deadline-at "${{ steps.deadline.outputs.at }}" --min-budget-secs "300" --exit-code "${EXIT_CODE}") || { echo "::error::the second-turn decision failed; the run's ending is unknown"; exit 1; }
+          REASK=$(printf '%s' "$REASK_RESULT" | sed -n 's/^reask=//p')
+          REASK_BUDGET=$(printf '%s' "$REASK_RESULT" | sed -n 's/^budget_secs=//p')
           EXIT_CODE=$(printf '%s' "$REASK_RESULT" | sed -n 's/^exit_code=//p')
           ENDING_INVALID=$(printf '%s' "$REASK_RESULT" | sed -n 's/^ending_invalid=//p')
+          {
+            echo "reask=$REASK"
+            echo "reask_budget=$REASK_BUDGET"
+            echo "exit_code=$EXIT_CODE"
+            echo "ending_invalid=$ENDING_INVALID"
+          } >> "$GITHUB_OUTPUT"
+        if: (steps.context.outputs.new_event_count != '0' || inputs.reload_count != '0') && steps.claim.outputs.claimed == 'true'
+      - name: Ask the run for one more turn
+        id: reask
+        shell: bash
+        env:
+          GITHUB_RUN_ID: ${{ github.run_id }}
+          NUMBER: ${{ inputs.number }}
+          TYPE: ${{ inputs.type }}
+          ATOMATON_RELOAD_COUNT: ${{ inputs.reload_count }}
+          ATOMATON_ASK_ID: ${{ inputs.ask }}
+          NOTIFY: ${{ steps.notify.outputs.notify }}
+          ATOMATON_DISPATCHED_BY: ${{ inputs.dispatched_by }}
+          ATOMATON_OPS_LOG: ${{ runner.temp }}/atomaton-run/atomaton_ops.log
+          OPENAI_BASE_URL_IN: ${{ vars.OPENAI_BASE_URL }}
+          ATOMA_PROVIDER_IN: ${{ vars.ATOMA_PROVIDER }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          ORCAROUTER_API_KEY: ${{ secrets.ORCAROUTER_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          ATOMA_COPILOT_TOKEN: ${{ secrets.ATOMA_COPILOT_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
+          ATOMATON_SECRET_0: ${{ secrets[fromJSON(steps.secret-names.outputs.names || '[]')[0]] }}
+          ATOMATON_SECRET_1: ${{ secrets[fromJSON(steps.secret-names.outputs.names || '[]')[1]] }}
+          ATOMATON_SECRET_2: ${{ secrets[fromJSON(steps.secret-names.outputs.names || '[]')[2]] }}
+          ATOMATON_SECRET_3: ${{ secrets[fromJSON(steps.secret-names.outputs.names || '[]')[3]] }}
+          ATOMATON_SECRET_4: ${{ secrets[fromJSON(steps.secret-names.outputs.names || '[]')[4]] }}
+          ATOMATON_SECRET_5: ${{ secrets[fromJSON(steps.secret-names.outputs.names || '[]')[5]] }}
+          ATOMATON_SECRET_6: ${{ secrets[fromJSON(steps.secret-names.outputs.names || '[]')[6]] }}
+          ATOMATON_SECRET_7: ${{ secrets[fromJSON(steps.secret-names.outputs.names || '[]')[7]] }}
+          ATOMATON_SECRET_8: ${{ secrets[fromJSON(steps.secret-names.outputs.names || '[]')[8]] }}
+          ATOMATON_SECRET_9: ${{ secrets[fromJSON(steps.secret-names.outputs.names || '[]')[9]] }}
+          ATOMATON_SECRET_NAMES: ${{ steps.secret-names.outputs.names }}
+        run: |
 
-          # The watcher has nothing left to watch for. Killed rather than left to the job,
-          # because a poller that outlives the run it was polling for spends API budget on an
-          # answer nobody will read.
+          export AGENT="${{ inputs.agent }}"
+          EXIT_CODE='${{ steps.atoma.outputs.exit_code }}'
+          ENDING_INVALID='${{ steps.atoma.outputs.ending_invalid }}'
+          REASK='${{ steps.atoma.outputs.reask }}'
+          REASK_BUDGET='${{ steps.atoma.outputs.reask_budget }}'
+
+          if [ "$REASK" != "" ]; then
+            # atoma read the first file and deleted it, so the second turn gets its own.
+            bun run "${ATOMATON_MACHINERY_ROOT:-.}/.github/atomaton-runtime/scripts/write_credentials_file.ts" --out "$RUNNER_TEMP/atomaton-credentials/credentials.json"
+            sudo chown atomaton-tools "$RUNNER_TEMP/atomaton-credentials/credentials.json"
+            # The reason travels in rather than being looked for again: `decide_reask.ts` is
+            # where two turns and no more is held.
+            ASK_RESULT=$(bun run "${ATOMATON_MACHINERY_ROOT:-.}/.github/atomaton-runtime/scripts/ask_again.ts" --run-dir "${RUNNER_TEMP}/atomaton-run" --tool-cache "${RUNNER_TEMP}/atomaton-tool-cache" --tools-file "${RUNNER_TEMP}/atomaton-run/tools.yaml" --credentials-file "$RUNNER_TEMP/atomaton-credentials/credentials.json" --stop-file "${RUNNER_TEMP}/atomaton-run/stop-requested" --reask "${REASK}" --budget-secs "${REASK_BUDGET}" --exit-code "${EXIT_CODE}") || { echo "::error::the second turn could not be run; the run's ending is unknown"; exit 1; }
+            EXIT_CODE=$(printf '%s' "$ASK_RESULT" | sed -n 's/^exit_code=//p')
+            ENDING_INVALID=$(printf '%s' "$ASK_RESULT" | sed -n 's/^ending_invalid=//p')
+          fi
+
+          {
+            echo "exit_code=$EXIT_CODE"
+            echo "ending_invalid=$ENDING_INVALID"
+          } >> "$GITHUB_OUTPUT"
+        if: always() && (steps.atoma.outcome == 'success' || steps.atoma.outcome == 'failure') && (steps.context.outputs.new_event_count != '0' || inputs.reload_count != '0') && steps.claim.outputs.claimed == 'true'
+      - name: Write the turn's ending
+        id: finish
+        shell: bash
+        run: |
+
+          EXIT_CODE='${{ steps.reask.outputs.exit_code }}'
+          ENDING_INVALID='${{ steps.reask.outputs.ending_invalid }}'
+
+          # Nothing published means the step above never reached an ending, so the machinery
+          # is what failed and not atoma. The boundary flag stays unwritten, and "Post result
+          # comment" reads that as red.
+          if [ -z "$EXIT_CODE" ]; then
+            echo "::error::the run never reached an ending; the machinery failed before it did"
+            exit 1
+          fi
+
+          # The watcher has nothing left to watch for here, and only here: the second turn was
+          # a turn a person could still stop, and the file it writes is what atoma is handed.
+          # Killed rather than left to the job, because a poller that outlives the run it was
+          # polling for spends API budget on an answer nobody will read.
           if [ -f "${RUNNER_TEMP}/atomaton-run/stop-watch.pid" ]; then
             kill "$(cat "${RUNNER_TEMP}/atomaton-run/stop-watch.pid")" 2>/dev/null || true
           fi
@@ -928,12 +1015,12 @@ jobs:
           elif [ "$EXIT_CODE" != "0" ]; then
             # atoma's own failure — neither success nor the soft stop — published for
             # "Post result comment", which leaves the run green only for this case. Everything
-            # the machinery does around atoma — the tools file, the sudo preflight above,
-            # and the reads that turn a 0/2 exit into an ending, which this bash runs with
-            # `-e` — leaves the flag unwritten, and unwritten is red: the machinery's.
-            # The residue is a machinery failure that arrives as atoma's exit code (a sudo
-            # that passed the preflight and failed inside the real invocation), which
-            # nothing here can tell from atoma's own; the log will say.
+            # the machinery does around atoma — and the reads that turn a 0/2 exit into an
+            # ending, which this bash runs with `-e` — leaves the flag unwritten, and
+            # unwritten is red: the machinery's. The residue is a machinery failure that
+            # arrives as atoma's exit code (a sudo that passed the preflight and failed inside
+            # the real invocation), which nothing here can tell from atoma's own; the log will
+            # say.
             echo "atoma_failed=true" >> "$GITHUB_OUTPUT"
             exit $EXIT_CODE
           fi
@@ -945,7 +1032,8 @@ jobs:
           # cannot match `"op":"dispatch-elsewhere"`, which is what keeps one run from
           # reading as both handing off and parking.
           bun run "${ATOMATON_MACHINERY_ROOT:-.}/.github/atomaton-runtime/scripts/summarize_run.ts" --run-dir "${RUNNER_TEMP}/atomaton-run" --ending-invalid "${ENDING_INVALID}"
-        if: (steps.context.outputs.new_event_count != '0' || inputs.reload_count != '0') && steps.claim.outputs.claimed == 'true'
+        continue-on-error: true
+        if: always() && (steps.atoma.outcome == 'success' || steps.atoma.outcome == 'failure') && steps.reask.outcome != 'cancelled' && (steps.context.outputs.new_event_count != '0' || inputs.reload_count != '0') && steps.claim.outputs.claimed == 'true'
       - name: Write token usage summary
         shell: bash
         run: |
@@ -973,8 +1061,8 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          bun run "${ATOMATON_MACHINERY_ROOT:-.}/.github/atomaton-runtime/scripts/post_result_comment.ts" --number "${{ inputs.number }}" --agent "${{ inputs.agent }}" --type "${{ inputs.type }}" --notify "${{ steps.notify.outputs.notify }}" --directive "${{ steps.atoma.outputs.directive }}" --chain-continues "${{ steps.atoma.outputs.chain_continues }}" --ended-because "${{ steps.atoma.outputs.ended_because }}" --outcome "${{ steps.atoma.outcome }}" --atoma-failed "${{ steps.atoma.outputs.atoma_failed }}" --reported "${{ steps.atoma.outputs.reported }}" --messages-before "${{ steps.context.outputs.messages_before }}" --changed "${{ steps.atoma.outputs.changed }}" --run-url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" --session "${RUNNER_TEMP}/atomaton-run/session.json" --output "${RUNNER_TEMP}/atomaton-run/atomaton_output.txt" --logs-file "${RUNNER_TEMP}/atomaton-run/atomaton_logs.txt" --ending-comment "${RUNNER_TEMP}/atomaton-run/ending-comment.json" --ending-invalid "${{ steps.atoma.outputs.ending_invalid }}" --people-file "${RUNNER_TEMP}/atomaton-run/callees.json" --ask "${{ inputs.ask }}" --run-id "${{ github.run_id }}"
-        if: always() && (steps.atoma.outcome == 'success' || steps.atoma.outcome == 'failure') && (steps.context.outputs.new_event_count != '0' || inputs.reload_count != '0') && steps.claim.outputs.claimed == 'true'
+          bun run "${ATOMATON_MACHINERY_ROOT:-.}/.github/atomaton-runtime/scripts/post_result_comment.ts" --number "${{ inputs.number }}" --agent "${{ inputs.agent }}" --type "${{ inputs.type }}" --notify "${{ steps.notify.outputs.notify }}" --directive "${{ steps.finish.outputs.directive }}" --chain-continues "${{ steps.finish.outputs.chain_continues }}" --ended-because "${{ steps.finish.outputs.ended_because }}" --outcome "${{ steps.finish.outcome }}" --atoma-failed "${{ steps.finish.outputs.atoma_failed }}" --reported "${{ steps.finish.outputs.reported }}" --messages-before "${{ steps.context.outputs.messages_before }}" --changed "${{ steps.finish.outputs.changed }}" --run-url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" --session "${RUNNER_TEMP}/atomaton-run/session.json" --output "${RUNNER_TEMP}/atomaton-run/atomaton_output.txt" --logs-file "${RUNNER_TEMP}/atomaton-run/atomaton_logs.txt" --ending-comment "${RUNNER_TEMP}/atomaton-run/ending-comment.json" --ending-invalid "${{ steps.finish.outputs.ending_invalid }}" --people-file "${RUNNER_TEMP}/atomaton-run/callees.json" --ask "${{ inputs.ask }}" --run-id "${{ github.run_id }}"
+        if: always() && (steps.finish.outcome == 'success' || steps.finish.outcome == 'failure') && (steps.context.outputs.new_event_count != '0' || inputs.reload_count != '0') && steps.claim.outputs.claimed == 'true'
       - name: Report a cancelled run
         shell: bash
         env:
@@ -985,12 +1073,12 @@ jobs:
           RUN_ID: ${{ github.run_id }}
         run: |
           bun run "${ATOMATON_MACHINERY_ROOT:-.}/.github/atomaton-runtime/scripts/report_cancelled_run.ts" --number "${NUMBER}" --agent "${AGENT}" --ask "${ASK}" --run-id "${RUN_ID}"
-        if: always() && steps.atoma.outcome == 'cancelled' && steps.claim.outputs.claimed == 'true'
+        if: always() && (steps.atoma.outcome == 'cancelled' || steps.reask.outcome == 'cancelled') && steps.claim.outputs.claimed == 'true'
       - name: Record run metadata
         shell: bash
         run: |
           bun run "${ATOMATON_MACHINERY_ROOT:-.}/.github/atomaton-runtime/scripts/record_run_metadata.ts" --session "${RUNNER_TEMP}/atomaton-run/session.json" --comment-id "${{ steps.post-result.outputs.comment_id }}" --agent "${{ inputs.agent }}" --snapshot-hash "${{ steps.context.outputs.context_snapshot_hash }}" --event-count "${{ steps.context.outputs.context_event_count }}" --type "${{ steps.fetch.outputs.session_type }}" --session-number "${{ steps.fetch.outputs.session_number }}"
-        if: steps.atoma.outcome == 'success' && steps.post-result.outputs.comment_id != ''
+        if: steps.finish.outcome == 'success' && steps.post-result.outputs.comment_id != ''
       - name: Save session to atomaton-data branch
         shell: bash
         run: |
@@ -1000,7 +1088,7 @@ jobs:
         shell: bash
         run: |
           bun run "${ATOMATON_MACHINERY_ROOT:-.}/.github/atomaton-runtime/scripts/save_workspace.ts" --root-issue "${{ steps.workspace.outputs.root_issue }}" --source "/tmp/atomaton-workspace" --agent "${{ inputs.agent }}"
-        if: steps.atoma.outcome == 'success'
+        if: steps.finish.outcome == 'success'
       - name: Write the metrics report
         shell: bash
         env:
@@ -1016,7 +1104,7 @@ jobs:
           if [ -n "$(git status --porcelain)" ]; then
             echo "has_changes=true" >> "$GITHUB_OUTPUT"
           fi
-        if: steps.atoma.outcome == 'success'
+        if: steps.finish.outcome == 'success'
       - name: Report configuration findings atoma made
         shell: bash
         env:
@@ -1039,8 +1127,8 @@ jobs:
           NOTIFY: ${{ steps.notify.outputs.notify }}
           AGENT: ${{ inputs.agent }}
         run: |
-          bun run "${ATOMATON_MACHINERY_ROOT:-.}/.github/atomaton-runtime/scripts/notify_limit_reached.ts" --number "${NUMBER}" --agent "${AGENT}" --notify "${NOTIFY}" --ended-because "${{ steps.atoma.outputs.ended_because }}"
-        if: (steps.atoma.outputs.ended_because == 'runtime' || steps.atoma.outputs.ended_because == 'iterations' || steps.atoma.outputs.ended_because == 'loop') && steps.post-result.outputs.notified != 'true'
+          bun run "${ATOMATON_MACHINERY_ROOT:-.}/.github/atomaton-runtime/scripts/notify_limit_reached.ts" --number "${NUMBER}" --agent "${AGENT}" --notify "${NOTIFY}" --ended-because "${{ steps.finish.outputs.ended_because }}"
+        if: (steps.finish.outputs.ended_because == 'runtime' || steps.finish.outputs.ended_because == 'iterations' || steps.finish.outputs.ended_because == 'loop') && steps.post-result.outputs.notified != 'true'
       - name: Manage auto-dispatch loop control
         id: loop-control
         shell: bash
@@ -1048,12 +1136,12 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           bun run "${ATOMATON_MACHINERY_ROOT:-.}/.github/atomaton-runtime/scripts/manage_dispatch_loop.ts" --number "${{ inputs.number }}"
-        if: steps.atoma.outcome == 'success'
+        if: steps.finish.outcome == 'success'
       - name: Decide how this turn ended
         id: turn-ending
         shell: bash
         run: |
-          bun run "${ATOMATON_MACHINERY_ROOT:-.}/.github/atomaton-runtime/scripts/decide_turn_ending.ts" --outcome "${{ steps.atoma.outcome }}" --ended-because "${{ steps.atoma.outputs.ended_because }}" --loop-limit-reached "${{ steps.loop-control.outputs.loop_limit_reached }}" --chain-continues "${{ steps.atoma.outputs.chain_continues }}" --parked "${{ steps.atoma.outputs.parked }}" --directive "${{ steps.atoma.outputs.directive }}" --reported "${{ steps.atoma.outputs.reported }}"
+          bun run "${ATOMATON_MACHINERY_ROOT:-.}/.github/atomaton-runtime/scripts/decide_turn_ending.ts" --outcome "${{ steps.finish.outcome }}" --ended-because "${{ steps.finish.outputs.ended_because }}" --loop-limit-reached "${{ steps.loop-control.outputs.loop_limit_reached }}" --chain-continues "${{ steps.finish.outputs.chain_continues }}" --parked "${{ steps.finish.outputs.parked }}" --directive "${{ steps.finish.outputs.directive }}" --reported "${{ steps.finish.outputs.reported }}"
         if: always()
       - name: 'Move the turn labels: the work hands back to a person'
         shell: bash

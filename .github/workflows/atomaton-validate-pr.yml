@@ -66,7 +66,7 @@ jobs:
       - name: Install Atoma CLI
         shell: bash
         run: |
-          VERSION="v0.6.0"
+          VERSION="v0.7.0"
           if [ "$VERSION" = "source" ]; then
             echo "Building Atoma from source (atoma-src/) ..."
             cargo install --path atoma-src --force --locked
@@ -117,13 +117,3 @@ jobs:
         run: |
           bun run "${ATOMATON_MACHINERY_ROOT:-.}/.github/atomaton-runtime/scripts/dispatch_agent.ts" --agent "${AGENT}" --number "${NUMBER}" --type "pr" --repo "${REPO}" --ask "${ASK}" --run-id "${{ github.run_id }}" --answers-request "true" --verdict-passed "${VERDICT_PASSED}" --context "validation of #${NUMBER} finished: ${SUMMARY}"
         if: steps.validate.outputs.next_agent != ''
-      - name: Tell a person nobody was dispatched
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-          NUMBER: ${{ inputs.number }}
-          SUMMARY: ${{ steps.validate.outputs.summary }}
-          REPO: ${{ github.repository }}
-        run: |
-          bun run "${ATOMATON_MACHINERY_ROOT:-.}/.github/atomaton-runtime/scripts/notify_unattended.ts" --repo "${REPO}" --number "${NUMBER}" --summary "${SUMMARY}"
-        if: steps.validate.outputs.next_agent == '' && steps.validate.outputs.unattended == 'true'

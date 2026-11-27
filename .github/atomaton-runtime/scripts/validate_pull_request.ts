@@ -20,57 +20,49 @@ function askFor(engineerAgent) {
 }
 function decideValidationOutcome(input) {
   const { conclusion, reviewerAgent, engineerAgent } = input;
+  const hold = input.hold ?? { kind: "with-person" };
+  const callWaiting = hold.kind === "free" || hold.kind === "parked";
+  const next = callWaiting ? handTo(reviewerAgent) : {};
+  const handedOn = next.next !== undefined;
   const deliverableProblems = input.deliverableProblems ?? [];
   if (deliverableProblems.length > 0) {
     const count = `${deliverableProblems.length} problem${deliverableProblems.length === 1 ? "" : "s"}`;
+    const headline = `.github/atomaton/ is not internally consistent (${count}), so CI was not run.`;
     return {
       verdict: "deliverable-invalid",
-      unattended: true,
-      summary: `.github/atomaton/ is not internally consistent (${count}), so CI was not run.` + `${askFor(engineerAgent)}`
+      ...next,
+      summary: handedOn ? headline : `${headline}${askFor(engineerAgent)}`
     };
   }
   const normalised = conclusion.trim().toLowerCase();
   const passed = PASSING.has(normalised);
   if (passed) {
-    const hold = input.hold ?? { kind: "with-person" };
-    if (hold.kind === "free" || hold.kind === "parked") {
-      return {
-        verdict: "passed",
-        ...handTo(reviewerAgent),
-        unattended: reviewerAgent.trim() === "",
-        summary: `CI concluded ${normalised}.`
-      };
+    if (handedOn) {
+      return { verdict: "passed", ...next, summary: `CI concluded ${normalised}.` };
     }
     const because = {
+      free: "the thread names no agent to start",
+      parked: "the thread names no agent to start",
       "in-flight": "a run already holds this pull request, and its own report is the thread's next word",
       chain: "the thread's newest word handed the work to another agent, and that call is the chain's to carry",
       "with-person": "the thread's newest word handed the turn back to a person",
       unreadable: "the thread could not be read to rule out a run in flight"
     };
-    if (hold.kind === "in-flight" || hold.kind === "chain") {
-      return {
-        verdict: "passed",
-        unattended: false,
-        summary: `CI concluded ${normalised}, and nothing was dispatched: ${because[hold.kind]}.`
-      };
-    }
     return {
       verdict: "passed",
-      unattended: true,
-      summary: `CI concluded ${normalised}, and nothing was dispatched: ${because[hold.kind] ?? because["with-person"]}.` + `${reviewerAgent.trim() === "" ? "" : ` Comment /${reviewerAgent.trim()} to start the review yourself.`}`
+      summary: `CI concluded ${normalised}, and nothing was dispatched: ${because[hold.kind]}.`
     };
   }
   if (!normalised) {
     return {
       verdict: "no-conclusion",
-      unattended: true,
       summary: "CI never reported a conclusion. Nothing was dispatched; a human should look."
     };
   }
   return {
     verdict: "failed",
-    unattended: true,
-    summary: `CI concluded ${normalised}. Nobody was dispatched to fix it.` + `${askFor(engineerAgent)}`
+    ...next,
+    summary: handedOn ? `CI concluded ${normalised}.` : `CI concluded ${normalised}. Nobody was dispatched to fix it.${askFor(engineerAgent)}`
   };
 }
 
@@ -93,6 +85,19 @@ function ghCommand() {
 }
 function gh(...args) {
   return run([...ghCommand(), ...args]);
+}
+function ghAs(token, ...args) {
+  const proc = Bun.spawnSync({
+    cmd: [...ghCommand(), ...args],
+    stdout: "pipe",
+    stderr: "pipe",
+    env: { ...process.env, GH_TOKEN: token }
+  });
+  return {
+    code: proc.exitCode ?? 1,
+    stdout: proc.stdout ? proc.stdout.toString("utf8").trim() : "",
+    stderr: proc.stderr ? proc.stderr.toString("utf8").trim() : ""
+  };
 }
 function ghRead(...args) {
   let result = gh(...args);
@@ -166,8 +171,9 @@ function splitConcatenatedJson(text) {
   }
   return results;
 }
-function dispatchWorkflow(context, workflow, args = [], log = (m) => console.error(m)) {
-  const { code, stdout, stderr } = gh("workflow", "run", workflow, ...args);
+function dispatchWorkflow(context, workflow, args = [], log = (m) => console.error(m), token = "") {
+  const argv = ["workflow", "run", workflow, ...args];
+  const { code, stdout, stderr } = token.trim() ? ghAs(token.trim(), ...argv) : gh(...argv);
   if (code) {
     log(`${context}: WARN failed to dispatch ${workflow}: ${stderr || stdout}`);
     return false;
@@ -1074,7 +1080,6 @@ function main() {
     reportFailure(repo, values.number ?? "", runUrl, outcome.summary, deliverableProblems);
   }
   write(`next_agent=${outcome.next?.agent ?? ""}`);
-  write(`unattended=${outcome.unattended}`);
   write(`conclusion=${conclusion}`);
   write(`verdict_passed=${contextsPassed(outcome.verdict)}`);
   write(`summary=${outcome.summary}`);

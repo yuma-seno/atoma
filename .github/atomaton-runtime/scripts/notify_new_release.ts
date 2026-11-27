@@ -24,6 +24,19 @@ function ghCommand() {
 function gh(...args) {
   return run([...ghCommand(), ...args]);
 }
+function ghAs(token, ...args) {
+  const proc = Bun.spawnSync({
+    cmd: [...ghCommand(), ...args],
+    stdout: "pipe",
+    stderr: "pipe",
+    env: { ...process.env, GH_TOKEN: token }
+  });
+  return {
+    code: proc.exitCode ?? 1,
+    stdout: proc.stdout ? proc.stdout.toString("utf8").trim() : "",
+    stderr: proc.stderr ? proc.stderr.toString("utf8").trim() : ""
+  };
+}
 function ghRead(...args) {
   let result = gh(...args);
   for (const delay of [2000, 6000]) {
@@ -40,6 +53,16 @@ function looksTransient(result) {
   if (/HTTP (429|5[0-9][0-9])(?![0-9])/.test(text))
     return true;
   return /(timeout|timed out|connection reset|unexpected EOF|TLS handshake|temporary failure)/i.test(text);
+}
+function dispatchWorkflow(context, workflow, args = [], log = (m) => console.error(m), token = "") {
+  const argv = ["workflow", "run", workflow, ...args];
+  const { code, stdout, stderr } = token.trim() ? ghAs(token.trim(), ...argv) : gh(...argv);
+  if (code) {
+    log(`${context}: WARN failed to dispatch ${workflow}: ${stderr || stdout}`);
+    return false;
+  }
+  log(`${context}: dispatched ${workflow}`);
+  return true;
 }
 
 // src/domain/work/agent-name.ts
@@ -230,6 +253,9 @@ var LLM_CONTEXT_TAG = stringTag("llm-context", "include|exclude");
 var AGGREGATED_TAG = numericTag("aggregated");
 var SUB_RESULT_TAG = numericTag("sub-result");
 var QUOTES_TAG = numericTag("quotes");
+function isQuotation(body) {
+  return QUOTES_TAG.has(body);
+}
 function proseOnly(text) {
   return fenceSegments(text).map((segment) => segment.code ? `
 ` : segment.text).join("");
@@ -352,10 +378,203 @@ function log(message) {
   console.error(`[notice-issue] ${message}`);
 }
 
-// src/entrypoints/machinery/lib/release-files.ts
-import { existsSync, mkdtempSync, readFileSync as readFileSync2, readdirSync, rmSync } from "fs";
-import { tmpdir } from "os";
-import { join } from "path";
+// src/entrypoints/machinery/lib/open-pull-request.ts
+function listOpenForHead(token, repo, branch) {
+  const argv = ["pr", "list", "--repo", repo, "--head", branch, "--state", "open", "--json", "number"];
+  return token.trim() === "" ? ghRead(...argv) : ghAs(token.trim(), ...argv);
+}
+function openPrForHead(repo, branch, token = "") {
+  const result = listOpenForHead(token, repo, branch);
+  if (result.code !== 0) {
+    const why = (result.stderr || result.stdout).split(`
+`)[0] ?? "";
+    console.error(`WARN could not list open pull requests on ${branch}: ${why || `gh exited ${result.code}`}`);
+    return 0;
+  }
+  try {
+    const parsed = JSON.parse(result.stdout || "[]");
+    const number = Number(parsed[0]?.number ?? 0);
+    return Number.isInteger(number) && number > 0 ? number : 0;
+  } catch {
+    return 0;
+  }
+}
+
+// src/entrypoints/machinery/lib/update-branch.ts
+function updateBranchFor(tag) {
+  return `atomaton/update-${tag}`;
+}
+
+// src/domain/work/control-commands.ts
+var CONTROL_COMMAND_NAMES = ["stop", "resume", "upgrade"];
+function isControlCommand(name) {
+  return CONTROL_COMMAND_NAMES.includes(name);
+}
+function controlLabel(name) {
+  return name ? `!${name}` : "";
+}
+
+// src/domain/work/comment-command.ts
+var COMMAND_RE = new RegExp(`^\\/(${AGENT_NAME_PATTERN})(?:\\s+(.*))?$`);
+var CONTROL_RE = /^!([a-z][a-z0-9-]*)(?:\s+(.*))?$/;
+var DISPATCH_RE = new RegExp(`^<!--\\s*atomaton:dispatch\\s*=\\s*(${AGENT_NAME_PATTERN})\\s*-->`);
+var NOTHING = { agent: "", control: "", sessionMode: "continue", error: "" };
+function parseCommentCommand(body) {
+  if (!body)
+    return NOTHING;
+  for (const rawLine of body.split(`
+`)) {
+    const parsed = parseCommandLine(rawLine);
+    if (parsed !== undefined)
+      return parsed;
+  }
+  return NOTHING;
+}
+function parseCommandLine(rawLine) {
+  const line = rawLine.trim();
+  const bangMatch = CONTROL_RE.exec(line);
+  if (bangMatch && isControlCommand(bangMatch[1])) {
+    return readControl(bangMatch[1], bangMatch[2]);
+  }
+  const commandMatch = COMMAND_RE.exec(line);
+  if (commandMatch) {
+    const name = commandMatch[1];
+    const modifier = commandMatch[2]?.trim() ?? "";
+    if (isControlCommand(name))
+      return readControl(name, modifier === "" ? undefined : modifier);
+    if (!modifier)
+      return { ...NOTHING, agent: name };
+    if (modifier === "recover")
+      return { ...NOTHING, agent: name, sessionMode: "recover" };
+    return {
+      ...NOTHING,
+      error: `Unknown command syntax: '/${name} ${modifier}'. Put instructions on the lines after '/${name}', or use '/${name} recover'.`
+    };
+  }
+  const dispatchMatch = DISPATCH_RE.exec(line);
+  if (dispatchMatch)
+    return { ...NOTHING, agent: dispatchMatch[1] };
+  return;
+}
+function readControl(name, modifier) {
+  if (!modifier)
+    return { ...NOTHING, control: name };
+  return {
+    ...NOTHING,
+    error: `'${controlLabel(name)}' takes nothing after it. To resume with an instruction, use '/<agent>' and put the instruction on the following lines.`
+  };
+}
+
+// src/adapters/github/thread.ts
+var readers = {
+  ending: (body) => {
+    const ended = ENDED_TAG.readProse(body)?.verb;
+    if (ended === "handoff")
+      return "handed-off";
+    if (ended === "waiting")
+      return "waiting";
+    if (ended === "stopped" || ended === "limit" || ended === "done" || ended === "refused")
+      return "returned";
+    return "";
+  },
+  requestedAgent: (body) => parseCommentCommand(proseOnly(body)).agent,
+  isDispatchMarker: (body) => DISPATCH_TAG.hasProse(body),
+  claim: (body) => TOOK_TAG.readProse(body),
+  answeredAsk: (body) => {
+    const answers = ENDED_TAG.readProse(body)?.answers;
+    return answers !== undefined && answers > 0 ? answers : undefined;
+  },
+  endingAgent: (body) => AGENT_TAG.readProse(body) ?? ""
+};
+var endingWalkReaders = {
+  ending: readers.ending,
+  quoted: isQuotation,
+  claim: (body) => TOOK_TAG.readProse(body),
+  ended: (body) => ENDED_TAG.readProse(body)
+};
+
+// src/adapters/runner/config.ts
+import { readFileSync } from "fs";
+
+// src/domain/delivery/merge-readiness.ts
+var CI_WOULD_BE_WASTED = new Set([
+  "not-open",
+  "draft",
+  "conflicting",
+  "behind",
+  "mergeability-unknown",
+  "checks-pending",
+  "checks-failing"
+]);
+var PASSING = new Set(["success", "neutral", "skipped"]);
+
+// src/domain/delivery/declared-secrets.ts
+var RUN_CREDENTIALS = [
+  "OPENAI_API_KEY",
+  "OPENROUTER_API_KEY",
+  "ORCAROUTER_API_KEY",
+  "ANTHROPIC_API_KEY",
+  "ATOMA_COPILOT_TOKEN",
+  "GH_TOKEN"
+];
+var AGENT_ENV_NAMES = [
+  "HOME",
+  "PATH",
+  "AGENT",
+  "ATOMATON_UNTRUSTED_USER",
+  MACHINERY_ROOT_VAR,
+  "GITHUB_REPOSITORY",
+  "BRANCH",
+  "NUMBER",
+  "NOTIFY",
+  "TYPE",
+  "ATOMATON_RELOAD_COUNT",
+  "ATOMATON_OPS_LOG",
+  "ATOMATON_RUN_DIR",
+  "ATOMATON_RUN_URL",
+  "ATOMATON_DISPATCHED_BY",
+  "ATOMATON_ASK_ID",
+  "GITHUB_RUN_ID",
+  "XDG_CACHE_HOME",
+  "XDG_CONFIG_HOME",
+  "XDG_DATA_HOME",
+  "BUN_INSTALL_CACHE_DIR",
+  "npm_config_cache",
+  "PIP_CACHE_DIR",
+  "CARGO_HOME",
+  "OPENAI_BASE_URL",
+  "ATOMA_PROVIDER"
+];
+var RUN_STEP_NAMES = [
+  "OPENROUTER_BASE_URL",
+  "ORCAROUTER_BASE_URL",
+  "ANTHROPIC_BASE_URL",
+  "COPILOT_BASE_URL",
+  "ATOMA_PROVIDER_IN",
+  "OPENAI_BASE_URL_IN"
+];
+var TOOL_SECRETS = {
+  field: "tools.secrets",
+  reserved: new Set([...RUN_CREDENTIALS, ...AGENT_ENV_NAMES, ...RUN_STEP_NAMES])
+};
+var JOB_ENV = ["ATOMATON_COMMANDS", "GH_TOKEN"];
+var CHECK_JOB_RESERVED = new Set([...JOB_ENV, "ATOMATON_PR_TREE"]);
+var DEPLOY_JOB_RESERVED = new Set([...JOB_ENV, "ATOMATON_DEPLOY_TARGET"]);
+
+// src/domain/delivery/check-jobs.ts
+var CHECKS_FROM_PULL_REQUEST = {
+  where: "checks.from_pull_request",
+  secrets: {
+    refused: "These commands come from the pull request, which may rewrite them, so a credential " + "named beside them is one the change being judged can read. Move the check to " + "`checks.from_default_branch`, where the commands come from a branch a person approved."
+  }
+};
+var NO_PULL_REQUEST_CHECKS = "This check verified nothing: `checks.from_pull_request` in .github/atomaton/config.yaml is empty, " + "so a pull request satisfying it has not been tested. Add the commands that check this project, " + "or point `checks.your_workflow` at a workflow of your own.";
+
+// src/domain/delivery/declared-config.ts
+var NEW_RELEASE_MODES = ["issue", "pr", "pr-agent"];
+function isNewReleaseMode(value) {
+  return typeof value === "string" && NEW_RELEASE_MODES.includes(value);
+}
 
 // src/adapters/runner/machinery.ts
 function machineryRoot() {
@@ -366,8 +585,110 @@ function machineryPath(relative) {
   return root ? `${root}/${relative}` : relative;
 }
 
+// src/adapters/runner/config.ts
+function configPath() {
+  return machineryPath(CONFIG_FILE);
+}
+var cached;
+function loadConfig() {
+  if (!cached) {
+    cached = Bun.YAML.parse(readFileSync(configPath(), "utf8"));
+  }
+  return cached;
+}
+function getNewReleaseMode(fallback = "issue") {
+  const mode = loadConfig().update?.on_new_release;
+  return isNewReleaseMode(mode) ? mode : fallback;
+}
+
+// src/adapters/runner/ops-log.ts
+var OPS_LOG_PATH = process.env.ATOMATON_OPS_LOG ?? "/tmp/atomaton_ops.log";
+// src/adapters/github/branch-placement.ts
+var NO_BRANCH_MESSAGE = "This run is on a detached checkout with no local branch, so there is no branch to push: " + "commit_and_push and create_pr cannot publish this run's work. Report the work on the issue instead.";
+
+// src/domain/delivery/deploy-jobs.ts
+function refPatternProblem(pattern) {
+  const body = pattern.endsWith("*") ? pattern.slice(0, -1) : pattern;
+  if (body.includes("*")) {
+    return `"${pattern}" uses a '*' somewhere other than the end, which this matcher cannot honour, ` + 'so it would match nothing. Write a literal ref, or a prefix followed by "*" \u2014 e.g. "v*".';
+  }
+  if (/[?[\]{}]/.test(body)) {
+    return `"${pattern}" uses a glob character this matcher cannot honour, so it would match nothing. ` + 'Write a literal ref, or a prefix followed by "*".';
+  }
+  return "";
+}
+function readPatterns(raw, key, required, where, problems) {
+  const list = raw ?? [];
+  if (!Array.isArray(list) || list.some((p) => typeof p !== "string" || p.trim() === "")) {
+    problems.push(`${where}: \`${key}\` must be an array of non-empty patterns.`);
+    return null;
+  }
+  const patterns = list.map((p) => p.trim());
+  const bad = patterns.map(refPatternProblem).find((problem) => problem !== "");
+  if (bad) {
+    problems.push(`${where}: ${bad}`);
+    return null;
+  }
+  if (required && patterns.length === 0) {
+    problems.push(`${where}: \`${key}\` needs at least one pattern \u2014 e.g. ["v*"].`);
+    return null;
+  }
+  return patterns;
+}
+function refsFrom(keys) {
+  const owned = [...keys.tags ? ["tags"] : [], ...keys.branches ? ["branches"] : []];
+  return {
+    keys: owned,
+    read: (entry, where, problems) => {
+      const tags = keys.tags ? readPatterns(entry.tags, "tags", true, where, problems) : [];
+      const branches = keys.branches ? readPatterns(entry.branches, "branches", false, where, problems) : [];
+      return tags === null || branches === null ? null : { tags, branches };
+    }
+  };
+}
+var DEPLOY_ARMS = {
+  merge: {
+    key: "on_merge",
+    rules: {
+      where: "deploy.on_merge",
+      secrets: { reserved: DEPLOY_JOB_RESERVED },
+      extra: refsFrom({ branches: true })
+    }
+  },
+  tag: {
+    key: "on_tag",
+    rules: {
+      where: "deploy.on_tag",
+      secrets: { reserved: DEPLOY_JOB_RESERVED },
+      extra: refsFrom({ branches: true, tags: true })
+    }
+  },
+  demand: {
+    key: "on_demand",
+    rules: {
+      where: "deploy.on_demand",
+      secrets: { reserved: DEPLOY_JOB_RESERVED },
+      extra: { keys: [], read: () => ({ branches: [], tags: [] }) }
+    }
+  }
+};
+var TRIGGERS = Object.keys(DEPLOY_ARMS);
+
+// src/adapters/actions/dispatch-targets.ts
+function log2(message) {
+  console.error(`[atomaton-github] ${message}`);
+}
+function dispatchUpdate(repo, source, options = {}) {
+  return dispatchWorkflow(`dispatchUpdate: taking a newer release onto ${repo}`, "atomaton-update.yml", ["--repo", repo, "-f", `source=${source > 0 ? String(source) : ""}`], log2, options.token);
+}
+
+// src/entrypoints/machinery/lib/release-files.ts
+import { existsSync, mkdtempSync, readFileSync as readFileSync3, readdirSync, rmSync } from "fs";
+import { tmpdir } from "os";
+import { join } from "path";
+
 // src/entrypoints/machinery/lib/zip-read.ts
-import { readFileSync } from "fs";
+import { readFileSync as readFileSync2 } from "fs";
 import { inflateRawSync } from "zlib";
 var EOCD_SIG = 101010256;
 var CENTRAL_SIG = 33639248;
@@ -376,7 +697,7 @@ var EOCD_MAX_SEARCH = 22 + 65535;
 function zipEntries(path) {
   let buf;
   try {
-    buf = readFileSync(path);
+    buf = readFileSync2(path);
   } catch (error) {
     return { why: `could not read the archive at ${path}: ${error.message}` };
   }
@@ -438,7 +759,7 @@ function zipEntries(path) {
 }
 
 // src/entrypoints/machinery/lib/release-files.ts
-function log2(message) {
+function log3(message) {
   console.error(`[release-files] ${message}`);
 }
 var UPSTREAM_REPOSITORY = "yuma-seno/atomaton";
@@ -492,7 +813,7 @@ function readTreeFiles(paths) {
     if (!existsSync(onDisk))
       continue;
     try {
-      files.set(path, readFileSync2(onDisk, "utf8"));
+      files.set(path, readFileSync3(onDisk, "utf8"));
     } catch {}
   }
   return files;
@@ -503,7 +824,7 @@ function readLocalManifest() {
     return { why: `${path} is missing, so this tree cannot say which release it came from` };
   }
   try {
-    const parsed = JSON.parse(readFileSync2(path, "utf8"));
+    const parsed = JSON.parse(readFileSync3(path, "utf8"));
     if (typeof parsed.version !== "string" || !parsed.version || !Array.isArray(parsed.files)) {
       return { why: `${path} does not hold a version and a file list` };
     }
@@ -515,7 +836,7 @@ function readLocalManifest() {
 function latestReleaseTag() {
   const result = ghRead("api", `repos/${UPSTREAM_REPOSITORY}/releases/latest`, "--jq", ".tag_name");
   if (result.code !== 0) {
-    log2(`WARN could not read ${UPSTREAM_REPOSITORY}'s latest release: ${result.stderr.trim() || `gh exited ${result.code}`}`);
+    log3(`WARN could not read ${UPSTREAM_REPOSITORY}'s latest release: ${result.stderr.trim() || `gh exited ${result.code}`}`);
     return null;
   }
   const tag = result.stdout.trim();
@@ -541,22 +862,22 @@ function notesOf(body) {
 
 \u2026the rest is on the release page.`;
 }
+function autoUpdateWarningLines(failure) {
+  return [
+    "> [!WARNING]",
+    `> \`update.on_new_release\` is \`${failure.mode}\` here, but nothing was started: ${failure.why}.`,
+    `> Take the release by hand with the steps below, or see [move to a newer release](${UPGRADE_DOC}).`,
+    ""
+  ];
+}
 function noticeTitle(input) {
   return `Atomaton release ${input.latestVersion} is available; .github/ is on ${input.localVersion}`;
 }
 function noticeBody(input) {
-  const lines = [
-    NOTICE_MARKER,
-    `Upstream has published **${input.latestVersion}**. This repository's \`.github/\` came from **${input.localVersion}**.`,
-    "",
-    "| | |",
-    "| --- | --- |",
-    `| This repository's \`.github/\` is from | \`${input.localVersion}\` |`,
-    `| The latest release is | \`${input.latestVersion}\` |`,
-    "",
-    "## Taking it",
-    ""
-  ];
+  const lines = [NOTICE_MARKER];
+  if (input.autoUpdateFailure !== null)
+    lines.push(...autoUpdateWarningLines(input.autoUpdateFailure));
+  lines.push(`Upstream has published **${input.latestVersion}**. This repository's \`.github/\` came from **${input.localVersion}**.`, "", "| | |", "| --- | --- |", `| This repository's \`.github/\` is from | \`${input.localVersion}\` |`, `| The latest release is | \`${input.latestVersion}\` |`, "", "## Taking it", "");
   if (input.plan === null) {
     lines.push(`What this update would touch here: not computed \u2014 ${input.planWhy}.`, "", "Nothing has been changed for you: this is a notice, and the upgrade is a decision.", "", "Comment **`!upgrade`** on this issue, or run the **Atomaton Update** workflow from the Actions tab.", "");
   } else {
@@ -598,19 +919,19 @@ function noticeBody(input) {
 `).trimEnd()}
 `;
 }
-function log3(message) {
+function log4(message) {
   console.error(`[new-release] ${message}`);
 }
 function releaseNotes() {
   const result = ghRead("api", `repos/${UPSTREAM_REPOSITORY}/releases?per_page=100`, "--jq", '[.[] | {tag: .tag_name, body: (.body // ""), url: .html_url}]');
   if (result.code !== 0) {
-    log3(`WARN could not read ${UPSTREAM_REPOSITORY}'s releases: ${result.stderr.trim() || `gh exited ${result.code}`}`);
+    log4(`WARN could not read ${UPSTREAM_REPOSITORY}'s releases: ${result.stderr.trim() || `gh exited ${result.code}`}`);
     return null;
   }
   try {
     const parsed = JSON.parse(result.stdout);
     if (!Array.isArray(parsed)) {
-      log3("WARN the release list was not an array");
+      log4("WARN the release list was not an array");
       return null;
     }
     return parsed.filter((entry) => {
@@ -618,7 +939,7 @@ function releaseNotes() {
       return typeof note.tag === "string" && note.tag !== "";
     }).map((note) => ({ tag: note.tag, body: String(note.body ?? ""), url: String(note.url ?? "") }));
   } catch {
-    log3("WARN the release list was not valid JSON");
+    log4("WARN the release list was not valid JSON");
     return null;
   }
 }
@@ -643,14 +964,14 @@ function main() {
     process.exit(1);
   }
   const latest = { tag: latestTag };
-  const existing = findOpenNotice(repo);
-  if (existing === null) {
-    console.error(`::error::could not search ${repo} for an existing notice, so this run wrote nothing.`);
-    process.exit(1);
-  }
   if (latest.tag === local.manifest.version) {
+    const existing = findOpenNotice(repo);
+    if (existing === null) {
+      console.error(`::error::could not search ${repo} for an existing notice, so this run wrote nothing.`);
+      process.exit(1);
+    }
     if (existing === 0) {
-      log3(`${local.manifest.version} is the latest release; nothing to announce`);
+      log4(`${local.manifest.version} is the latest release; nothing to announce`);
       return;
     }
     const closed = gh("issue", "close", String(existing), "--repo", repo, "--comment", `${NOTICE_MARKER}
@@ -660,8 +981,40 @@ ${LLM_CONTEXT_TAG.write("exclude")}
       console.error(`::error::this tree caught up to ${local.manifest.version}, but the open notice #${existing} could not ` + `be closed: ${closed.stderr.trim() || `gh exited ${closed.code}`}`);
       process.exit(1);
     }
-    log3(`caught up to ${local.manifest.version}; closed the settled notice #${existing}`);
+    log4(`caught up to ${local.manifest.version}; closed the settled notice #${existing}`);
     return;
+  }
+  const mode = getNewReleaseMode();
+  const updateToken = (process.env.ATOMATON_UPDATE_TOKEN ?? "").trim();
+  let autoUpdateFailure = null;
+  if (mode !== "issue") {
+    if (updateToken === "") {
+      log4(`WARN update.on_new_release is ${mode}, but ATOMATON_UPDATE_TOKEN is not set \u2014 nothing was started`);
+      autoUpdateFailure = {
+        mode,
+        why: "no `ATOMATON_UPDATE_TOKEN` secret is set here, and this workflow's own token may not start a run"
+      };
+    } else {
+      const open = openPrForHead(repo, updateBranchFor(latest.tag), updateToken);
+      if (open > 0) {
+        log4(`an update pull request for ${latest.tag} (#${open}) is already open; nothing was started`);
+        return;
+      }
+      if (dispatchUpdate(repo, 0, { token: updateToken })) {
+        log4(`started the update to ${latest.tag}; its report lands on the pull request it opens`);
+        return;
+      }
+      log4(`WARN GitHub refused the dispatch of the update to ${latest.tag}`);
+      autoUpdateFailure = {
+        mode,
+        why: "GitHub refused the dispatch, and this run's log is where the reason is"
+      };
+    }
+  }
+  const existing = findOpenNotice(repo);
+  if (existing === null) {
+    console.error(`::error::could not search ${repo} for an existing notice, so this run wrote nothing.`);
+    process.exit(1);
   }
   const notes = releaseNotes();
   const targetRelease = releaseFiles(latest.tag);
@@ -694,7 +1047,8 @@ ${LLM_CONTEXT_TAG.write("exclude")}
     removed,
     removedWhy,
     plan,
-    planWhy
+    planWhy,
+    autoUpdateFailure
   };
   const title = noticeTitle(input);
   const body = noticeBody(input);
@@ -704,7 +1058,7 @@ ${LLM_CONTEXT_TAG.write("exclude")}
     process.exit(1);
   }
   const where = existing === 0 ? written.stdout.trim() : `#${existing}`;
-  log3(`announced ${latest.tag} (this tree is on ${local.manifest.version}) at ${where}`);
+  log4(`announced ${latest.tag} (this tree is on ${local.manifest.version}) at ${where}`);
 }
 if (import.meta.main)
   main();
