@@ -33,5 +33,6 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
+          ATOMATON_UPDATE_TOKEN: ${{ secrets.ATOMATON_UPDATE_TOKEN }}
         run: |
           bun run "${ATOMATON_MACHINERY_ROOT:-.}/.github/atomaton-runtime/scripts/notify_new_release.ts" --repo "${REPO}"

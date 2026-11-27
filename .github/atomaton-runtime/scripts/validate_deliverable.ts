@@ -512,6 +512,12 @@ function resolveMergeGates(raw) {
   return problems.length > 0 ? { gates: [], problems } : { gates, problems };
 }
 
+// src/domain/delivery/declared-config.ts
+var NEW_RELEASE_MODES = ["issue", "pr", "pr-agent"];
+function isNewReleaseMode(value) {
+  return typeof value === "string" && NEW_RELEASE_MODES.includes(value);
+}
+
 // src/domain/delivery/shipped-workflows.ts
 var DEFAULT_CI_WORKFLOW = "atomaton-check.yml";
 var DEFAULT_CD_WORKFLOW = "atomaton-deploy.yml";
@@ -538,6 +544,7 @@ var CONFIG_SCHEMA = {
       }
     },
     merge: { children: { policy: null, governed_paths: null, gates: null } },
+    update: { children: { on_new_release: null } },
     chain: {
       children: {
         after_handoffs: null,
@@ -545,7 +552,7 @@ var CONFIG_SCHEMA = {
         labels: { children: { in_progress: null, sub_issue: null, launched: null }, anyName: null }
       }
     },
-    agents: { children: { on_config_finding: null } },
+    agents: { children: { on_config_finding: null, on_update_conflict: null } },
     tools: {
       children: {
         secrets: null,
@@ -629,6 +636,18 @@ function configProblems(facts) {
     if (agentNames.length > 0 && !agentNames.includes(value.trim())) {
       problems.push(`\`agents.${key}\` names '${value.trim()}', which has no agent-definitions/${value.trim()}.md.`);
     }
+  }
+  const update = isRecord4(config.update) ? config.update : {};
+  const mode = update.on_new_release;
+  if (mode !== undefined && !isNewReleaseMode(mode)) {
+    problems.push(`\`update.on_new_release\` is '${String(mode)}', which is not a mode. ` + `Set ${NEW_RELEASE_MODES.map((name) => `\`${name}\``).join(", ")} (the first is the default).`);
+  }
+  const conflictAgent = typeof agents.on_update_conflict === "string" ? agents.on_update_conflict.trim() : "";
+  if (mode === "pr-agent" && conflictAgent === "") {
+    problems.push("`update.on_new_release` is `pr-agent`, so `agents.on_update_conflict` must name the agent " + "to start on an update pull request that stops on a conflict.");
+  }
+  if (conflictAgent !== "" && agentNames.length > 0 && !agentNames.includes(conflictAgent)) {
+    problems.push(`\`agents.on_update_conflict\` names '${conflictAgent}', which has no agent-definitions/${conflictAgent}.md.`);
   }
   if (workflowFiles.length > 0) {
     const present = new Set(workflowFiles);

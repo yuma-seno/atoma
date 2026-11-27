@@ -24,8 +24,22 @@ function ghCommand() {
 function gh(...args) {
   return run([...ghCommand(), ...args]);
 }
-function dispatchWorkflow(context, workflow, args = [], log = (m) => console.error(m)) {
-  const { code, stdout, stderr } = gh("workflow", "run", workflow, ...args);
+function ghAs(token, ...args) {
+  const proc = Bun.spawnSync({
+    cmd: [...ghCommand(), ...args],
+    stdout: "pipe",
+    stderr: "pipe",
+    env: { ...process.env, GH_TOKEN: token }
+  });
+  return {
+    code: proc.exitCode ?? 1,
+    stdout: proc.stdout ? proc.stdout.toString("utf8").trim() : "",
+    stderr: proc.stderr ? proc.stderr.toString("utf8").trim() : ""
+  };
+}
+function dispatchWorkflow(context, workflow, args = [], log = (m) => console.error(m), token = "") {
+  const argv = ["workflow", "run", workflow, ...args];
+  const { code, stdout, stderr } = token.trim() ? ghAs(token.trim(), ...argv) : gh(...argv);
   if (code) {
     log(`${context}: WARN failed to dispatch ${workflow}: ${stderr || stdout}`);
     return false;
@@ -486,8 +500,8 @@ var TRIGGERS = Object.keys(DEPLOY_ARMS);
 function log(message) {
   console.error(`[atomaton-github] ${message}`);
 }
-function dispatchUpdate(repo, source) {
-  return dispatchWorkflow(`dispatchUpdate: taking a newer release onto ${repo}`, "atomaton-update.yml", ["--repo", repo, "-f", `source=${source > 0 ? String(source) : ""}`], log);
+function dispatchUpdate(repo, source, options = {}) {
+  return dispatchWorkflow(`dispatchUpdate: taking a newer release onto ${repo}`, "atomaton-update.yml", ["--repo", repo, "-f", `source=${source > 0 ? String(source) : ""}`], log, options.token);
 }
 
 // src/entrypoints/machinery/lib/script-ref.ts

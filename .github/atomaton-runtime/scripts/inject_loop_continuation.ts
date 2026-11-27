@@ -11,9 +11,7 @@ function loopAbortFromSession(session) {
   if (!Array.isArray(runs) || runs.length === 0)
     return;
   const last = runs[runs.length - 1];
-  if (last?.ended_because !== "loop")
-    return;
-  const recorded = last.loop_abort;
+  const recorded = last?.loop_abort;
   if (typeof recorded !== "object" || recorded === null)
     return;
   const verdict = recorded;

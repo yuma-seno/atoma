@@ -8,7 +8,7 @@
 # Grouped by who consumes the value. Nothing here says where a file lives --
 # .github/atomaton/README.md has that, and why.
 #
-# The first five sections are yours. `tools` is the machinery's own.
+# Everything but `tools` is yours. `tools` is the machinery's own.
 
 
 # Where work branches from and merges back to. Empty = the default branch.
@@ -159,6 +159,24 @@ merge:
   gates: []                   # conditional escalations, each with its reason
 
 
+# What the machinery does when it notices a newer release of the template.
+#
+#   issue    the notice and nothing else: taking the release is your decision, with
+#            `!upgrade` or the Actions button. The default, and what an unset key means.
+#   pr       the release is taken without a notice: the update starts as soon as the
+#            release is noticed -- it applies it, opens its pull request, and merges it
+#            itself when nothing collided. A collision stops at that pull request for you.
+#   pr-agent the same, and an agent is started on the pull request that stopped. It
+#            needs `agents.on_update_conflict` to name that agent.
+#
+# `pr` and `pr-agent` need the ATOMATON_UPDATE_TOKEN secret, which the update itself
+# needs anyway. Without it nothing is started and the machinery writes the notice
+# after all, headed by a warning that says why: neither that nor a refused dispatch
+# is a reason for the daily run to fail.
+update:
+  on_new_release: issue
+
+
 # When a chain of runs stops and asks a person.
 chain:
   after_handoffs: 5                 # handoffs with nobody else commenting
@@ -179,14 +197,19 @@ chain:
 # second answer to a question the thread already answers.
 #
 # What is left is the runs with no thread to read -- a workflow reacting to a
-# condition rather than to a request. Every key is REQUIRED: a default would be
-# this file naming an agent, and a project that renamed its engineer would get a
-# run for an agent that does not exist. A missing key fails the pull request's
-# own check.
+# condition rather than to a request. A key a workflow always starts from is
+# REQUIRED: a default would be this file naming an agent, and a project that
+# renamed its engineer would get a run for an agent that does not exist. A
+# missing key fails the pull request's own check.
 agents:
   # Started on the issue opened for an `ATOMA_CONFIG_FINDING` line -- atoma's
   # report that the tools file it was handed has a defect it carried on past.
   on_config_finding: engineer
+
+  # Started on an update pull request that stopped on a conflict. Required only
+  # when `update.on_new_release` is `pr-agent` -- that setting is the repository
+  # asking for a run, and nothing reads a name until it is set.
+  # on_update_conflict: engineer
 
 
 # What an agent can reach, and under what watch.

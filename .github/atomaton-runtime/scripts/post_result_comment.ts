@@ -457,9 +457,7 @@ function loopAbortFromSession(session) {
   if (!Array.isArray(runs) || runs.length === 0)
     return;
   const last = runs[runs.length - 1];
-  if (last?.ended_because !== "loop")
-    return;
-  const recorded = last.loop_abort;
+  const recorded = last?.loop_abort;
   if (typeof recorded !== "object" || recorded === null)
     return;
   const verdict = recorded;
@@ -1145,7 +1143,7 @@ function main() {
     tokenLine: tokenUsageLine(values["logs-file"] ?? ""),
     spentOn: reachedLimit(endedBecause) ? toolCallTally(readSession(values.session)) : undefined,
     excerpt: failed ? logExcerptFrom(values["logs-file"]) : undefined,
-    loopAbort: endedBecause === "loop" ? loopAbortFromSession(readSession(values.session)) : undefined
+    loopAbort: loopAbortFromSession(readSession(values.session))
   });
   const { code, stdout, stderr } = gh("api", `repos/${process.env.GITHUB_REPOSITORY}/issues/${values.number}/comments`, "--method", "POST", "-f", `body=${body}`, "--jq", ".id");
   if (code !== 0) {
