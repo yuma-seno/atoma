@@ -162,17 +162,29 @@ merge:
 # What the machinery does when it notices a newer release of the template.
 #
 #   issue    the notice and nothing else: taking the release is your decision, with
-#            `!upgrade` or the Actions button. The default, and what an unset key means.
+#            `!upgrade` or the Actions button. Also what an unset key means.
 #   pr       the release is taken without a notice: the update starts as soon as the
 #            release is noticed -- it applies it, opens its pull request, and merges it
 #            itself when nothing collided. A collision stops at that pull request for you.
 #   pr-agent the same, and an agent is started on the pull request that stopped. It
-#            needs `agents.on_update_conflict` to name that agent.
+#            needs `agents.on_update_conflict` to name that agent, which this template
+#            ships below.
 #
 # `pr` and `pr-agent` need the ATOMATON_UPDATE_TOKEN secret, which the update itself
 # needs anyway. Without it nothing is started and the machinery writes the notice
 # after all, headed by a warning that says why: neither that nor a refused dispatch
 # is a reason for the daily run to fail.
+#
+# `on_new_release` above decides what happens once a release is noticed; this decides
+# which ones are, and both keys sit under `update`.
+#
+# The template ships `marked`, stated outright rather than left to the machinery's
+# own reading of an absent key. The mark is what the setting is for, and the
+# absent-key reading is older than the key is: a repository set up before this line
+# reached the template notices every release while its config lacks the key. When an
+# update merge brings the line in, the scope becomes `marked` and the repository
+# starts noticing only the releases whose notes carry `atomaton:adopt` -- to keep
+# noticing every release, set this to `all`.
 update:
   on_new_release: issue
   detection_scope: marked
@@ -207,10 +219,20 @@ agents:
   # report that the tools file it was handed has a defect it carried on past.
   on_config_finding: engineer
 
-  # Started on an update pull request that stopped on a conflict. Required only
-  # when `update.on_new_release` is `pr-agent` -- that setting is the repository
-  # asking for a run, and nothing reads a name until it is set.
-  # on_update_conflict: engineer
+  # Started on a root issue an agent files while it works. `create_root_issue` is where
+  # a defect in the machinery and a decision a person has to make both go, and the
+  # issue it makes is created with the run's own token -- so no event starts anything
+  # on it, and the tool dispatches this run itself.
+  #
+  # `off` files the issue and starts nobody. It is the one key in this section with an
+  # off switch, because a report nobody asked to be acted on is a project's call
+  # whether to act on; the rest name a run that always happens.
+  on_agent_issue: atomaton
+
+  # Started on an update pull request that stopped on a conflict. Required when
+  # `update.on_new_release` is `pr-agent` -- the shipped value above is that mode,
+  # so the name ships beside it: the two are checked as a pair.
+  on_update_conflict: engineer
 
 
 # What an agent can reach, and under what watch.

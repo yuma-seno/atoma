@@ -150,6 +150,13 @@ function isControlCommand(name) {
   return CONTROL_COMMAND_NAMES.includes(name);
 }
 
+// src/domain/work/agent-name.ts
+var AGENT_NAME_PATTERN = "[a-z][a-z0-9-]*";
+var AGENT_NAME_RE = new RegExp(`^${AGENT_NAME_PATTERN}$`);
+
+// src/domain/work/filed-issue.ts
+var AGENT_ISSUE_OFF = "off";
+
 // src/domain/delivery/runner-label.ts
 var DEFAULT_RUNNER = "ubuntu-latest";
 function resolveRunsOn(configured) {
@@ -517,13 +524,20 @@ var NEW_RELEASE_MODES = ["issue", "pr", "pr-agent"];
 function isNewReleaseMode(value) {
   return typeof value === "string" && NEW_RELEASE_MODES.includes(value);
 }
+var NEW_RELEASE_SCOPES = ["all", "marked"];
+function isNewReleaseScope(value) {
+  return typeof value === "string" && NEW_RELEASE_SCOPES.includes(value);
+}
 
 // src/domain/delivery/shipped-workflows.ts
 var DEFAULT_CI_WORKFLOW = "atomaton-check.yml";
 var DEFAULT_CD_WORKFLOW = "atomaton-deploy.yml";
 
 // src/domain/delivery/deliverable-integrity.ts
-var REQUIRED_AGENT_KEYS = ["on_config_finding"];
+var REQUIRED_AGENT_KEYS = [
+  { key: "on_config_finding" },
+  { key: "on_agent_issue", also: AGENT_ISSUE_OFF }
+];
 var CONFIG_SCHEMA = {
   children: {
     base_branch: null,
@@ -544,7 +558,7 @@ var CONFIG_SCHEMA = {
       }
     },
     merge: { children: { policy: null, governed_paths: null, gates: null } },
-    update: { children: { on_new_release: null } },
+    update: { children: { on_new_release: null, detection_scope: null } },
     chain: {
       children: {
         after_handoffs: null,
@@ -552,7 +566,7 @@ var CONFIG_SCHEMA = {
         labels: { children: { in_progress: null, sub_issue: null, launched: null }, anyName: null }
       }
     },
-    agents: { children: { on_config_finding: null, on_update_conflict: null } },
+    agents: { children: { on_config_finding: null, on_update_conflict: null, on_agent_issue: null } },
     tools: {
       children: {
         secrets: null,
@@ -627,20 +641,27 @@ function configProblems(facts) {
     problems.push("No agent definitions were found. `.github/atomaton/agent-definitions/*.md` is empty or missing.");
   }
   const agents = isRecord4(config.agents) ? config.agents : {};
-  for (const key of REQUIRED_AGENT_KEYS) {
+  for (const { key, also } of REQUIRED_AGENT_KEYS) {
     const value = agents[key];
     if (typeof value !== "string" || value.trim() === "") {
-      problems.push(`\`agents.${key}\` is required in config.yaml. It names the agent a workflow starts when no ` + `issue or pull request can name one, so there is nothing to fall back to.`);
+      problems.push(`\`agents.${key}\` is required in config.yaml. It names the agent a workflow starts when no ` + `issue or pull request can name one, so there is nothing to fall back to.` + (also === undefined ? "" : ` Set it to \`${also}\` to start nobody.`));
       continue;
     }
-    if (agentNames.length > 0 && !agentNames.includes(value.trim())) {
-      problems.push(`\`agents.${key}\` names '${value.trim()}', which has no agent-definitions/${value.trim()}.md.`);
+    const name = value.trim();
+    if (also !== undefined && name === also)
+      continue;
+    if (agentNames.length > 0 && !agentNames.includes(name)) {
+      problems.push(`\`agents.${key}\` names '${name}', which has no agent-definitions/${name}.md.` + (also === undefined ? "" : ` Write \`${also}\` to start nobody.`));
     }
   }
   const update = isRecord4(config.update) ? config.update : {};
   const mode = update.on_new_release;
   if (mode !== undefined && !isNewReleaseMode(mode)) {
     problems.push(`\`update.on_new_release\` is '${String(mode)}', which is not a mode. ` + `Set ${NEW_RELEASE_MODES.map((name) => `\`${name}\``).join(", ")} (the first is the default).`);
+  }
+  const scope = update.detection_scope;
+  if (scope !== undefined && !isNewReleaseScope(scope)) {
+    problems.push(`\`update.detection_scope\` is '${String(scope)}', which is not a scope. ` + `Set ${NEW_RELEASE_SCOPES.map((name) => `\`${name}\``).join(" or ")} (the first is the default).`);
   }
   const conflictAgent = typeof agents.on_update_conflict === "string" ? agents.on_update_conflict.trim() : "";
   if (mode === "pr-agent" && conflictAgent === "") {

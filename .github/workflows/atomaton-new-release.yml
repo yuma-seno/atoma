@@ -18,6 +18,7 @@ name: Atomaton New Release
 permissions:
   contents: read
   issues: write
+  actions: write
 jobs:
   notify:
     runs-on: ubuntu-latest

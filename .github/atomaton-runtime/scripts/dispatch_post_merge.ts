@@ -24,19 +24,6 @@ function ghCommand() {
 function gh(...args) {
   return run([...ghCommand(), ...args]);
 }
-function ghAs(token, ...args) {
-  const proc = Bun.spawnSync({
-    cmd: [...ghCommand(), ...args],
-    stdout: "pipe",
-    stderr: "pipe",
-    env: { ...process.env, GH_TOKEN: token }
-  });
-  return {
-    code: proc.exitCode ?? 1,
-    stdout: proc.stdout ? proc.stdout.toString("utf8").trim() : "",
-    stderr: proc.stderr ? proc.stderr.toString("utf8").trim() : ""
-  };
-}
 function ghRead(...args) {
   let result = gh(...args);
   for (const delay of [2000, 6000]) {
@@ -109,9 +96,9 @@ function splitConcatenatedJson(text) {
   }
   return results;
 }
-function dispatchWorkflow(context, workflow, args = [], log = (m) => console.error(m), token = "") {
+function dispatchWorkflow(context, workflow, args = [], log = (m) => console.error(m)) {
   const argv = ["workflow", "run", workflow, ...args];
-  const { code, stdout, stderr } = token.trim() ? ghAs(token.trim(), ...argv) : gh(...argv);
+  const { code, stdout, stderr } = gh(...argv);
   if (code) {
     log(`${context}: WARN failed to dispatch ${workflow}: ${stderr || stdout}`);
     return false;
@@ -973,7 +960,7 @@ function dispatchRunner(d) {
     "--field",
     `dispatched_by=${d.dispatchedBy ?? ""}`
   ];
-  if (!dispatchWorkflow(d.context, runnerWorkflow(), args, d.log, d.token)) {
+  if (!dispatchWorkflow(d.context, runnerWorkflow(), args, d.log)) {
     if (d.refusalEnding !== undefined) {
       if (markerId !== undefined) {
         gh("api", "--method", "DELETE", `repos/${d.repo ?? "{owner}/{repo}"}/issues/comments/${markerId}`);
@@ -1157,26 +1144,34 @@ function log3(message) {
   console.error(`[atomaton-github] ${message}`);
 }
 function dispatchPostMergeAgent(repo, subIssueNum, agent) {
-  const notify = resolveNotify(repo, subIssueNum);
-  const directive = `${LLM_CONTEXT_TAG.write("include")}
+  return dispatchDirective(repo, subIssueNum, agent, {
+    context: `the pull request for #${subIssueNum} was merged, so ${agent} was to judge whether it satisfies the issue`,
+    notify: resolveNotify(repo, subIssueNum),
+    directive: "Atomaton: the pull request for this issue merged. Decide whether what merged satisfies what " + "this issue asked for. Say which acceptance criteria are met and which are not; conclude the " + "issue when they are met, and carry on with the work when they are not.",
+    continuesChain: true
+  }) === "dispatched";
+}
+function dispatchDirective(repo, number, agent, request) {
+  const body = `${LLM_CONTEXT_TAG.write("include")}
 ${DISPATCH_TAG.write(agent)}
-` + "Atomaton: the pull request for this issue merged. Decide whether what merged satisfies what " + "this issue asked for. Say which acceptance criteria are met and which are not; conclude the " + "issue when they are met, and carry on with the work when they are not.";
-  const markerCommentId = commentOnWithId(repo, subIssueNum, directive);
+
+${request.directive}`;
+  const markerCommentId = commentOnWithId(repo, number, body);
   if (markerCommentId === null) {
-    log3(`dispatchPostMergeAgent: could not post the restart directive on #${subIssueNum}, so nothing was dispatched`);
-    return false;
+    log3(`${request.context}: could not post the directive on #${number}, so ${agent} was not started`);
+    return "failed";
   }
   return dispatchRunner({
-    context: `the pull request for #${subIssueNum} was merged, so ${agent} was to judge whether it satisfies the issue`,
+    context: request.context,
     agent,
-    type: "issue",
-    number: subIssueNum,
-    notify,
+    type: request.type ?? "issue",
+    number,
+    notify: request.notify ?? "",
     repo,
     markerCommentId,
-    continuesChain: true,
+    ...request.continuesChain === true ? { continuesChain: true } : {},
     log: log3
-  }) === "dispatched";
+  });
 }
 
 // src/domain/work/handoff.ts

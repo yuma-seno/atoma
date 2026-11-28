@@ -6624,19 +6624,6 @@ function ghCommand() {
 function gh(...args) {
   return run([...ghCommand(), ...args]);
 }
-function ghAs(token, ...args) {
-  const proc = Bun.spawnSync({
-    cmd: [...ghCommand(), ...args],
-    stdout: "pipe",
-    stderr: "pipe",
-    env: { ...process.env, GH_TOKEN: token }
-  });
-  return {
-    code: proc.exitCode ?? 1,
-    stdout: proc.stdout ? proc.stdout.toString("utf8").trim() : "",
-    stderr: proc.stderr ? proc.stderr.toString("utf8").trim() : ""
-  };
-}
 function ghRead(...args) {
   let result = gh(...args);
   for (const delay of [2000, 6000]) {
@@ -6732,9 +6719,9 @@ function splitConcatenatedJson(text) {
   }
   return results;
 }
-function dispatchWorkflow(context, workflow, args = [], log = (m) => console.error(m), token = "") {
+function dispatchWorkflow(context, workflow, args = [], log = (m) => console.error(m)) {
   const argv = ["workflow", "run", workflow, ...args];
-  const { code, stdout, stderr } = token.trim() ? ghAs(token.trim(), ...argv) : gh(...argv);
+  const { code, stdout, stderr } = gh(...argv);
   if (code) {
     log(`${context}: WARN failed to dispatch ${workflow}: ${stderr || stdout}`);
     return false;
@@ -7363,6 +7350,46 @@ function matchMergeGates(gates, facts) {
   return matches;
 }
 
+// src/domain/work/agent-name.ts
+var AGENT_NAME_PATTERN = "[a-z][a-z0-9-]*";
+var AGENT_NAME_RE = new RegExp(`^${AGENT_NAME_PATTERN}$`);
+function isAgentName(value) {
+  return AGENT_NAME_RE.test(value);
+}
+
+// src/domain/work/filed-issue.ts
+var AGENT_ISSUE_OFF = "off";
+function resolveAgentIssueLauncher(value) {
+  const raw = typeof value === "string" ? value.trim() : "";
+  if (raw === "" || raw === AGENT_ISSUE_OFF)
+    return { agent: "" };
+  if (isAgentName(raw))
+    return { agent: raw };
+  return {
+    agent: "",
+    problem: `\`agents.on_agent_issue\` is '${raw}', which is neither an agent name nor \`${AGENT_ISSUE_OFF}\``
+  };
+}
+function normaliseIssueTitle(title) {
+  return title.trim().replace(/\s+/g, " ").toLowerCase();
+}
+function duplicateIssueOf(title, open) {
+  const wanted = normaliseIssueTitle(title);
+  if (wanted === "")
+    return 0;
+  return open.find((issue) => normaliseIssueTitle(issue.title) === wanted)?.number ?? 0;
+}
+function reportedFromLine(report) {
+  const where = report.node === undefined ? "" : `#${report.node}`;
+  const by = (report.agent ?? "").trim();
+  const url = (report.runUrl ?? "").trim();
+  const origin = [where, by === "" ? "" : `by \`${by}\``].filter((part) => part !== "").join(" ");
+  if (origin === "" && url === "")
+    return "";
+  const link = url === "" ? "" : ` (${url})`;
+  return `Reported from ${origin === "" ? "a run" : origin}${link}.`;
+}
+
 // src/adapters/runner/machinery.ts
 function machineryRoot() {
   return process.env[MACHINERY_ROOT_VAR]?.trim() || undefined;
@@ -7395,6 +7422,9 @@ function getLabel(key) {
 function getMergePolicy(fallback = "auto") {
   return loadConfig().merge?.policy ?? fallback;
 }
+function getAgentIssueLauncher() {
+  return resolveAgentIssueLauncher(loadConfig().agents?.on_agent_issue);
+}
 function getBaseBranch(fallback = "") {
   try {
     return loadConfig().base_branch?.trim() || fallback;
@@ -7417,10 +7447,6 @@ function getWorkflowName(kind, fallback = "") {
   const section = kind === "ci" ? loadConfig().checks : loadConfig().deploy;
   return (section?.your_workflow ?? "").trim() || fallback;
 }
-
-// src/domain/work/agent-name.ts
-var AGENT_NAME_PATTERN = "[a-z][a-z0-9-]*";
-var AGENT_NAME_RE = new RegExp(`^${AGENT_NAME_PATTERN}$`);
 
 // src/shared/fence.ts
 function fenceSegments(text) {
@@ -8534,7 +8560,7 @@ function dispatchRunner(d) {
     "--field",
     `dispatched_by=${d.dispatchedBy ?? ""}`
   ];
-  if (!dispatchWorkflow(d.context, runnerWorkflow(), args, d.log, d.token)) {
+  if (!dispatchWorkflow(d.context, runnerWorkflow(), args, d.log)) {
     if (d.refusalEnding !== undefined) {
       if (markerId !== undefined) {
         gh("api", "--method", "DELETE", `repos/${d.repo ?? "{owner}/{repo}"}/issues/comments/${markerId}`);
@@ -20463,25 +20489,11 @@ function dispatchPrValidation(repo, prNumber, branch, options = {}) {
   ], log6);
 }
 function dispatchPostMergeAgent(repo, subIssueNum, agent) {
-  const notify = resolveNotify(repo, subIssueNum);
-  const directive = `${LLM_CONTEXT_TAG.write("include")}
-${DISPATCH_TAG.write(agent)}
-` + "Atomaton: the pull request for this issue merged. Decide whether what merged satisfies what " + "this issue asked for. Say which acceptance criteria are met and which are not; conclude the " + "issue when they are met, and carry on with the work when they are not.";
-  const markerCommentId = commentOnWithId(repo, subIssueNum, directive);
-  if (markerCommentId === null) {
-    log6(`dispatchPostMergeAgent: could not post the restart directive on #${subIssueNum}, so nothing was dispatched`);
-    return false;
-  }
-  return dispatchRunner({
+  return dispatchDirective(repo, subIssueNum, agent, {
     context: `the pull request for #${subIssueNum} was merged, so ${agent} was to judge whether it satisfies the issue`,
-    agent,
-    type: "issue",
-    number: subIssueNum,
-    notify,
-    repo,
-    markerCommentId,
-    continuesChain: true,
-    log: log6
+    notify: resolveNotify(repo, subIssueNum),
+    directive: "Atomaton: the pull request for this issue merged. Decide whether what merged satisfies what " + "this issue asked for. Say which acceptance criteria are met and which are not; conclude the " + "issue when they are met, and carry on with the work when they are not.",
+    continuesChain: true
   }) === "dispatched";
 }
 function dispatchCi(branch) {
@@ -20515,6 +20527,57 @@ function deployDispatch(trigger, ref, repo) {
       ...configured ? [] : ["-f", `trigger=${trigger}`]
     ]
   };
+}
+function dispatchAgentOnFiledIssue(repo, issue, agent, options = {}) {
+  const notify = (options.notify ?? "").trim();
+  const from = reportedFromLine(options.report ?? {});
+  return dispatchDirective(repo, issue, agent, {
+    context: `a report on root issue #${issue} was filed during a run, so ${agent} was asked to take it up`,
+    notify,
+    directive: `${mentionPrefix(notify)}\`${agent}\` is asked to take up this issue.
+
+` + `The machinery put this report here during a run, and no person asked for a run on it.
+` + (from === "" ? "" : `${from}
+`) + `
+` + "Start with the reproduction. If it no longer reproduces, or the defect is already fixed, " + "comment the evidence and propose closing \u2014 the decision to close is the notifying " + "person's. Otherwise take it as a normal run: investigate, fix, open a pull request, and " + "let the reviewer judge it."
+  });
+}
+function filedIssueStartNote(outcome, agent) {
+  switch (outcome) {
+    case "dispatched":
+      return "";
+    case "refused-outstanding":
+      return "A run on this issue had already been asked for, so nobody was started twice.";
+    case "refused-closed":
+      return "The issue is closed, so nothing was started on it and nothing will be.";
+    case "unconfirmed":
+      return `The start could not be confirmed, so nothing may be running: a person can start it by commenting \`/${agent}\` on the issue.`;
+    case "superseded":
+    case "failed":
+      return `GitHub did not accept the start: a person can start it by commenting \`/${agent}\` on the issue.`;
+  }
+}
+function dispatchDirective(repo, number, agent, request) {
+  const body = `${LLM_CONTEXT_TAG.write("include")}
+${DISPATCH_TAG.write(agent)}
+
+${request.directive}`;
+  const markerCommentId = commentOnWithId(repo, number, body);
+  if (markerCommentId === null) {
+    log6(`${request.context}: could not post the directive on #${number}, so ${agent} was not started`);
+    return "failed";
+  }
+  return dispatchRunner({
+    context: request.context,
+    agent,
+    type: request.type ?? "issue",
+    number,
+    notify: request.notify ?? "",
+    repo,
+    markerCommentId,
+    ...request.continuesChain === true ? { continuesChain: true } : {},
+    log: log6
+  });
 }
 
 // src/adapters/github/branch-rules.ts
@@ -20976,6 +21039,32 @@ function pushCommit(commit, branch) {
   throw new Error(refused ? `\`${branch}\` moved on origin while this call was building its commit, so the push was refused rather than ` + "replacing somebody else's. Nothing was pushed; retry, which names a new branch." : `could not push \`${branch}\`: ${pushed.stderr || pushed.stdout}`);
 }
 
+// src/adapters/github/duplicate-issue.ts
+function findOpenIssueWithTitle(repo, title) {
+  const phrase = title.replace(/"/g, " ").replace(/\s+/g, " ").trim();
+  if (phrase === "")
+    return 0;
+  const result = ghRead("issue", "list", "--repo", repo, "--state", "open", "--search", `"${phrase}" in:title`, "--json", "number,title", "--limit", "50");
+  if (result.code !== 0)
+    return null;
+  let parsed;
+  try {
+    parsed = JSON.parse(result.stdout || "[]");
+  } catch {
+    return null;
+  }
+  if (!Array.isArray(parsed))
+    return null;
+  const open = [];
+  for (const entry of parsed) {
+    const issue = entry;
+    if (typeof issue.number === "number" && typeof issue.title === "string") {
+      open.push({ number: issue.number, title: issue.title });
+    }
+  }
+  return duplicateIssueOf(title, open);
+}
+
 // src/entrypoints/tools/mcp/github.ts
 function log8(msg) {
   console.error(`[atomaton-github] ${msg}`);
@@ -21179,6 +21268,10 @@ async function createRootIssue(a) {
     mcpFail(`create_root_issue creates an issue with no parent, so \`${subIssueLabel}\` -- the label a ` + "parent's aggregation counts its children by -- may not be applied to it. Call " + "create_sub_issue to file a child under this run's issue, or drop the label.");
   }
   refuseTurnLabels(labels, "A root issue");
+  const duplicate = findOpenIssueWithTitle(REPO, title);
+  if (duplicate !== null && duplicate > 0) {
+    return linkToExisting(duplicate, title, body);
+  }
   const cmd = ["issue", "create", "--repo", REPO, "--title", title];
   if (body)
     cmd.push("--body", body);
@@ -21190,14 +21283,77 @@ async function createRootIssue(a) {
   const num = Number(stdout.trim().split("/").pop());
   if (!Number.isFinite(num))
     mcpFail(`gh issue create: unexpected output: ${stdout.slice(0, 300)}`);
-  logOp("create_root_issue", { number: num, title });
+  const autoStart = startAgentOn(num);
+  logOp("create_root_issue", {
+    number: num,
+    title,
+    duplicate_check: duplicate === null ? "unreadable" : "clear",
+    ...autoStart === undefined ? {} : { auto_started: autoStart }
+  });
   return JSON.stringify({
     number: num,
     url: stdout.trim(),
     parent: null,
     root: true,
+    ...duplicate === null ? { duplicate_check: "unreadable" } : {},
+    ...autoStart === undefined ? {} : { auto_start: autoStart },
     note: "Created as a root issue: it has no parent, by design rather than because a link failed."
   });
+}
+function linkToExisting(number, title, body) {
+  const comment = [
+    "Filed again by an agent, under a title this issue already carries.",
+    "",
+    "`create_root_issue` searched the open issues for this title, found this one, and opened",
+    "nothing new \u2014 a second issue would have been a second run on one report. The body the",
+    "second filing would have carried is below, and the run on this issue will read it.",
+    ...body ? ["", "---", "", body] : []
+  ].join(`
+`);
+  const posted = commentOnWithId(REPO, number, comment);
+  if (posted === null) {
+    logOp("create_root_issue_duplicate_link_failed", { number, title });
+  }
+  const autoStart = startAgentOn(number);
+  logOp("create_root_issue", {
+    number,
+    title,
+    duplicate_of: number,
+    ...autoStart === undefined ? {} : { auto_started: autoStart }
+  });
+  return JSON.stringify({
+    number,
+    url: `https://github.com/${REPO}/issues/${number}`,
+    created: false,
+    duplicate_of: number,
+    linked: posted !== null,
+    ...autoStart === undefined ? {} : { auto_start: autoStart },
+    note: `#${number} already carries this title and is still open, so nothing new was filed: the ` + "report was put on that issue as a comment. Do not file it again."
+  });
+}
+function startAgentOn(number) {
+  const setting = getAgentIssueLauncher();
+  if (setting.problem !== undefined) {
+    log8(`create_root_issue filed #${number}, but ${setting.problem}, so no agent was started`);
+    logOp("auto_start_skipped", { number, problem: setting.problem });
+  }
+  if (setting.agent === "")
+    return;
+  const node = nodeNumber();
+  const report = {
+    ...node === undefined ? {} : { node },
+    runUrl: (process.env.ATOMATON_RUN_URL ?? "").trim(),
+    agent: (process.env.AGENT ?? "").trim()
+  };
+  const outcome = dispatchAgentOnFiledIssue(REPO, number, setting.agent, {
+    notify: (process.env.NOTIFY ?? "").trim(),
+    report
+  });
+  if (outcome !== "dispatched") {
+    log8(`create_root_issue filed #${number}, but ${setting.agent} was not started on it (${outcome})`);
+  }
+  const note = filedIssueStartNote(outcome, setting.agent);
+  return { agent: setting.agent, outcome, ...note === "" ? {} : { note } };
 }
 function shownChildren(children) {
   return children.map(({ labels: _judgedBy, ...shown }) => shown);
@@ -22064,7 +22220,7 @@ var { tools: TOOLS, dispatch: rawDispatch } = buildMcpTools([
   }),
   defineMcpTool({
     name: "create_root_issue",
-    description: "Create a GitHub issue that is nobody's child: no parent is linked, no sub-issue label is applied, and no aggregation will ever pick it up. Use this to report a defect in the tools or the environment, and to raise a decision that has to be made before there is any work to decompose. Unlike create_sub_issue it may be called on a pull request run, which is where such a report most often originates. The two turn labels (`atomaton/in-progress`, `atomaton/waiting-for-person`) are moved by the machinery alone and a newly created issue carries neither, so never pass one in `labels`. Returns {number, url, parent: null, root: true} and mutates GitHub.",
+    description: "Create a GitHub issue that is nobody's child: no parent is linked, no sub-issue label is applied, and no aggregation will ever pick it up. Use this to report a defect in the tools or the environment, and to raise a decision that has to be made before there is any work to decompose. Unlike create_sub_issue it may be called on a pull request run, which is where such a report most often originates. Two things happen around the filing. An open issue that already carries the same title is not filed again: the report goes onto that issue as a comment and the result says `created: false, duplicate_of: <n>`, so do not file it again yourself. And unless the repository sets `agents.on_agent_issue: off`, an agent is started on the issue right away \u2014 the machinery's own filing produces no event any workflow would react to. The result says which agent and what happened in `auto_start`. The two turn labels (`atomaton/in-progress`, `atomaton/waiting-for-person`) are moved by the machinery alone and a newly created issue carries neither, so never pass one in `labels`. Returns {number, url, parent: null, root: true} when it filed one and {number, url, created: false, duplicate_of} when it did not, and mutates GitHub either way: a new issue, or a comment on the one that already carried the title.",
     schema: ISSUE_ARGS_SCHEMA,
     handler: createRootIssue
   }),
