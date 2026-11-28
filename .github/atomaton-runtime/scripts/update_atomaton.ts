@@ -89,9 +89,9 @@ function splitConcatenatedJson(text) {
   }
   return results;
 }
-function dispatchWorkflow(context, workflow, args = [], log = (m) => console.error(m), token = "") {
+function dispatchWorkflow(context, workflow, args = [], log = (m) => console.error(m)) {
   const argv = ["workflow", "run", workflow, ...args];
-  const { code, stdout, stderr } = token.trim() ? ghAs(token.trim(), ...argv) : gh(...argv);
+  const { code, stdout, stderr } = gh(...argv);
   if (code) {
     log(`${context}: WARN failed to dispatch ${workflow}: ${stderr || stdout}`);
     return false;
@@ -793,6 +793,16 @@ function getNewReleaseMode(fallback = "issue") {
 function getUpdateConflictAgent() {
   return (loadConfig().agents?.on_update_conflict ?? "").trim();
 }
+function tryGetUpdateConflictPolicy() {
+  try {
+    return {
+      agent: getNewReleaseMode() === "pr-agent" ? getUpdateConflictAgent() : "",
+      readable: true
+    };
+  } catch {
+    return { agent: "", readable: false };
+  }
+}
 
 // src/adapters/runner/ops-log.ts
 import { appendFileSync } from "fs";
@@ -1107,7 +1117,7 @@ function dispatchRunner(d) {
     "--field",
     `dispatched_by=${d.dispatchedBy ?? ""}`
   ];
-  if (!dispatchWorkflow(d.context, runnerWorkflow(), args, d.log, d.token)) {
+  if (!dispatchWorkflow(d.context, runnerWorkflow(), args, d.log)) {
     if (d.refusalEnding !== undefined) {
       if (markerId !== undefined) {
         gh("api", "--method", "DELETE", `repos/${d.repo ?? "{owner}/{repo}"}/issues/comments/${markerId}`);
@@ -1206,25 +1216,34 @@ var TRIGGERS = Object.keys(DEPLOY_ARMS);
 function log(message) {
   console.error(`[atomaton-github] ${message}`);
 }
-function dispatchUpdateConflictAgent(repo, prNumber, agent, options = {}) {
-  const directive = `${LLM_CONTEXT_TAG.write("include")}
+function dispatchUpdateConflictAgent(repo, prNumber, agent) {
+  return dispatchDirective(repo, prNumber, agent, {
+    context: `the update pull request #${prNumber} stopped on a conflict, so ${agent} was to resolve it`,
+    type: "pr",
+    directive: "Atomaton: this pull request takes a newer release onto this tree and stopped where the two " + "sides disagree \u2014 the files listed above carry conflict markers naming both. Resolve them, " + "keeping what this repository wrote where it was deliberate and taking what the release " + "changed everywhere else, and say in your report which side you took for each file and why. " + "One limit on where you can write: a conflicted path under `.github/workflows/` is a " + "person's, because GitHub refuses a workflow file written with your token and the push " + "carrying it would be rejected. Leave those files' markers exactly as they are, resolve " + "the others, and name the workflow paths in your report so a person can finish them. A " + "conflict that mixes the two kinds is the same: the workflow files stay for the person, " + "and you resolve the rest. " + "Nothing merges from here: the repository's checks run on the resolved tree, and the merge is " + "a person's."
+  }) === "dispatched";
+}
+function dispatchDirective(repo, number, agent, request) {
+  const body = `${LLM_CONTEXT_TAG.write("include")}
 ${DISPATCH_TAG.write(agent)}
-` + "Atomaton: this pull request takes a newer release onto this tree and stopped where the two " + "sides disagree \u2014 the files listed above carry conflict markers naming both. Resolve them, " + "keeping what this repository wrote where it was deliberate and taking what the release " + "changed everywhere else, and say in your report which side you took for each file and why. " + "Nothing merges from here: the repository's checks run on the resolved tree, and the merge is " + "a person's.";
-  const markerCommentId = commentOnWithId(repo, prNumber, directive);
+
+${request.directive}`;
+  const markerCommentId = commentOnWithId(repo, number, body);
   if (markerCommentId === null) {
-    log(`dispatchUpdateConflictAgent: could not post the resolution directive on #${prNumber}, so ${agent} was not started`);
-    return false;
+    log(`${request.context}: could not post the directive on #${number}, so ${agent} was not started`);
+    return "failed";
   }
   return dispatchRunner({
-    context: `the update pull request #${prNumber} stopped on a conflict, so ${agent} was to resolve it`,
+    context: request.context,
     agent,
-    type: "pr",
-    number: prNumber,
+    type: request.type ?? "issue",
+    number,
+    notify: request.notify ?? "",
     repo,
     markerCommentId,
-    token: options.token,
+    ...request.continuesChain === true ? { continuesChain: true } : {},
     log
-  }) === "dispatched";
+  });
 }
 
 // src/entrypoints/machinery/lib/update-branch.ts
@@ -1622,13 +1641,13 @@ function updateBody(report, conflictAgent = "") {
   if (report.leftovers.length > 0) {
     lines.push("## Files upstream no longer ships", "", "Reported only \u2014 the manifest cannot tell these from files the adopter wrote,", "so nothing here deletes them on a guess:", "", ...report.leftovers.slice(0, MAX_LISTED).map((path) => `- \`${path}\``), ...report.leftovers.length > MAX_LISTED ? [`- \u2026and ${report.leftovers.length - MAX_LISTED} more`] : [], "");
   }
-  lines.push("## What happens next", "", report.conflicts.length > 0 ? conflictAgent !== "" ? `This pull request does not merge on its own: the conflicted files above carry markers naming both sides. \`${conflictAgent}\` is started on it to resolve them \u2014 the checks run on the resolved tree, and then it can merge.` : "This pull request does not merge on its own: the conflicted files above carry markers naming both sides. Comment on this pull request and ask an agent to resolve them \u2014 the checks will run on the resolved tree, and only then can this merge." : plan.kept.length > 0 ? "This pull request does not merge itself: the kept paths above are the plan declining to touch them without a person. Read them \u2014 each is a place this repository's words and the release disagree \u2014 and merge by hand when they read right, or ask an agent there to help." : "The repository's checks run on this pull request; when they pass, the update merges it and closes the notice.", "");
+  lines.push("## What happens next", "", report.conflicts.length > 0 ? conflictAgent !== "" ? `This pull request does not merge on its own: the conflicted files above carry markers naming both sides. \`${conflictAgent}\` is started on it to resolve them \u2014 the checks run on the resolved tree, and then it can merge. One kind is not the agent's: a path under \`.github/workflows/\` cannot be written with its token, so those markers are left for a person, and a pull request carrying both kinds is handled the same way.` : "This pull request does not merge on its own: the conflicted files above carry markers naming both sides. Comment on this pull request and ask an agent to resolve them \u2014 the checks will run on the resolved tree, and only then can this merge." : plan.kept.length > 0 ? "This pull request does not merge itself: the kept paths above are the plan declining to touch them without a person. Read them \u2014 each is a place this repository's words and the release disagree \u2014 and merge by hand when they read right, or ask an agent there to help." : "The repository's checks run on this pull request; when they pass, the update merges it and closes the notice.", "");
   return `${lines.join(`
 `).trimEnd()}
 `;
 }
 function stopComment(report, prNumber, resolution = null) {
-  const next = resolution === null ? "Comment on that pull request and ask an agent to resolve them \u2014 nothing merges until someone does." : resolution.started ? `\`${resolution.agent}\` has been started on that pull request to resolve them. The checks run on ` + "the resolved tree; the merge itself is a person's." : `\`${resolution.agent}\` was to be started on that pull request and could not be \u2014 the run's log says ` + "why. Comment there and ask an agent, or resolve them yourself; nothing merges until someone does.";
+  const next = resolution === null ? "Comment on that pull request and ask an agent to resolve them \u2014 nothing merges until someone does." : resolution.started ? `\`${resolution.agent}\` has been started on that pull request to resolve them. A conflicted ` + "path under `.github/workflows/` is left for a person, because an agent's token cannot write " + "a workflow file; a pull request carrying those alongside ordinary conflicts is handled the " + "same way. The checks run on " + "the resolved tree; the merge itself is a person's." : `\`${resolution.agent}\` was to be started on that pull request and could not be \u2014 the run's log says ` + "why. Comment there and ask an agent, or resolve them yourself; nothing merges until someone does.";
   return [
     LLM_CONTEXT_TAG.write("exclude"),
     `Taking ${report.plan.target} stopped at a pull request: ${report.conflicts.length} file(s) changed on both sides.`,
@@ -1823,7 +1842,11 @@ ${targetTag} differs from ${local.manifest.version} by name only: applying it wo
     console.error(`::error::could not read ${repo}'s default branch, so no pull request can be opened against it.`);
     process.exit(1);
   }
-  const conflictAgent = getNewReleaseMode() === "pr-agent" ? getUpdateConflictAgent() : "";
+  const policy = tryGetUpdateConflictPolicy();
+  if (!policy.readable) {
+    log4("WARN config.yaml could not be read after the plan was applied \u2014 it is one of the paths the merge left with conflict markers. " + "The collision policy is unknown, so no agent is started and the run stops for a person at the pull request.");
+  }
+  const conflictAgent = policy.agent;
   const report = { plan, conflicts, merged, leftovers };
   const existing = openPrForHead(repo, branch);
   let prNumber;
@@ -1891,7 +1914,7 @@ ${targetTag} differs from ${local.manifest.version} by name only: applying it wo
   if (conflicts.length > 0) {
     const resolution = conflictAgent === "" ? null : {
       agent: conflictAgent,
-      started: dispatchUpdateConflictAgent(repo, prNumber, conflictAgent, { token })
+      started: dispatchUpdateConflictAgent(repo, prNumber, conflictAgent)
     };
     if (resolution !== null && !resolution.started) {
       log4(`WARN could not start ${conflictAgent} on #${prNumber}; the pull request stands for a person`);

@@ -444,6 +444,24 @@ ${TOOK_TAG.write(args)}`;
 function patchCommentBody(repo, commentId, body) {
   return gh("api", `repos/${repo}/issues/comments/${commentId}`, "--method", "PATCH", "-f", `body=${body}`);
 }
+function markerBody(agent, type) {
+  const noun = type === "pr" ? "pull request" : "issue";
+  return `${LLM_CONTEXT_TAG.write("exclude")}
+${DISPATCH_TAG.write(agent)}
+` + `Atomaton: \`${agent}\` starting on this ${noun}.`;
+}
+async function mintMarker(repo, number, agent, type) {
+  if (!agent) {
+    throw new Error("--agent is required when --ask is absent: an ask-less run mints its ask from a marker that names the agent");
+  }
+  const posted = gh("api", `repos/${repo}/issues/${number}/comments`, "--method", "POST", "-f", `body=${markerBody(agent, type)}`, "--jq", ".id");
+  if (posted.code !== 0)
+    throw new Error(`could not mint the dispatch marker on #${number}: ${posted.stderr || posted.stdout}`);
+  const markerId = Number(posted.stdout.trim());
+  if (!Number.isInteger(markerId) || markerId <= 0)
+    throw new Error(`the minted marker's id came back unreadable: ${posted.stdout.trim()}`);
+  return markerId;
+}
 function raceOutcome(comments, mine, runFinished) {
   for (const comment of comments) {
     if (comment.id >= mine.id)
@@ -464,30 +482,46 @@ async function main() {
       number: { type: "string" },
       ask: { type: "string" },
       "run-id": { type: "string" },
-      repo: { type: "string" }
+      repo: { type: "string" },
+      agent: { type: "string" },
+      type: { type: "string" }
     }
   });
   const repo = values.repo ?? process.env.GITHUB_REPOSITORY ?? "";
   const number = Number(values.number);
   const runId = Number(values["run-id"] ?? process.env.GITHUB_RUN_ID ?? 0);
-  const ask = Number(values.ask ?? 0) || 0;
-  const record = (claimed) => {
+  let ask = Number(values.ask ?? 0) || 0;
+  const record = (claimed, askId) => {
     const out = process.env.GITHUB_OUTPUT;
     if (out) {
       const { appendFileSync } = __require("fs");
       appendFileSync(out, `claimed=${claimed ? "true" : "false"}
 `);
+      appendFileSync(out, `ask=${askId}
+`);
     }
-    console.error(`claim_turn: claimed=${claimed ? "true" : "false"} (ask=${ask}, run=${runId})`);
+    console.error(`claim_turn: claimed=${claimed ? "true" : "false"} (ask=${askId}, run=${runId})`);
   };
   if (!Number.isInteger(number) || number <= 0)
     throw new Error("--number must be a positive number");
+  let minted = false;
   if (ask <= 0) {
-    record(true);
-    return;
+    ask = await mintMarker(repo, number, (values.agent ?? "").trim(), values.type ?? "");
+    minted = true;
   }
   if (!Number.isInteger(runId) || runId <= 0)
     throw new Error("--run-id must be a positive number");
+  if (minted) {
+    for (let attempt = 0;attempt <= READ_DELAYS_MS.length; attempt += 1) {
+      if (readComments(repo, number).some((comment) => comment.id === ask))
+        break;
+      const delay = READ_DELAYS_MS[attempt];
+      if (delay === undefined) {
+        throw new Error(`the minted marker on #${number} never became visible, so the race check cannot be trusted`);
+      }
+      await Bun.sleep(delay);
+    }
+  }
   const comments = readComments(repo, number);
   const askComment = comments.find((comment) => comment.id === ask);
   const isMarker = askComment !== undefined && !askComment.human && DISPATCH_TAG.hasProse(askComment.body);
@@ -496,7 +530,7 @@ async function main() {
     const existing = TOOK_TAG.readProse(original);
     if (existing !== undefined) {
       if (!runFinishedOn(repo, existing.run)) {
-        record(false);
+        record(false, ask);
         return;
       }
       const stripped = original.split(`
@@ -513,14 +547,14 @@ async function main() {
       }
       const outcome = raceOutcome(readComments(repo, number), { id: ask, ask }, (run) => runFinishedOn(repo, run));
       if (outcome === "held") {
-        record(true);
+        record(true, ask);
         return;
       }
       const restored = patchCommentBody(repo, ask, original);
       if (restored.code !== 0) {
         throw new Error(`could not take back the claim on #${number}: ${restored.stderr || restored.stdout}`);
       }
-      record(false);
+      record(false, ask);
       return;
     }
     const edited = patchCommentBody(repo, ask, claimOnMarkerBody(original, { ask, run: runId }));
@@ -543,19 +577,19 @@ async function main() {
     if (held === undefined)
       throw new Error(`the claim on #${number} never became visible, so the race check cannot be trusted`);
     if (!held) {
-      record(false);
+      record(false, ask);
       return;
     }
     const outcome = raceOutcome(readComments(repo, number), { id: ask, ask }, (run) => runFinishedOn(repo, run));
     if (outcome === "held") {
-      record(true);
+      record(true, ask);
       return;
     }
     const restored = patchCommentBody(repo, ask, original);
     if (restored.code !== 0) {
       throw new Error(`could not take back the claim on #${number}: ${restored.stderr || restored.stdout}`);
     }
-    record(false);
+    record(false, ask);
     return;
   }
   const posted = gh("api", `repos/${repo}/issues/${number}/comments`, "--method", "POST", "-f", `body=${claimCommentBody({ ask, run: runId })}`, "--jq", ".id");
@@ -579,20 +613,21 @@ async function main() {
     throw new Error(`the claim on #${number} never became visible, so the race check cannot be trusted`);
   const outcome = raceOutcome(readComments(repo, number), { id: claimId, ask }, (run) => runFinishedOn(repo, run));
   if (outcome === "held") {
-    record(true);
+    record(true, ask);
     return;
   }
   const removed = gh("api", `repos/${repo}/issues/comments/${claimId}`, "--method", "DELETE");
   if (removed.code !== 0) {
     throw new Error(`could not take back the claim on #${number}: ${removed.stderr || removed.stdout}`);
   }
-  record(false);
+  record(false, ask);
 }
 if (import.meta.main)
   main();
 export {
   claimCommentBody,
   claimOnMarkerBody,
+  markerBody,
   raceOutcome,
   ref
 };

@@ -41,6 +41,9 @@ function looksTransient(result) {
     return true;
   return /(timeout|timed out|connection reset|unexpected EOF|TLS handshake|temporary failure)/i.test(text);
 }
+function gitRun(...args) {
+  return run(["git", ...args]);
+}
 function splitConcatenatedJson(text) {
   const results = [];
   let depth = 0;
@@ -75,6 +78,16 @@ function splitConcatenatedJson(text) {
     }
   }
   return results;
+}
+function dispatchWorkflow(context, workflow, args = [], log = (m) => console.error(m)) {
+  const argv = ["workflow", "run", workflow, ...args];
+  const { code, stdout, stderr } = gh(...argv);
+  if (code) {
+    log(`${context}: WARN failed to dispatch ${workflow}: ${stderr || stdout}`);
+    return false;
+  }
+  log(`${context}: dispatched ${workflow}`);
+  return true;
 }
 
 // src/domain/work/agent-name.ts
@@ -654,6 +667,288 @@ function readTargetState(number, repo) {
   return { known: false, why: `unrecognised state ${JSON.stringify(parsed.state ?? null)}` };
 }
 
+// src/adapters/runner/ops-log.ts
+var OPS_LOG_PATH = process.env.ATOMATON_OPS_LOG ?? "/tmp/atomaton_ops.log";
+// src/adapters/github/branch-placement.ts
+var NO_BRANCH_MESSAGE = "This run is on a detached checkout with no local branch, so there is no branch to push: " + "commit_and_push and create_pr cannot publish this run's work. Report the work on the issue instead.";
+
+// src/domain/delivery/deploy-jobs.ts
+function refPatternProblem(pattern) {
+  const body = pattern.endsWith("*") ? pattern.slice(0, -1) : pattern;
+  if (body.includes("*")) {
+    return `"${pattern}" uses a '*' somewhere other than the end, which this matcher cannot honour, ` + 'so it would match nothing. Write a literal ref, or a prefix followed by "*" \u2014 e.g. "v*".';
+  }
+  if (/[?[\]{}]/.test(body)) {
+    return `"${pattern}" uses a glob character this matcher cannot honour, so it would match nothing. ` + 'Write a literal ref, or a prefix followed by "*".';
+  }
+  return "";
+}
+function readPatterns(raw, key, required, where, problems) {
+  const list = raw ?? [];
+  if (!Array.isArray(list) || list.some((p) => typeof p !== "string" || p.trim() === "")) {
+    problems.push(`${where}: \`${key}\` must be an array of non-empty patterns.`);
+    return null;
+  }
+  const patterns = list.map((p) => p.trim());
+  const bad = patterns.map(refPatternProblem).find((problem) => problem !== "");
+  if (bad) {
+    problems.push(`${where}: ${bad}`);
+    return null;
+  }
+  if (required && patterns.length === 0) {
+    problems.push(`${where}: \`${key}\` needs at least one pattern \u2014 e.g. ["v*"].`);
+    return null;
+  }
+  return patterns;
+}
+function refsFrom(keys) {
+  const owned = [...keys.tags ? ["tags"] : [], ...keys.branches ? ["branches"] : []];
+  return {
+    keys: owned,
+    read: (entry, where, problems) => {
+      const tags = keys.tags ? readPatterns(entry.tags, "tags", true, where, problems) : [];
+      const branches = keys.branches ? readPatterns(entry.branches, "branches", false, where, problems) : [];
+      return tags === null || branches === null ? null : { tags, branches };
+    }
+  };
+}
+var DEPLOY_ARMS = {
+  merge: {
+    key: "on_merge",
+    rules: {
+      where: "deploy.on_merge",
+      secrets: { reserved: DEPLOY_JOB_RESERVED },
+      extra: refsFrom({ branches: true })
+    }
+  },
+  tag: {
+    key: "on_tag",
+    rules: {
+      where: "deploy.on_tag",
+      secrets: { reserved: DEPLOY_JOB_RESERVED },
+      extra: refsFrom({ branches: true, tags: true })
+    }
+  },
+  demand: {
+    key: "on_demand",
+    rules: {
+      where: "deploy.on_demand",
+      secrets: { reserved: DEPLOY_JOB_RESERVED },
+      extra: { keys: [], read: () => ({ branches: [], tags: [] }) }
+    }
+  }
+};
+var TRIGGERS = Object.keys(DEPLOY_ARMS);
+
+// src/adapters/actions/dispatch-targets.ts
+function log(message) {
+  console.error(`[atomaton-github] ${message}`);
+}
+function dispatchPrValidation(repo, prNumber, branch, options = {}) {
+  return dispatchWorkflow(`dispatchPrValidation: validating PR #${prNumber}`, "atomaton-validate-pr.yml", [
+    "--repo",
+    repo,
+    "-f",
+    `number=${prNumber}`,
+    "-f",
+    `branch=${branch}`,
+    "-f",
+    `asked_by_person=${options.askedByPerson === true ? "true" : "false"}`,
+    "-f",
+    `ask=${options.ask ?? ""}`
+  ], log);
+}
+
+// src/adapters/github/branch-rules.ts
+var FEATURE_UNAVAILABLE = /upgrade to github|make this repository public/i;
+function readBranchRules(repo, baseRef) {
+  if (!baseRef)
+    return { known: false, why: "no base branch was given" };
+  const { code, stdout, stderr } = gh("api", `repos/${repo}/rules/branches/${baseRef}`);
+  if (code) {
+    if (FEATURE_UNAVAILABLE.test(`${stderr} ${stdout}`)) {
+      return {
+        known: true,
+        enforceable: false,
+        contexts: [],
+        pullRequestRequired: false,
+        why: "branch rules are not available on this repository (they are a paid feature on a " + "private one), so GitHub cannot require a status check or refuse a merge here"
+      };
+    }
+    return { known: false, why: `the branch rules for ${baseRef} could not be read` };
+  }
+  try {
+    const rules = JSON.parse(stdout || "[]");
+    return {
+      known: true,
+      enforceable: true,
+      contexts: rules.filter((rule) => rule.type === "required_status_checks").flatMap((rule) => rule.parameters?.required_status_checks ?? []).map((check) => check.context),
+      pullRequestRequired: rules.some((rule) => rule.type === "pull_request")
+    };
+  } catch {
+    return { known: false, why: `the branch rules for ${baseRef} were not valid JSON` };
+  }
+}
+
+// src/adapters/github/pull-request.ts
+function viewArgs(repo, number, fields) {
+  const json = typeof fields === "string" ? fields : fields.join(",");
+  return ["pr", "view", String(number), "--repo", repo, "--json", json];
+}
+function whyNot(what, result) {
+  return `${what}: ${result.stderr || result.stdout || `gh exited ${result.code}`}`;
+}
+function readPullRequest(repo, number, fields) {
+  const what = `gh pr view ${number} --repo ${repo}`;
+  const result = ghRead(...viewArgs(repo, number, fields));
+  if (result.code !== 0)
+    return { known: false, why: whyNot(what, result) };
+  if (!result.stdout.trim())
+    return { known: false, why: `${what}: gh printed nothing` };
+  try {
+    return { known: true, value: JSON.parse(result.stdout) };
+  } catch {
+    return { known: false, why: `${what}: the answer was not JSON` };
+  }
+}
+
+// src/entrypoints/machinery/lib/pr-head-branch.ts
+function prHead(pr) {
+  return {
+    branch: typeof pr?.headRefName === "string" ? pr.headRefName.trim() : "",
+    crossRepository: pr?.isCrossRepository === true
+  };
+}
+function isBranchName(name) {
+  if (!name)
+    return false;
+  return gitRun("check-ref-format", "--branch", name).code === 0;
+}
+
+// src/entrypoints/machinery/lib/handoff-validation.ts
+var PASSING2 = new Set(["success", "neutral", "skipped"]);
+var COMMIT_IS_FINAL = new Set(["CLEAN", "UNSTABLE", "BLOCKED"]);
+function handoffValidationNeeded(signals) {
+  if (signals.kind !== "pull-request") {
+    return { dispatch: false, why: "the node is an issue, which nothing merges" };
+  }
+  const state = (signals.state ?? "").toUpperCase();
+  if (state !== "OPEN") {
+    return { dispatch: false, why: `the pull request is ${state ? state.toLowerCase() : "in an unknown state"}, not open` };
+  }
+  if (signals.isDraft)
+    return { dispatch: false, why: "the pull request is a draft" };
+  const mergeState = (signals.mergeStateStatus ?? "").toUpperCase();
+  if (!COMMIT_IS_FINAL.has(mergeState)) {
+    return {
+      dispatch: false,
+      why: `GitHub reports ${mergeState || "no merge state"}, so the head commit will change before it is merged`
+    };
+  }
+  const { required } = signals;
+  if (!required.known) {
+    return { dispatch: false, why: `the required contexts on the base branch could not be read (${required.why})` };
+  }
+  if (!required.enforceable)
+    return { dispatch: false, why: "this repository cannot require status checks" };
+  if (required.contexts.length === 0) {
+    return { dispatch: false, why: "the base branch requires no status checks" };
+  }
+  const byName = new Map(signals.checks.map((check) => [check.name, check]));
+  const unsatisfied = required.contexts.filter((context) => {
+    const run = byName.get(context);
+    return run === undefined || run.status !== "completed" || !PASSING2.has((run.conclusion ?? "").toLowerCase());
+  });
+  if (unsatisfied.length === 0) {
+    return { dispatch: false, why: `every required context has passed on the head commit (${required.contexts.join(", ")})` };
+  }
+  return {
+    dispatch: true,
+    why: `required context${unsatisfied.length === 1 ? "" : "s"} not satisfied on the head commit: ` + unsatisfied.join(", ")
+  };
+}
+function log2(message) {
+  console.error(`[atomaton-handoff] ${message}`);
+}
+function ensureMergeableAtHandoff(kind, repoArg, number) {
+  try {
+    ensure(kind, (repoArg ?? "").trim(), number);
+  } catch (e) {
+    log2(`WARN could not check the head commit before the handoff: ${e.message}`);
+  }
+}
+function ensure(kind, repoArg, number) {
+  if (kind !== "pull-request")
+    return;
+  const repo = repoArg || (process.env.GITHUB_REPOSITORY ?? "").trim();
+  if (!repo) {
+    log2("WARN cannot check the head commit before the handoff: no repository is named");
+    return;
+  }
+  const read = readPullRequest(repo, Number(number), [
+    "headRefOid",
+    "headRefName",
+    "isCrossRepository",
+    "baseRefName",
+    "isDraft",
+    "state",
+    "mergeStateStatus"
+  ]);
+  if (!read.known) {
+    log2(`WARN could not read the pull request before the handoff: ${read.why}`);
+    return;
+  }
+  const view = read.value;
+  const headSha = (view.headRefOid ?? "").trim();
+  if (!headSha) {
+    log2("WARN could not check the head commit before the handoff: the pull request reports no head commit");
+    return;
+  }
+  const decision = handoffValidationNeeded({
+    kind,
+    state: view.state ?? "",
+    isDraft: view.isDraft === true,
+    mergeStateStatus: view.mergeStateStatus ?? "",
+    required: readBranchRules(repo, (view.baseRefName ?? "").trim()),
+    checks: readChecks(repo, headSha)
+  });
+  if (!decision.dispatch) {
+    log2(decision.why);
+    return;
+  }
+  log2(`${decision.why}; dispatching a validation so the mirror lands on ${headSha.slice(0, 7)}`);
+  const head = prHead({ headRefName: view.headRefName, isCrossRepository: view.isCrossRepository });
+  if (head.crossRepository) {
+    log2("WARN the head is a fork's branch, not a branch of this repository; nothing was dispatched");
+    return;
+  }
+  if (!isBranchName(head.branch)) {
+    log2(`WARN '${head.branch}' is not a branch name this repository can use; nothing was dispatched`);
+    return;
+  }
+  if (dispatchPrValidation(repo, Number(number), head.branch)) {
+    log2(`dispatched validation for #${number} at the handoff, so the required check reaches ${headSha.slice(0, 7)}`);
+  }
+}
+function readChecks(repo, sha) {
+  const { code, stdout, stderr } = ghRead("api", `repos/${repo}/commits/${sha}/check-runs?per_page=100`);
+  if (code) {
+    log2(`WARN could not read the check runs on ${sha.slice(0, 7)}: ${stderr || stdout}`);
+    return [];
+  }
+  try {
+    const { check_runs = [] } = JSON.parse(stdout || "{}");
+    return check_runs.map((run) => ({
+      name: run.name ?? "",
+      status: run.status ?? "",
+      conclusion: run.conclusion ?? null
+    }));
+  } catch {
+    log2(`WARN the check runs on ${sha.slice(0, 7)} were not JSON`);
+    return [];
+  }
+}
+
 // src/entrypoints/machinery/lib/turn-labels.ts
 function applyTurnLabels(phase, repo, number) {
   const inProgress = getLabel("in_progress");
@@ -697,6 +992,8 @@ function applyTurnLabels(phase, repo, number) {
   const added = edit("--add-label", waitingForPerson);
   if (added.code !== 0)
     console.error(`::warning::could not add '${waitingForPerson}' to #${number}`);
+  if (state.known)
+    ensureMergeableAtHandoff(state.kind, repo, number);
 }
 
 // src/domain/work/run-report.ts

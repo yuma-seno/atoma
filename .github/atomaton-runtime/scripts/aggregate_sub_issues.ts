@@ -50,19 +50,6 @@ function ghCommand() {
 function gh(...args) {
   return run([...ghCommand(), ...args]);
 }
-function ghAs(token, ...args) {
-  const proc = Bun.spawnSync({
-    cmd: [...ghCommand(), ...args],
-    stdout: "pipe",
-    stderr: "pipe",
-    env: { ...process.env, GH_TOKEN: token }
-  });
-  return {
-    code: proc.exitCode ?? 1,
-    stdout: proc.stdout ? proc.stdout.toString("utf8").trim() : "",
-    stderr: proc.stderr ? proc.stderr.toString("utf8").trim() : ""
-  };
-}
 function ghRead(...args) {
   let result = gh(...args);
   for (const delay of [2000, 6000]) {
@@ -135,9 +122,9 @@ function splitConcatenatedJson(text) {
   }
   return results;
 }
-function dispatchWorkflow(context, workflow, args = [], log = (m) => console.error(m), token = "") {
+function dispatchWorkflow(context, workflow, args = [], log = (m) => console.error(m)) {
   const argv = ["workflow", "run", workflow, ...args];
-  const { code, stdout, stderr } = token.trim() ? ghAs(token.trim(), ...argv) : gh(...argv);
+  const { code, stdout, stderr } = gh(...argv);
   if (code) {
     log(`${context}: WARN failed to dispatch ${workflow}: ${stderr || stdout}`);
     return false;
@@ -223,6 +210,10 @@ var CHECKS_FROM_PULL_REQUEST = {
 };
 var NO_PULL_REQUEST_CHECKS = "This check verified nothing: `checks.from_pull_request` in .github/atomaton/config.yaml is empty, " + "so a pull request satisfying it has not been tested. Add the commands that check this project, " + "or point `checks.your_workflow` at a workflow of your own.";
 
+// src/domain/work/agent-name.ts
+var AGENT_NAME_PATTERN = "[a-z][a-z0-9-]*";
+var AGENT_NAME_RE = new RegExp(`^${AGENT_NAME_PATTERN}$`);
+
 // src/adapters/runner/machinery.ts
 function machineryRoot() {
   return process.env[MACHINERY_ROOT_VAR]?.trim() || undefined;
@@ -252,10 +243,6 @@ var DEFAULT_LABELS = {
 function getLabel(key) {
   return loadConfig().chain?.labels?.[key] ?? DEFAULT_LABELS[key];
 }
-
-// src/domain/work/agent-name.ts
-var AGENT_NAME_PATTERN = "[a-z][a-z0-9-]*";
-var AGENT_NAME_RE = new RegExp(`^${AGENT_NAME_PATTERN}$`);
 
 // src/shared/fence.ts
 function fenceSegments(text) {
@@ -1119,7 +1106,7 @@ function dispatchRunner(d) {
     "--field",
     `dispatched_by=${d.dispatchedBy ?? ""}`
   ];
-  if (!dispatchWorkflow(d.context, runnerWorkflow(), args, d.log, d.token)) {
+  if (!dispatchWorkflow(d.context, runnerWorkflow(), args, d.log)) {
     if (d.refusalEnding !== undefined) {
       if (markerId !== undefined) {
         gh("api", "--method", "DELETE", `repos/${d.repo ?? "{owner}/{repo}"}/issues/comments/${markerId}`);

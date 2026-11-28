@@ -54,9 +54,9 @@ function looksTransient(result) {
     return true;
   return /(timeout|timed out|connection reset|unexpected EOF|TLS handshake|temporary failure)/i.test(text);
 }
-function dispatchWorkflow(context, workflow, args = [], log = (m) => console.error(m), token = "") {
+function dispatchWorkflow(context, workflow, args = [], log = (m) => console.error(m)) {
   const argv = ["workflow", "run", workflow, ...args];
-  const { code, stdout, stderr } = token.trim() ? ghAs(token.trim(), ...argv) : gh(...argv);
+  const { code, stdout, stderr } = gh(...argv);
   if (code) {
     log(`${context}: WARN failed to dispatch ${workflow}: ${stderr || stdout}`);
     return false;
@@ -575,6 +575,10 @@ var NEW_RELEASE_MODES = ["issue", "pr", "pr-agent"];
 function isNewReleaseMode(value) {
   return typeof value === "string" && NEW_RELEASE_MODES.includes(value);
 }
+var NEW_RELEASE_SCOPES = ["all", "marked"];
+function isNewReleaseScope(value) {
+  return typeof value === "string" && NEW_RELEASE_SCOPES.includes(value);
+}
 
 // src/adapters/runner/machinery.ts
 function machineryRoot() {
@@ -599,6 +603,10 @@ function loadConfig() {
 function getNewReleaseMode(fallback = "issue") {
   const mode = loadConfig().update?.on_new_release;
   return isNewReleaseMode(mode) ? mode : fallback;
+}
+function getNewReleaseScope(fallback = "all") {
+  const scope = loadConfig().update?.detection_scope;
+  return isNewReleaseScope(scope) ? scope : fallback;
 }
 
 // src/adapters/runner/ops-log.ts
@@ -678,8 +686,8 @@ var TRIGGERS = Object.keys(DEPLOY_ARMS);
 function log2(message) {
   console.error(`[atomaton-github] ${message}`);
 }
-function dispatchUpdate(repo, source, options = {}) {
-  return dispatchWorkflow(`dispatchUpdate: taking a newer release onto ${repo}`, "atomaton-update.yml", ["--repo", repo, "-f", `source=${source > 0 ? String(source) : ""}`], log2, options.token);
+function dispatchUpdate(repo, source) {
+  return dispatchWorkflow(`dispatchUpdate: taking a newer release onto ${repo}`, "atomaton-update.yml", ["--repo", repo, "-f", `source=${source > 0 ? String(source) : ""}`], log2);
 }
 
 // src/entrypoints/machinery/lib/release-files.ts
@@ -852,6 +860,13 @@ function releaseWindow(notes, localVersion, max = MAX_RELEASES) {
   const newer = at === -1 ? [...notes] : notes.slice(0, at);
   return { newer: newer.slice(0, max), omitted: Math.max(0, newer.length - max), found: at !== -1 };
 }
+var ADOPT_MARKER = "atomaton:adopt";
+function isMarked(note) {
+  return note.body.includes(ADOPT_MARKER);
+}
+function markedReleases(notes, localVersion) {
+  return releaseWindow(notes, localVersion, notes.length).newer.filter(isMarked).map((note) => note.tag);
+}
 function notesOf(body) {
   const demoted = body.trim().split(`
 `).map((line) => /^#{1,4}\s/.test(line) ? `##${line}` : line).join(`
@@ -877,7 +892,12 @@ function noticeBody(input) {
   const lines = [NOTICE_MARKER];
   if (input.autoUpdateFailure !== null)
     lines.push(...autoUpdateWarningLines(input.autoUpdateFailure));
-  lines.push(`Upstream has published **${input.latestVersion}**. This repository's \`.github/\` came from **${input.localVersion}**.`, "", "| | |", "| --- | --- |", `| This repository's \`.github/\` is from | \`${input.localVersion}\` |`, `| The latest release is | \`${input.latestVersion}\` |`, "", "## Taking it", "");
+  lines.push(`Upstream has published **${input.latestVersion}**. This repository's \`.github/\` came from **${input.localVersion}**.`, "", "| | |", "| --- | --- |", `| This repository's \`.github/\` is from | \`${input.localVersion}\` |`, `| The latest release is | \`${input.latestVersion}\` |`, "");
+  if (input.markedReleases !== null) {
+    const tags = input.markedReleases.map((tag) => `\`${tag}\``).join(", ");
+    lines.push(`\`update.detection_scope\` is \`marked\`: of the releases newer than ${input.localVersion}, ` + `${tags} ${input.markedReleases.length === 1 ? "carries" : "carry"} \`${ADOPT_MARKER}\`. ` + "That mark is the reason this notice exists, and taking the latest release takes it too.", "");
+  }
+  lines.push("## Taking it", "");
   if (input.plan === null) {
     lines.push(`What this update would touch here: not computed \u2014 ${input.planWhy}.`, "", "Nothing has been changed for you: this is a notice, and the upgrade is a decision.", "", "Comment **`!upgrade`** on this issue, or run the **Atomaton Update** workflow from the Actions tab.", "");
   } else {
@@ -984,6 +1004,20 @@ ${LLM_CONTEXT_TAG.write("exclude")}
     log4(`caught up to ${local.manifest.version}; closed the settled notice #${existing}`);
     return;
   }
+  const scope = getNewReleaseScope();
+  const scoped = scope === "marked" ? releaseNotes() : undefined;
+  let marked = null;
+  if (scope === "marked") {
+    if (scoped === null || scoped === undefined) {
+      console.error(`::error::\`update.detection_scope\` is \`marked\` and ${UPSTREAM_REPOSITORY}'s release list could not be ` + "read, so there is nothing to compare against. A failed read is not the answer 'nothing is marked'.");
+      process.exit(1);
+    }
+    marked = markedReleases(scoped, local.manifest.version);
+    if (marked.length === 0) {
+      log4(`nothing to announce: \`update.detection_scope\` is \`marked\`, and no release newer than ` + `${local.manifest.version} carries ${ADOPT_MARKER}`);
+      return;
+    }
+  }
   const mode = getNewReleaseMode();
   const updateToken = (process.env.ATOMATON_UPDATE_TOKEN ?? "").trim();
   let autoUpdateFailure = null;
@@ -992,7 +1026,7 @@ ${LLM_CONTEXT_TAG.write("exclude")}
       log4(`WARN update.on_new_release is ${mode}, but ATOMATON_UPDATE_TOKEN is not set \u2014 nothing was started`);
       autoUpdateFailure = {
         mode,
-        why: "no `ATOMATON_UPDATE_TOKEN` secret is set here, and this workflow's own token may not start a run"
+        why: "no `ATOMATON_UPDATE_TOKEN` secret is set here, and the update cannot push, open " + "its pull request or merge without it"
       };
     } else {
       const open = openPrForHead(repo, updateBranchFor(latest.tag), updateToken);
@@ -1000,7 +1034,7 @@ ${LLM_CONTEXT_TAG.write("exclude")}
         log4(`an update pull request for ${latest.tag} (#${open}) is already open; nothing was started`);
         return;
       }
-      if (dispatchUpdate(repo, 0, { token: updateToken })) {
+      if (dispatchUpdate(repo, 0)) {
         log4(`started the update to ${latest.tag}; its report lands on the pull request it opens`);
         return;
       }
@@ -1016,7 +1050,7 @@ ${LLM_CONTEXT_TAG.write("exclude")}
     console.error(`::error::could not search ${repo} for an existing notice, so this run wrote nothing.`);
     process.exit(1);
   }
-  const notes = releaseNotes();
+  const notes = scoped !== undefined ? scoped : releaseNotes();
   const targetRelease = releaseFiles(latest.tag);
   const removed = "why" in targetRelease ? null : noLongerShipped(targetRelease.files.manifest, local.manifest.files);
   const removedWhy = `${RELEASE_MANIFEST} could not be read out of ${latest.tag}'s release asset.`;
@@ -1044,6 +1078,7 @@ ${LLM_CONTEXT_TAG.write("exclude")}
     latestVersion: latest.tag,
     window: notes === null ? null : releaseWindow(notes, local.manifest.version),
     windowWhy: `the release list could not be read.`,
+    markedReleases: marked,
     removed,
     removedWhy,
     plan,
@@ -1063,11 +1098,14 @@ ${LLM_CONTEXT_TAG.write("exclude")}
 if (import.meta.main)
   main();
 export {
+  ADOPT_MARKER,
   ASSET_NAME,
   MAX_NOTES_CHARS,
   MAX_RELEASES,
   NOTICE_MARKER,
   UPSTREAM_REPOSITORY,
+  isMarked,
+  markedReleases,
   noticeBody,
   noticeTitle,
   ref,

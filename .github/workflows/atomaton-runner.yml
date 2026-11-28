@@ -53,7 +53,7 @@ run-name: '${{ inputs.agent }} on #${{ inputs.number }}'
         type: string
         default: ''
       ask:
-        description: Ask comment id this run claims (atomaton:took); empty when the ask is the node's body
+        description: Ask comment id this run claims (atomaton:took); empty when the ask is the node's body (minted at claim time)
         required: false
         type: string
         default: ''
@@ -103,7 +103,7 @@ run-name: '${{ inputs.agent }} on #${{ inputs.number }}'
         type: string
         default: ''
       ask:
-        description: Ask comment id this run claims (atomaton:took); empty when the ask is the node's body
+        description: Ask comment id this run claims (atomaton:took); empty when the ask is the node's body (minted at claim time)
         required: false
         type: string
         default: ''
@@ -530,8 +530,10 @@ jobs:
           NUMBER: ${{ inputs.number }}
           ASK: ${{ inputs.ask }}
           RUN_ID: ${{ github.run_id }}
+          AGENT: ${{ inputs.agent }}
+          TYPE: ${{ inputs.type }}
         run: |
-          bun run "${ATOMATON_MACHINERY_ROOT:-.}/.github/atomaton-runtime/scripts/claim_turn.ts" --number "${NUMBER}" --ask "${ASK}" --run-id "${RUN_ID}"
+          bun run "${ATOMATON_MACHINERY_ROOT:-.}/.github/atomaton-runtime/scripts/claim_turn.ts" --number "${NUMBER}" --ask "${ASK}" --run-id "${RUN_ID}" --agent "${AGENT}" --type "${TYPE}"
         if: (steps.context.outputs.new_event_count != '0' || inputs.reload_count != '0')
       - name: Read who this run may call
         shell: bash
@@ -812,7 +814,7 @@ jobs:
           NUMBER: ${{ inputs.number }}
           TYPE: ${{ inputs.type }}
           ATOMATON_RELOAD_COUNT: ${{ inputs.reload_count }}
-          ATOMATON_ASK_ID: ${{ inputs.ask }}
+          ATOMATON_ASK_ID: ${{ inputs.ask || steps.claim.outputs.ask }}
           NOTIFY: ${{ steps.notify.outputs.notify }}
           ATOMATON_DISPATCHED_BY: ${{ inputs.dispatched_by }}
           ATOMATON_OPS_LOG: ${{ runner.temp }}/atomaton-run/atomaton_ops.log
@@ -928,7 +930,7 @@ jobs:
           NUMBER: ${{ inputs.number }}
           TYPE: ${{ inputs.type }}
           ATOMATON_RELOAD_COUNT: ${{ inputs.reload_count }}
-          ATOMATON_ASK_ID: ${{ inputs.ask }}
+          ATOMATON_ASK_ID: ${{ inputs.ask || steps.claim.outputs.ask }}
           NOTIFY: ${{ steps.notify.outputs.notify }}
           ATOMATON_DISPATCHED_BY: ${{ inputs.dispatched_by }}
           ATOMATON_OPS_LOG: ${{ runner.temp }}/atomaton-run/atomaton_ops.log
@@ -1061,7 +1063,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          bun run "${ATOMATON_MACHINERY_ROOT:-.}/.github/atomaton-runtime/scripts/post_result_comment.ts" --number "${{ inputs.number }}" --agent "${{ inputs.agent }}" --type "${{ inputs.type }}" --notify "${{ steps.notify.outputs.notify }}" --directive "${{ steps.finish.outputs.directive }}" --chain-continues "${{ steps.finish.outputs.chain_continues }}" --ended-because "${{ steps.finish.outputs.ended_because }}" --outcome "${{ steps.finish.outcome }}" --atoma-failed "${{ steps.finish.outputs.atoma_failed }}" --reported "${{ steps.finish.outputs.reported }}" --messages-before "${{ steps.context.outputs.messages_before }}" --changed "${{ steps.finish.outputs.changed }}" --run-url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" --session "${RUNNER_TEMP}/atomaton-run/session.json" --output "${RUNNER_TEMP}/atomaton-run/atomaton_output.txt" --logs-file "${RUNNER_TEMP}/atomaton-run/atomaton_logs.txt" --ending-comment "${RUNNER_TEMP}/atomaton-run/ending-comment.json" --ending-invalid "${{ steps.finish.outputs.ending_invalid }}" --people-file "${RUNNER_TEMP}/atomaton-run/callees.json" --ask "${{ inputs.ask }}" --run-id "${{ github.run_id }}"
+          bun run "${ATOMATON_MACHINERY_ROOT:-.}/.github/atomaton-runtime/scripts/post_result_comment.ts" --number "${{ inputs.number }}" --agent "${{ inputs.agent }}" --type "${{ inputs.type }}" --notify "${{ steps.notify.outputs.notify }}" --directive "${{ steps.finish.outputs.directive }}" --chain-continues "${{ steps.finish.outputs.chain_continues }}" --ended-because "${{ steps.finish.outputs.ended_because }}" --outcome "${{ steps.finish.outcome }}" --atoma-failed "${{ steps.finish.outputs.atoma_failed }}" --reported "${{ steps.finish.outputs.reported }}" --messages-before "${{ steps.context.outputs.messages_before }}" --changed "${{ steps.finish.outputs.changed }}" --run-url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" --session "${RUNNER_TEMP}/atomaton-run/session.json" --output "${RUNNER_TEMP}/atomaton-run/atomaton_output.txt" --logs-file "${RUNNER_TEMP}/atomaton-run/atomaton_logs.txt" --ending-comment "${RUNNER_TEMP}/atomaton-run/ending-comment.json" --ending-invalid "${{ steps.finish.outputs.ending_invalid }}" --people-file "${RUNNER_TEMP}/atomaton-run/callees.json" --ask "${{ inputs.ask || steps.claim.outputs.ask }}" --run-id "${{ github.run_id }}"
         if: always() && (steps.finish.outcome == 'success' || steps.finish.outcome == 'failure') && (steps.context.outputs.new_event_count != '0' || inputs.reload_count != '0') && steps.claim.outputs.claimed == 'true'
       - name: Report a cancelled run
         shell: bash
@@ -1069,7 +1071,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           NUMBER: ${{ inputs.number }}
           AGENT: ${{ inputs.agent }}
-          ASK: ${{ inputs.ask }}
+          ASK: ${{ inputs.ask || steps.claim.outputs.ask }}
           RUN_ID: ${{ github.run_id }}
         run: |
           bun run "${ATOMATON_MACHINERY_ROOT:-.}/.github/atomaton-runtime/scripts/report_cancelled_run.ts" --number "${NUMBER}" --agent "${AGENT}" --ask "${ASK}" --run-id "${RUN_ID}"
