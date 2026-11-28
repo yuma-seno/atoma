@@ -186,28 +186,8 @@ merge:
 # starts noticing only the releases whose notes carry `atomaton:adopt` -- to keep
 # noticing every release, set this to `all`.
 update:
-<<<<<<< config.yaml (ours)
   on_new_release: issue
   detection_scope: marked
-=======
-  on_new_release: pr-agent
-  detection_scope:
-    # One of `marked` or `all`.
-    #
-    #   marked  only the releases whose own notes carry `atomaton:adopt` -- the
-    #           release's own claim that it should be taken promptly. How far a
-    #           version number moves says what the change is compatible with, never
-    #           whether it matters: a patch can close a vulnerability, and a minor
-    #           can be a feature nobody is waiting for.
-    #   all     every release newer than yours. Also what an unset key means, and
-    #           what every project noticed before this key existed.
-    #
-    # `marked` reads the release list before it does anything else, so a list that
-    # cannot be read stops the run with an error rather than reading as "nothing is
-    # marked" -- a watch that silently stopped for as long as the API was blipping
-    # would say nothing about having done so.
-    marked
->>>>>>> config.yaml (theirs)
 
 
 # When a chain of runs stops and asks a person.
