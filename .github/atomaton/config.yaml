@@ -175,6 +175,7 @@ merge:
 # is a reason for the daily run to fail.
 update:
   on_new_release: issue
+  detection_scope: marked
 
 
 # When a chain of runs stops and asks a person.
