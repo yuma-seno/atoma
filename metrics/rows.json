@@ -821,5 +821,51 @@
         "started": "2026-11-26T15:52:25Z"
       }
     ]
+  },
+  {
+    "path": "sessions/issue-53/atomaton.json",
+    "agent": "atomaton",
+    "messages": 21,
+    "calls": 14,
+    "failed": 0,
+    "refused": 0,
+    "skills": [],
+    "reported": true,
+    "tools": {
+      "bash": 5,
+      "grep": 1,
+      "glob": 1,
+      "read": 4,
+      "fetch": 3
+    },
+    "acts": {
+      "other": 4,
+      "search": 1
+    },
+    "runs": [
+      {
+        "compactions": 0,
+        "ended": "2026-11-28T12:46:43Z",
+        "ended_because": "stopped",
+        "iterations": 3,
+        "loop_recoveries": 0,
+        "messages": 21,
+        "seconds": 262,
+        "server_calls": {
+          "files": {
+            "glob": 1,
+            "grep": 1,
+            "read": 4
+          },
+          "shell": {
+            "bash": 5
+          },
+          "web": {
+            "fetch": 3
+          }
+        },
+        "started": "2026-11-28T12:42:21Z"
+      }
+    ]
   }
 ]
